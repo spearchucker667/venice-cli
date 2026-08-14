@@ -328,6 +328,16 @@ export function registerChatCommand(program: Command): void {
         }
       }
 
+      const lastConv = options.continue ? getLastConversation() : undefined;
+      const continuedCharacter = (options.character as string | undefined) || lastConv?.character;
+      if (continuedCharacter && useE2EE) {
+        console.error(formatError(
+          'Characters are applied server-side and cannot be used with E2EE. ' +
+          'Omit -c/--character or use --no-e2ee.'
+        ));
+        process.exit(1);
+      }
+
       // TEE-only mode: verify attestation without encryption
       if (useTEE && !useE2EE) {
         try {
@@ -355,16 +365,12 @@ export function registerChatCommand(program: Command): void {
       const messages: Message[] = [];
 
       // Handle --continue flag
-      if (options.continue) {
-        const lastConv = getLastConversation();
-        if (lastConv) {
-          // Cast messages to proper type
-          for (const msg of lastConv.messages) {
-            messages.push(msg as Message);
-          }
-          if (format === 'pretty') {
-            console.log(c.dim(`Continuing conversation (${lastConv.messages.length} previous messages)\n`));
-          }
+      if (lastConv) {
+        for (const msg of lastConv.messages) {
+          messages.push(msg as Message);
+        }
+        if (format === 'pretty') {
+          console.log(c.dim(`Continuing conversation (${lastConv.messages.length} previous messages)\n`));
         }
       }
 
@@ -382,8 +388,8 @@ export function registerChatCommand(program: Command): void {
 
       // Build venice_parameters
       const veniceParams: Record<string, unknown> = {};
-      if (options.character) {
-        veniceParams.character_slug = options.character;
+      if (continuedCharacter) {
+        veniceParams.character_slug = continuedCharacter;
       }
       if (options.webSearch) {
         veniceParams.enable_web_search = 'on';
@@ -418,7 +424,7 @@ export function registerChatCommand(program: Command): void {
           timestamp: new Date().toISOString(),
           messages,
           model,
-          character: options.character,
+          character: continuedCharacter,
         });
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
@@ -568,7 +574,12 @@ async function streamChat(
   // The Venice system prompt would be added server-side unencrypted, breaking E2EE
   const effectiveTools = e2eeContext ? undefined : tools;
   const effectiveVeniceParams = e2eeContext
-    ? { ...veniceParams, enable_web_search: undefined, include_venice_system_prompt: false }
+    ? {
+        ...veniceParams,
+        enable_web_search: undefined,
+        include_venice_system_prompt: false,
+        character_slug: undefined,
+      }
     : veniceParams;
 
   try {
@@ -664,7 +675,11 @@ async function streamChat(
 
         // Get follow-up response
         console.log('\n');
-        for await (const chunk of chatCompletionStream(messages, { model })) {
+        const followUpOptions: { model: string; venice_parameters?: Record<string, unknown> } = { model };
+        if (veniceParams && Object.keys(veniceParams).length > 0) {
+          followUpOptions.venice_parameters = veniceParams;
+        }
+        for await (const chunk of chatCompletionStream(messages, followUpOptions)) {
           if (chunk.content) {
             process.stdout.write(chunk.content);
           }
@@ -838,7 +853,7 @@ async function nonStreamChat(
     }
 
     // Get follow-up
-    const followUp = await chatCompletion(messages, { model });
+    const followUp = await chatCompletion(messages, chatOptions);
     outputResponse(followUp.content, format);
     
     if (followUp.usage && format === 'pretty') {
