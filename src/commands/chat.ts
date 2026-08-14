@@ -358,12 +358,21 @@ export function registerChatCommand(program: Command): void {
       if (options.continue) {
         const lastConv = getLastConversation();
         if (lastConv) {
-          // Cast messages to proper type
+          const currentPrivacy = useE2EE ? 'e2ee' : useTEE ? 'tee' : 'plain';
+          const continueError = continueConversationError(lastConv, {
+            model,
+            privacy: currentPrivacy,
+          });
+          if (continueError) {
+            console.error(formatError(continueError));
+            process.exit(1);
+          }
           for (const msg of lastConv.messages) {
             messages.push(msg as Message);
           }
           if (format === 'pretty') {
             console.log(c.dim(`Continuing conversation (${lastConv.messages.length} previous messages)\n`));
+            console.log(c.dim('Note: --continue replays local history and is not covered by TEE/E2EE enclave guarantees.\n'));
           }
         }
       }
@@ -414,14 +423,16 @@ export function registerChatCommand(program: Command): void {
           await nonStreamChat(messages, model, tools, options.interactiveTools, format, veniceParams, e2eeContext, options.quiet);
         }
 
-        // Save to history (don't save encrypted content)
-        addConversation({
-          id: randomUUID(),
-          timestamp: new Date().toISOString(),
-          messages,
-          model,
-          character: options.character,
-        });
+        if (!useE2EE && !useTEE) {
+          addConversation({
+            id: randomUUID(),
+            timestamp: new Date().toISOString(),
+            messages,
+            model,
+            character: options.character,
+            privacy: 'plain',
+          });
+        }
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);
@@ -904,4 +915,27 @@ function getCharacterPrompt(character: string): string | undefined {
 
 export function getAvailableCharacters(): string[] {
   return Object.keys(CHARACTER_PROMPTS);
+}
+
+export function continueConversationError(
+  lastConv: { model: string; privacy?: string },
+  current: { model: string; privacy: 'plain' | 'e2ee' | 'tee' }
+): string | undefined {
+  const previousPrivacy = lastConv.privacy || 'plain';
+
+  if (previousPrivacy !== current.privacy) {
+    return (
+      `Cannot continue a ${previousPrivacy} conversation with a ${current.privacy} session. ` +
+      'Start a new chat or match the previous privacy mode.'
+    );
+  }
+
+  if ((current.privacy === 'e2ee' || current.privacy === 'tee') && lastConv.model !== current.model) {
+    return (
+      `Cannot continue a ${current.privacy} conversation with a different model ` +
+      `(was ${lastConv.model}, now ${current.model}).`
+    );
+  }
+
+  return undefined;
 }

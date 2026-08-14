@@ -126,6 +126,7 @@ export interface ConversationEntry {
   messages: Array<{ role: string; content: string }>;
   model: string;
   character?: string;
+  privacy?: 'plain' | 'e2ee' | 'tee';
 }
 
 export function loadHistory(): ConversationEntry[] {

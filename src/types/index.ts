@@ -80,12 +80,15 @@ export interface SearchOptions {
   format?: OutputFormat;
 }
 
+export type ConversationPrivacy = 'plain' | 'e2ee' | 'tee';
+
 export interface ConversationEntry {
   id: string;
   timestamp: string;
   messages: Message[];
   model: string;
   character?: string;
+  privacy?: ConversationPrivacy;
 }
 
 export interface UsageRecord {
