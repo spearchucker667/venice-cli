@@ -329,9 +329,10 @@ export function registerChatCommand(program: Command): void {
       }
 
       const lastConv = options.continue ? getLastConversation() : undefined;
-      const continuedCharacter = options.character
+      const historyCharacter = options.character
         ? String(options.character)
-        : (useE2EE ? undefined : apiCharacterSlug(lastConv?.character));
+        : apiCharacterSlug(lastConv?.character);
+      const continuedCharacter = useE2EE ? undefined : historyCharacter;
       if (options.character && useE2EE) {
         console.error(formatError(
           'Characters are applied server-side and cannot be used with E2EE. ' +
@@ -426,7 +427,7 @@ export function registerChatCommand(program: Command): void {
           timestamp: new Date().toISOString(),
           messages,
           model,
-          character: continuedCharacter,
+          character: historyCharacter,
         });
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
