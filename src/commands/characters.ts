@@ -4,7 +4,7 @@
 
 import { Command } from 'commander';
 import { getCharacter, getCharacterReviews, listCharacters } from '../lib/api.js';
-import { formatError, getChalk, detectOutputFormat } from '../lib/output.js';
+import { formatError, getChalk, detectOutputFormat, sanitizeTerminalText } from '../lib/output.js';
 import type { Character, CharacterReviewsPage } from '../types/index.js';
 
 export function registerCharactersCommand(program: Command): void {
@@ -79,15 +79,15 @@ export function registerCharactersCommand(program: Command): void {
 
           for (const review of reviews.data) {
             const stars = '★'.repeat(review.rating) + '☆'.repeat(Math.max(0, 5 - review.rating));
-            console.log(`  ${c.yellow(stars)}  ${c.cyan(review.username)}`);
+            console.log(`  ${c.yellow(stars)}  ${c.cyan(sanitizeTerminalText(review.username))}`);
             if (review.message) {
-              console.log(`    ${review.message}`);
+              console.log(`    ${sanitizeTerminalText(review.message)}`);
             }
             console.log('');
           }
         }
 
-        console.log(c.dim(`Usage: venice chat -c ${character.slug} "Your message"`));
+        console.log(c.dim(`Usage: venice chat -c ${sanitizeTerminalText(character.slug)} "Your message"`));
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);
@@ -106,33 +106,37 @@ async function fetchReviewsOptional(slug: string): Promise<CharacterReviewsPage 
 function printCharacterSummary(character: Character): void {
   const c = getChalk();
   const featured = character.featured ? ` ${c.yellow('★')}` : '';
-  console.log(`${c.cyan(c.bold(character.slug))} — ${character.name}${featured}`);
+  const slug = sanitizeTerminalText(character.slug);
+  const name = sanitizeTerminalText(character.name);
+  console.log(`${c.cyan(c.bold(slug))} — ${name}${featured}`);
   if (character.description) {
-    console.log(`  ${c.dim(truncate(character.description, 140))}`);
+    console.log(`  ${c.dim(truncate(sanitizeTerminalText(character.description), 140))}`);
   }
   if (character.tags?.length) {
-    console.log(`  ${c.dim(character.tags.slice(0, 6).join(', '))}`);
+    console.log(`  ${c.dim(character.tags.slice(0, 6).map(sanitizeTerminalText).join(', '))}`);
   }
   console.log('');
 }
 
 function printCharacterDetails(character: Character): void {
   const c = getChalk();
+  const slug = sanitizeTerminalText(character.slug);
+  const name = sanitizeTerminalText(character.name);
 
   console.log('');
-  console.log(`${c.cyan(c.bold(character.slug))} — ${c.bold(character.name)}`);
+  console.log(`${c.cyan(c.bold(slug))} — ${c.bold(name)}`);
   console.log('');
 
   if (character.description) {
-    console.log(character.description);
+    console.log(sanitizeTerminalText(character.description));
     console.log('');
   }
 
   if (character.tags?.length) {
-    console.log(`${c.dim('Tags:')} ${character.tags.join(', ')}`);
+    console.log(`${c.dim('Tags:')} ${character.tags.map(sanitizeTerminalText).join(', ')}`);
   }
   if (character.modelId) {
-    console.log(`${c.dim('Model:')} ${character.modelId}`);
+    console.log(`${c.dim('Model:')} ${sanitizeTerminalText(character.modelId)}`);
   }
   if (character.stats) {
     console.log(
@@ -142,7 +146,7 @@ function printCharacterDetails(character: Character): void {
   console.log(`${c.dim('Featured:')} ${character.featured ? 'yes' : 'no'}`);
   console.log(`${c.dim('Adult:')} ${character.adult ? 'yes' : 'no'}`);
   if (character.shareUrl) {
-    console.log(`${c.dim('Share:')} ${character.shareUrl}`);
+    console.log(`${c.dim('Share:')} ${sanitizeTerminalText(character.shareUrl)}`);
   }
   console.log('');
 }
