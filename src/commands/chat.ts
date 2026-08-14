@@ -932,46 +932,37 @@ export function continueConversationError(
   lastConv: { model: string; privacy?: string },
   current: { model: string; privacy: 'plain' | 'e2ee' | 'tee' }
 ): string | undefined {
-  if (!lastConv.privacy) {
-    if (modelImpliesPrivateHistory(lastConv.model) && current.privacy === 'plain') {
-      return (
-        'Cannot continue a conversation from an E2EE/TEE model into a plaintext session. ' +
-        'Start a new chat or continue with the same private model.'
-      );
-    }
-    if (
-      !modelImpliesPrivateHistory(lastConv.model) &&
-      (current.privacy === 'e2ee' || current.privacy === 'tee')
-    ) {
-      return (
-        'Cannot continue a plaintext conversation with an E2EE/TEE session. ' +
-        'Start a new chat or continue with a non-private model.'
-      );
-    }
-    if (
-      modelImpliesPrivateHistory(lastConv.model) &&
-      (current.privacy === 'e2ee' || current.privacy === 'tee') &&
-      lastConv.model !== current.model
-    ) {
-      return (
-        `Cannot continue a private conversation with a different model ` +
-        `(was ${lastConv.model}, now ${current.model}).`
-      );
-    }
-    return undefined;
-  }
+  const lastPrivate =
+    lastConv.privacy === 'e2ee' ||
+    lastConv.privacy === 'tee' ||
+    modelImpliesPrivateHistory(lastConv.model);
+  const currentPrivate =
+    current.privacy === 'e2ee' ||
+    current.privacy === 'tee' ||
+    modelImpliesPrivateHistory(current.model);
 
-  if (lastConv.privacy !== current.privacy) {
+  if (lastPrivate !== currentPrivate) {
     return (
-      `Cannot continue a ${lastConv.privacy} conversation with a ${current.privacy} session. ` +
+      'Cannot continue a conversation across plaintext and E2EE/TEE sessions. ' +
       'Start a new chat or match the previous privacy mode.'
     );
   }
 
-  if ((current.privacy === 'e2ee' || current.privacy === 'tee') && lastConv.model !== current.model) {
+  if (lastPrivate && lastConv.model !== current.model) {
     return (
-      `Cannot continue a ${current.privacy} conversation with a different model ` +
+      `Cannot continue a private conversation with a different model ` +
       `(was ${lastConv.model}, now ${current.model}).`
+    );
+  }
+
+  if (
+    (lastConv.privacy === 'e2ee' || lastConv.privacy === 'tee') &&
+    (current.privacy === 'e2ee' || current.privacy === 'tee') &&
+    lastConv.privacy !== current.privacy
+  ) {
+    return (
+      `Cannot continue a ${lastConv.privacy} conversation with a ${current.privacy} session. ` +
+      'Start a new chat or match the previous privacy mode.'
     );
   }
 

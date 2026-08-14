@@ -2,20 +2,22 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { continueConversationError } from './chat.js';
 
+const mixError = /across plaintext and E2EE\/TEE sessions/;
+
 test('continueConversationError rejects E2EE/plain mixing', () => {
   assert.match(
     continueConversationError(
       { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'e2ee' },
       { model: 'kimi-k2-5', privacy: 'plain' }
     ) || '',
-    /Cannot continue a e2ee conversation with a plain session/
+    mixError
   );
   assert.match(
     continueConversationError(
       { model: 'kimi-k2-5', privacy: 'plain' },
       { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'e2ee' }
     ) || '',
-    /Cannot continue a plain conversation with a e2ee session/
+    mixError
   );
 });
 
@@ -45,14 +47,14 @@ test('continueConversationError rejects untagged private-model history into plai
       { model: 'e2ee-qwen3-5-122b-a10b' },
       { model: 'kimi-k2-5', privacy: 'plain' }
     ) || '',
-    /E2EE\/TEE model into a plaintext session/
+    mixError
   );
   assert.match(
     continueConversationError(
       { model: 'tee-qwen3-5-122b-a10b' },
       { model: 'kimi-k2-5', privacy: 'plain' }
     ) || '',
-    /E2EE\/TEE model into a plaintext session/
+    mixError
   );
 });
 
@@ -62,7 +64,7 @@ test('continueConversationError rejects untagged plaintext history into E2EE/TEE
       { model: 'kimi-k2-5' },
       { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'e2ee' }
     ) || '',
-    /plaintext conversation with an E2EE\/TEE session/
+    mixError
   );
 });
 
@@ -73,5 +75,15 @@ test('continueConversationError allows untagged private-model history into the s
       { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'tee' }
     ),
     undefined
+  );
+});
+
+test('continueConversationError rejects plain-tagged private-model history into another plain model', () => {
+  assert.match(
+    continueConversationError(
+      { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'plain' },
+      { model: 'kimi-k2-5', privacy: 'plain' }
+    ) || '',
+    mixError
   );
 });
