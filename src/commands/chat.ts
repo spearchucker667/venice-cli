@@ -330,7 +330,8 @@ export function registerChatCommand(program: Command): void {
 
       const lastConv = options.continue ? getLastConversation() : undefined;
       const continuedCharacter =
-        (options.character as string | undefined) || apiCharacterSlug(lastConv?.character);
+        apiCharacterSlug(options.character as string | undefined) ||
+        apiCharacterSlug(lastConv?.character);
       if (continuedCharacter && useE2EE) {
         console.error(formatError(
           'Characters are applied server-side and cannot be used with E2EE. ' +
