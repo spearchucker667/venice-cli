@@ -10,6 +10,7 @@ export const MAX_VIDEO_DOWNLOAD_BYTES = 1024 * MB;
 export const MAX_UPSCALE_IMAGE_BYTES = 25 * MB;
 export const MAX_TRANSCRIPTION_AUDIO_BYTES = 200 * MB;
 export const MAX_VIDEO_REFERENCE_IMAGE_BYTES = 20 * MB;
+export const MAX_DOCUMENT_PARSE_BYTES = 25 * MB;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 120000;
 
 export function formatBytes(bytes: number): string {
@@ -63,6 +64,11 @@ export function mimeTypeFromPath(filePath: string, fallback = 'application/octet
     '.flac': 'audio/flac',
     '.aac': 'audio/aac',
     '.m4a': 'audio/mp4',
+    '.pdf': 'application/pdf',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.txt': 'text/plain',
   };
 
   return mimeByExtension[ext] || fallback;
