@@ -337,6 +337,7 @@ export function registerChatCommand(program: Command): void {
             model,
             privacy: currentPrivacy,
             lastModel: catalog.find((m) => m.id === lastConv.model),
+            catalogAvailable: catalog.length > 0,
           });
           if (continueError) {
             console.error(formatError(continueError));
@@ -932,7 +933,12 @@ export function modelImpliesPrivateHistory(modelId: string): boolean {
 
 export function continueConversationError(
   lastConv: { model: string; privacy?: string },
-  current: { model: string; privacy: 'plain' | 'e2ee' | 'tee'; lastModel?: Model }
+  current: {
+    model: string;
+    privacy: 'plain' | 'e2ee' | 'tee';
+    lastModel?: Model;
+    catalogAvailable?: boolean;
+  }
 ): string | undefined {
   const lastPrivate =
     lastConv.privacy === 'e2ee' ||
@@ -943,6 +949,13 @@ export function continueConversationError(
     current.privacy === 'e2ee' ||
     current.privacy === 'tee' ||
     modelImpliesPrivateHistory(current.model);
+
+  if (current.catalogAvailable === false && !lastConv.privacy && lastConv.model !== current.model) {
+    return (
+      'Cannot continue this conversation because model capabilities could not be confirmed. ' +
+      'Retry when /models is reachable, or start a new chat.'
+    );
+  }
 
   if (lastPrivate !== currentPrivate) {
     return (
