@@ -662,67 +662,79 @@ export async function generateEmbeddings(
   return response.data;
 }
 
+const MODELS_CACHE_TTL_MS = 60_000;
+let modelsCache: { models: Model[]; fetchedAt: number } | null = null;
+
+export function clearModelsCache(): void {
+  modelsCache = null;
+}
+
+function mergeModel(merged: Map<string, Model>, model: Model, requestedType?: string): void {
+  const normalized: Model = { ...model };
+
+  if (requestedType && (!normalized.type || normalized.type.toLowerCase() === 'text')) {
+    normalized.type = requestedType;
+  }
+
+  const key = normalized.id || JSON.stringify(normalized);
+  const existing = merged.get(key);
+
+  if (!existing) {
+    merged.set(key, normalized);
+    return;
+  }
+
+  const existingType = (existing.type || '').toLowerCase();
+  const normalizedType = (normalized.type || '').toLowerCase();
+  if (existingType === 'text' && normalizedType && normalizedType !== 'text') {
+    merged.set(key, normalized);
+  }
+}
+
 // List models
 export async function listModels(
   options: { showSpinner?: boolean } = {}
 ): Promise<Model[]> {
   const { showSpinner: showSpinnerOption = true } = options;
+
+  if (modelsCache && Date.now() - modelsCache.fetchedAt < MODELS_CACHE_TTL_MS) {
+    return modelsCache.models;
+  }
+
   const modelTypes = ['text', 'asr', 'embedding', 'image', 'tts', 'upscale', 'inpaint', 'video'];
   const merged = new Map<string, Model>();
 
-  // API defaults to text-only when no type is provided, so iterate known types
-  const requests: Array<{ endpoint: string; requestedType?: string; showSpinner: boolean }> = [
-    { endpoint: '/models', showSpinner: showSpinnerOption },
-    ...modelTypes.map((type) => ({
-      endpoint: `/models?type=${encodeURIComponent(type)}`,
-      requestedType: type,
+  const base = apiRequest<{ data: Model[] }>('/models', {
+    method: 'GET',
+    spinnerText: 'Fetching models...',
+    showSpinner: showSpinnerOption,
+  });
+
+  const typed = modelTypes.map((type) =>
+    apiRequest<{ data: Model[] }>(`/models?type=${encodeURIComponent(type)}`, {
+      method: 'GET',
       showSpinner: false,
-    })),
-  ];
+    })
+      .then((response) => ({ type, response }))
+      .catch(() => null)
+  );
 
-  for (const request of requests) {
-    try {
-      const response = await apiRequest<{ data: Model[] }>(request.endpoint, {
-        method: 'GET',
-        spinnerText: 'Fetching models...',
-        showSpinner: request.showSpinner,
-      });
+  const [baseResponse, ...typedResponses] = await Promise.all([base, ...typed]);
 
-      for (const model of response.data || []) {
-        const normalized: Model = { ...model };
+  for (const model of baseResponse.data || []) {
+    mergeModel(merged, model);
+  }
 
-        // Some API responses still label type as text; preserve requested typed endpoint info
-        if (
-          request.requestedType &&
-          (!normalized.type || normalized.type.toLowerCase() === 'text')
-        ) {
-          normalized.type = request.requestedType;
-        }
-
-        const key = normalized.id || JSON.stringify(normalized);
-        const existing = merged.get(key);
-
-        if (!existing) {
-          merged.set(key, normalized);
-          continue;
-        }
-
-        // Prefer non-text type metadata when deduplicating
-        const existingType = (existing.type || '').toLowerCase();
-        const normalizedType = (normalized.type || '').toLowerCase();
-        if (existingType === 'text' && normalizedType && normalizedType !== 'text') {
-          merged.set(key, normalized);
-        }
-      }
-    } catch (error) {
-      // Keep typed fallback resilient. If the base endpoint fails, surface the error.
-      if (!request.requestedType) {
-        throw error;
-      }
+  for (const entry of typedResponses) {
+    if (!entry) continue;
+    for (const model of entry.response.data || []) {
+      mergeModel(merged, model, entry.type);
     }
   }
 
-  return Array.from(merged.values());
+  const models = Array.from(merged.values());
+  modelsCache = { models, fetchedAt: Date.now() };
+  return models;
 }
 
 // List characters (if Venice supports this endpoint)
