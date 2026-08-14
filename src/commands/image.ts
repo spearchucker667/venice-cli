@@ -6,7 +6,7 @@ import { Command } from 'commander';
 import * as fs from 'fs';
 import * as path from 'path';
 import { generateImage, upscaleImage } from '../lib/api.js';
-import { downloadToFile, MAX_IMAGE_DOWNLOAD_BYTES } from '../lib/media.js';
+import { writeBufferToFile, MAX_IMAGE_DOWNLOAD_BYTES } from '../lib/media.js';
 import { getDefaultImageModel } from '../lib/config.js';
 import {
   formatSuccess,
@@ -111,20 +111,25 @@ export function registerImageCommand(program: Command): void {
           model: options.model,
           scale,
         });
+        const outputPath = options.output || `upscaled_${Date.now()}.png`;
+
+        writeBufferToFile(result.bytes, outputPath, {
+          maxBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+          label: 'Upscaled image',
+        });
 
         if (format === 'json') {
-          console.log(JSON.stringify(result, null, 2));
+          console.log(JSON.stringify({
+            output: outputPath,
+            bytes: result.bytes.length,
+            content_type: result.contentType,
+          }, null, 2));
           return;
         }
 
-        if (options.output) {
-          await downloadToFile(result.url, options.output, {
-            maxBytes: MAX_IMAGE_DOWNLOAD_BYTES,
-            expectedContentTypePrefixes: ['image/'],
-          });
-          console.log(formatSuccess(`Saved upscaled image to ${options.output}`));
-        } else {
-          console.log(`${c.cyan('🖼️  Upscaled URL:')} ${result.url}`);
+        console.log(formatSuccess(`Saved upscaled image to ${outputPath}`));
+        if (!options.output) {
+          console.log(`${c.dim('Tip: pass -o to choose the output path')}`);
         }
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
