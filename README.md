@@ -54,6 +54,7 @@ npx veniceai-cli chat 'Hello, world!'
 - 🖼️ **Image Generation** from text prompts
 - 🔊 **Text-to-Speech** with 35+ voices across languages
 - 🎤 **Speech-to-Text** transcription with timestamps
+- 🎵 **Music & Sound Effects Generation** with asynchronous job handling
 - 🎬 **Video Generation** (text-to-video, image-to-video)
 - 📐 **Embeddings** generation
 - 🔧 **Function Calling** with built-in tools
@@ -245,6 +246,39 @@ venice video models
 - **Grok Imagine**: `grok-imagine-text-to-video`, `grok-imagine-image-to-video`
 - **LTX2**: `ltx2-fast-text-to-video`, `ltx2-fast-image-to-video`
 
+### Music & Sound Effects
+
+Generate songs, instrumental tracks, and sound effects with Venice's asynchronous audio pipeline.
+
+```bash
+# List current models and their capabilities
+venice music models
+
+# Get a price quote
+venice music quote -m elevenlabs-music -d 60
+
+# Queue instrumental music
+venice music generate -m elevenlabs-music -d 60 --instrumental \
+  "Lofi beat on a rainy night"
+
+# Generate a song using lyrics from a file
+venice music generate -m elevenlabs-music --lyrics lyrics.txt \
+  "A folk song about the sea"
+
+# Check once, or poll until complete
+venice music status <queue_id> -m elevenlabs-music
+venice music status <queue_id> -m elevenlabs-music --wait
+
+# Download the finished audio
+venice music retrieve <queue_id> -m elevenlabs-music -o song.mp3
+```
+
+`retrieve` removes the remote media after a successful local write. Pass `--keep`
+to retain it, or use `venice music complete <queue_id> -m <model>` to clean it
+up later. Optional generation fields are model-specific; inspect
+`venice music models --format json` before using lyrics, duration, or
+instrumental mode.
+
 ### TEE Attestation
 
 Venice supports Trusted Execution Environment (TEE) attestation for models running in secure enclaves. This provides cryptographic proof that your data is processed in a trusted environment.
@@ -282,7 +316,7 @@ venice models
 
 # Filter by type
 venice models -t image
-venice models -t audio
+venice models -t music
 
 # Show only privacy-preserving models
 venice models --privacy
