@@ -1,10 +1,31 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { apiCharacterSlug } from './chat.js';
+import { isLegacyLocalCharacter, restoreCharacterSlug } from './chat.js';
 
-test('apiCharacterSlug ignores legacy local persona names', () => {
-  assert.equal(apiCharacterSlug('pirate'), undefined);
-  assert.equal(apiCharacterSlug('Wizard'), undefined);
-  assert.equal(apiCharacterSlug('alan-watts'), 'alan-watts');
-  assert.equal(apiCharacterSlug(undefined), undefined);
+test('isLegacyLocalCharacter only matches the old built-in personas', () => {
+  assert.equal(isLegacyLocalCharacter('pirate'), true);
+  assert.equal(isLegacyLocalCharacter('Wizard'), true);
+  assert.equal(isLegacyLocalCharacter('alan-watts'), false);
+  assert.equal(isLegacyLocalCharacter(undefined), false);
+});
+
+test('restoreCharacterSlug keeps catalog slugs that collide with old persona names', () => {
+  assert.equal(
+    restoreCharacterSlug({ character: 'poet', messages: [{ role: 'user' }] }),
+    'poet'
+  );
+  assert.equal(
+    restoreCharacterSlug({ character: 'alan-watts', messages: [{ role: 'user' }] }),
+    'alan-watts'
+  );
+});
+
+test('restoreCharacterSlug skips old local personas that already have a system prompt', () => {
+  assert.equal(
+    restoreCharacterSlug({
+      character: 'pirate',
+      messages: [{ role: 'system' }, { role: 'user' }],
+    }),
+    undefined
+  );
 });

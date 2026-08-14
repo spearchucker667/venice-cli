@@ -23,6 +23,7 @@ import {
 import {
   formatUsage,
   formatError,
+  formatWarning,
   getChalk,
   startSpinner,
   clearSpinner,
@@ -329,9 +330,17 @@ export function registerChatCommand(program: Command): void {
       }
 
       const lastConv = options.continue ? getLastConversation() : undefined;
+      if (options.character && isLegacyLocalCharacter(options.character)) {
+        console.error(formatError(
+          `Local persona "${options.character}" is no longer built in. ` +
+          'Use a catalog slug from `venice characters`.'
+        ));
+        process.exit(1);
+      }
+
       const historyCharacter = options.character
         ? String(options.character)
-        : apiCharacterSlug(lastConv?.character);
+        : restoreCharacterSlug(lastConv);
       const continuedCharacter = useE2EE ? undefined : historyCharacter;
       if (options.character && useE2EE) {
         console.error(formatError(
@@ -339,6 +348,11 @@ export function registerChatCommand(program: Command): void {
           'Omit -c/--character or use --no-e2ee.'
         ));
         process.exit(1);
+      }
+      if (useE2EE && historyCharacter && !options.character && format === 'pretty' && !options.quiet) {
+        console.log(formatWarning(
+          `Saved character "${historyCharacter}" will not be applied; E2EE cannot use server-side personas.`
+        ));
       }
 
       // TEE-only mode: verify attestation without encryption
@@ -909,8 +923,20 @@ const LEGACY_LOCAL_CHARACTERS = new Set([
   'philosopher',
 ]);
 
-export function apiCharacterSlug(character?: string): string | undefined {
-  if (!character) return undefined;
-  if (LEGACY_LOCAL_CHARACTERS.has(character.toLowerCase())) return undefined;
-  return character;
+export function isLegacyLocalCharacter(character?: string): boolean {
+  return Boolean(character && LEGACY_LOCAL_CHARACTERS.has(character.toLowerCase()));
+}
+
+export function restoreCharacterSlug(lastConv?: {
+  character?: string;
+  messages?: Array<{ role: string }>;
+}): string | undefined {
+  if (!lastConv?.character) return undefined;
+  if (
+    isLegacyLocalCharacter(lastConv.character) &&
+    lastConv.messages?.some((message) => message.role === 'system')
+  ) {
+    return undefined;
+  }
+  return lastConv.character;
 }
