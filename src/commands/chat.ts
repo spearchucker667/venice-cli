@@ -329,7 +329,8 @@ export function registerChatCommand(program: Command): void {
       }
 
       const lastConv = options.continue ? getLastConversation() : undefined;
-      const continuedCharacter = (options.character as string | undefined) || lastConv?.character;
+      const continuedCharacter =
+        (options.character as string | undefined) || apiCharacterSlug(lastConv?.character);
       if (continuedCharacter && useE2EE) {
         console.error(formatError(
           'Characters are applied server-side and cannot be used with E2EE. ' +
@@ -853,7 +854,10 @@ async function nonStreamChat(
     }
 
     // Get follow-up
-    const followUp = await chatCompletion(messages, chatOptions);
+    const followUp = await chatCompletion(messages, {
+      model,
+      venice_parameters: chatOptions.venice_parameters,
+    });
     outputResponse(followUp.content, format);
     
     if (followUp.usage && format === 'pretty') {
@@ -890,4 +894,21 @@ async function readStdin(): Promise<string> {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf-8').trim();
+}
+
+const LEGACY_LOCAL_CHARACTERS = new Set([
+  'pirate',
+  'wizard',
+  'scientist',
+  'poet',
+  'coder',
+  'teacher',
+  'comedian',
+  'philosopher',
+]);
+
+export function apiCharacterSlug(character?: string): string | undefined {
+  if (!character) return undefined;
+  if (LEGACY_LOCAL_CHARACTERS.has(character.toLowerCase())) return undefined;
+  return character;
 }
