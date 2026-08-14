@@ -779,17 +779,19 @@ export async function queueVideoGeneration(
   return response;
 }
 
-// Video generation - check status / retrieve result
-export async function getVideoStatus(
-  queueId: string,
-  model: string
-): Promise<{
-  status: 'PROCESSING' | 'completed' | 'failed';
+export interface VideoStatusResult {
+  status: string;
   average_execution_time?: number;
   execution_duration?: number;
   video_url?: string;
   error?: string;
-}> {
+}
+
+// Video generation - check status / retrieve result
+export async function getVideoStatus(
+  queueId: string,
+  model: string
+): Promise<VideoStatusResult> {
   return apiRequest('/video/retrieve', {
     method: 'POST',
     body: { queue_id: queueId, model },

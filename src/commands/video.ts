@@ -5,7 +5,12 @@
 import { Command } from 'commander';
 import * as fs from 'fs';
 import * as path from 'path';
-import { queueVideoGeneration, getVideoStatus, retrieveVideo } from '../lib/api.js';
+import {
+  queueVideoGeneration,
+  getVideoStatus,
+  retrieveVideo,
+  type VideoStatusResult,
+} from '../lib/api.js';
 import {
   downloadToFile,
   assertFileSizeWithinLimit,
@@ -42,6 +47,72 @@ const VIDEO_MODELS = [
   { id: 'ltx2-fast-text-to-video', name: 'LTX2 Fast T2V', type: 'text-to-video' },
   { id: 'ltx2-fast-image-to-video', name: 'LTX2 Fast I2V', type: 'image-to-video' },
 ];
+
+const DEFAULT_VIDEO_STATUS_TIMEOUT_SECONDS = 600;
+const VIDEO_STATUS_POLL_INTERVAL_MS = 5000;
+
+type VideoStatusPhase = 'processing' | 'completed' | 'failed' | 'other';
+
+export function classifyVideoStatus(status: string): VideoStatusPhase {
+  const normalized = status.trim().toLowerCase().replace(/[\s-]+/g, '_');
+
+  if (['processing', 'pending', 'queued', 'in_progress'].includes(normalized)) {
+    return 'processing';
+  }
+  if (['completed', 'complete', 'succeeded', 'success', 'done'].includes(normalized)) {
+    return 'completed';
+  }
+  if (['failed', 'failure', 'error', 'cancelled', 'canceled'].includes(normalized)) {
+    return 'failed';
+  }
+  return 'other';
+}
+
+export async function waitForVideoStatus(
+  fetchStatus: () => Promise<VideoStatusResult>,
+  timeoutMs: number,
+  pollIntervalMs = VIDEO_STATUS_POLL_INTERVAL_MS,
+  onPoll?: (status: VideoStatusResult) => void
+): Promise<VideoStatusResult> {
+  const deadline = Date.now() + timeoutMs;
+  const timeoutError = () =>
+    new Error(`Timed out waiting for video generation after ${Math.ceil(timeoutMs / 1000)} seconds.`);
+
+  const fetchBeforeDeadline = async (): Promise<VideoStatusResult> => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw timeoutError();
+    }
+
+    let timeoutId: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        fetchStatus(),
+        new Promise<never>((_resolve, reject) => {
+          timeoutId = setTimeout(() => reject(timeoutError()), remainingMs);
+        }),
+      ]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  };
+
+  let status = await fetchBeforeDeadline();
+  while (classifyVideoStatus(status.status) === 'processing') {
+    onPoll?.(status);
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw timeoutError();
+    }
+    await new Promise(resolve => setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)));
+    status = await fetchBeforeDeadline();
+  }
+
+  return status;
+}
 
 export function registerVideoCommands(program: Command): void {
   const video = program
@@ -112,27 +183,30 @@ export function registerVideoCommands(program: Command): void {
     .description('Check status of a video generation job')
     .requiredOption('-m, --model <model>', 'Model used for generation')
     .option('-w, --wait', 'Wait for completion (poll every 5s)')
+    .option(
+      '-t, --timeout <seconds>',
+      'Maximum time to wait in seconds',
+      String(DEFAULT_VIDEO_STATUS_TIMEOUT_SECONDS)
+    )
     .option('-f, --format <format>', 'Output format (pretty|json)')
     .action(async (queueId: string, options) => {
       const format = detectOutputFormat(options.format);
       const c = getChalk();
 
-      const checkStatus = async (): Promise<void> => {
-        const result = await getVideoStatus(queueId, options.model);
-
+      const printStatus = (result: VideoStatusResult): void => {
         if (format === 'json') {
           console.log(JSON.stringify(result, null, 2));
           return;
         }
 
-        const statusLabel = result.status.toLowerCase();
-        const statusColors: Record<string, (s: string) => string> = {
+        const statusColors: Record<VideoStatusPhase, (s: string) => string> = {
           processing: c.blue,
           completed: c.green,
           failed: c.red,
+          other: c.yellow,
         };
 
-        const colorFn = statusColors[statusLabel] || c.yellow;
+        const colorFn = statusColors[classifyVideoStatus(result.status)];
         console.log(`${c.dim('Status:')} ${colorFn(result.status)}`);
 
         if (result.average_execution_time) {
@@ -152,20 +226,27 @@ export function registerVideoCommands(program: Command): void {
 
       try {
         if (options.wait) {
-          let status = await getVideoStatus(queueId, options.model);
-          while (status.status === 'PROCESSING') {
-            const elapsed = status.execution_duration ? `${Math.ceil(status.execution_duration / 1000)}s` : '';
-            console.log(`Status: ${status.status}${elapsed ? ` (${elapsed} elapsed)` : ''} - waiting...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            status = await getVideoStatus(queueId, options.model);
+          const timeoutSeconds = Number(options.timeout);
+          if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+            throw new Error('--timeout must be a positive number of seconds.');
           }
-          if (format === 'json') {
-            console.log(JSON.stringify(status, null, 2));
-          } else {
-            await checkStatus();
-          }
+
+          const status = await waitForVideoStatus(
+            () => getVideoStatus(queueId, options.model),
+            timeoutSeconds * 1000,
+            VIDEO_STATUS_POLL_INTERVAL_MS,
+            currentStatus => {
+              const elapsed = currentStatus.execution_duration
+                ? `${Math.ceil(currentStatus.execution_duration / 1000)}s`
+                : '';
+              console.log(
+                `Status: ${currentStatus.status}${elapsed ? ` (${elapsed} elapsed)` : ''} - waiting...`
+              );
+            }
+          );
+          printStatus(status);
         } else {
-          await checkStatus();
+          printStatus(await getVideoStatus(queueId, options.model));
         }
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
