@@ -298,6 +298,9 @@ venice embeddings "Text to embed"
 
 # Save to file
 venice embeddings -o vectors.json "Text to embed"
+
+# From stdin
+echo "Text to embed" | venice embeddings
 ```
 
 ### Configuration
