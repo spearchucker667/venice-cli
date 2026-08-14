@@ -667,7 +667,7 @@ export async function listModels(
   options: { showSpinner?: boolean } = {}
 ): Promise<Model[]> {
   const { showSpinner: showSpinnerOption = true } = options;
-  const modelTypes = ['text', 'asr', 'embedding', 'image', 'tts', 'upscale', 'inpaint', 'video'];
+  const modelTypes = ['text', 'asr', 'embedding', 'image', 'tts', 'upscale', 'inpaint', 'video', 'music'];
   const merged = new Map<string, Model>();
 
   // API defaults to text-only when no type is provided, so iterate known types
@@ -811,6 +811,136 @@ export async function retrieveVideo(
     method: 'POST',
     body: { queue_id: queueId, model, delete_media_on_completion: false },
     spinnerText: 'Retrieving video...',
+  });
+}
+
+export interface AudioGenerationOptions {
+  model: string;
+  durationSeconds?: number;
+  lyricsPrompt?: string;
+  forceInstrumental?: boolean;
+}
+
+export interface AudioProcessingStatus {
+  status: string;
+  average_execution_time?: number;
+  execution_duration?: number;
+  error?: string;
+}
+
+export type AudioRetrieveResult =
+  | { kind: 'processing'; status: AudioProcessingStatus }
+  | { kind: 'audio'; response: Response; contentType: string; sizeBytes?: number };
+
+function audioGenerationBody(
+  prompt: string,
+  options: AudioGenerationOptions
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: options.model,
+    prompt,
+  };
+
+  if (options.durationSeconds !== undefined) {
+    body.duration_seconds = options.durationSeconds;
+  }
+  if (options.lyricsPrompt !== undefined) {
+    body.lyrics_prompt = options.lyricsPrompt;
+  }
+  if (options.forceInstrumental !== undefined) {
+    body.force_instrumental = options.forceInstrumental;
+  }
+
+  return body;
+}
+
+// Music and sound effects - get a price quote
+export async function quoteAudioGeneration(
+  model: string,
+  options: { durationSeconds?: number; characterCount?: number } = {}
+): Promise<{ quote: number }> {
+  const body: Record<string, unknown> = { model };
+  if (options.durationSeconds !== undefined) {
+    body.duration_seconds = options.durationSeconds;
+  }
+  if (options.characterCount !== undefined) {
+    body.character_count = options.characterCount;
+  }
+
+  return apiRequest('/audio/quote', {
+    method: 'POST',
+    body,
+    spinnerText: 'Fetching audio quote...',
+  });
+}
+
+// Music and sound effects - queue a generation job
+export async function queueAudioGeneration(
+  prompt: string,
+  options: AudioGenerationOptions
+): Promise<{ model: string; queue_id: string; status: string }> {
+  const response = await apiRequest<{
+    model: string;
+    queue_id: string;
+    status: string;
+  }>('/audio/queue', {
+    method: 'POST',
+    body: audioGenerationBody(prompt, options),
+    spinnerText: 'Queueing audio generation...',
+  });
+
+  trackUsage({ command: 'music', model: options.model });
+  return response;
+}
+
+// Music and sound effects - retrieve processing status or completed binary audio
+export async function retrieveGeneratedAudio(
+  queueId: string,
+  model: string
+): Promise<AudioRetrieveResult> {
+  const response = await apiRequest<Response>('/audio/retrieve', {
+    method: 'POST',
+    body: { queue_id: queueId, model, delete_media_on_completion: false },
+    stream: true,
+    showSpinner: false,
+  });
+  const contentType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() || '';
+
+  if (contentType === 'application/json') {
+    return {
+      kind: 'processing',
+      status: await response.json() as AudioProcessingStatus,
+    };
+  }
+
+  if (!['audio/mpeg', 'audio/wav', 'audio/flac'].includes(contentType)) {
+    throw new Error(
+      `Unexpected audio response content type "${contentType || 'missing'}".`
+    );
+  }
+
+  return {
+    kind: 'audio',
+    response,
+    contentType,
+    sizeBytes: (() => {
+      const value = response.headers.get('content-length');
+      if (!value) return undefined;
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+    })(),
+  };
+}
+
+// Music and sound effects - clean up stored media after a successful download
+export async function completeAudioGeneration(
+  queueId: string,
+  model: string
+): Promise<{ success: boolean }> {
+  return apiRequest('/audio/complete', {
+    method: 'POST',
+    body: { queue_id: queueId, model },
+    spinnerText: 'Cleaning up generated audio...',
   });
 }
 

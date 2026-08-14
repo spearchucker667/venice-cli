@@ -15,7 +15,7 @@ export function registerModelsCommand(program: Command): void {
   program
     .command('models')
     .description('List available models')
-    .option('-t, --type <type>', 'Filter by type (all|text|image|tts|asr|embedding|video|upscale|inpaint)')
+    .option('-t, --type <type>', 'Filter by type (all|text|image|tts|asr|music|embedding|video|upscale|inpaint)')
     .option('-s, --search <query>', 'Search models by name')
     .option('--privacy', 'Show only privacy-preserving models')
     .option('-f, --format <format>', 'Output format (pretty|json)')
@@ -120,6 +120,8 @@ function groupModelsByType(models: Model[]): Record<string, Model[]> {
       type = 'embedding';
     } else if (apiType === 'video') {
       type = 'video';
+    } else if (apiType === 'music') {
+      type = 'music';
     }
 
     if (!groups[type]) {
@@ -138,6 +140,7 @@ function getTypeEmoji(type: string): string {
     inpaint: '🖼️',
     upscale: '🖼️',
     audio: '🎵',
+    music: '🎶',
     embedding: '📐',
     video: '🎬',
     other: '📦',
