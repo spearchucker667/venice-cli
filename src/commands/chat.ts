@@ -328,6 +328,21 @@ export function registerChatCommand(program: Command): void {
         }
       }
 
+      if (options.continue) {
+        const lastConv = getLastConversation();
+        if (lastConv) {
+          const currentPrivacy = useE2EE ? 'e2ee' : useTEE ? 'tee' : 'plain';
+          const continueError = continueConversationError(lastConv, {
+            model,
+            privacy: currentPrivacy,
+          });
+          if (continueError) {
+            console.error(formatError(continueError));
+            process.exit(1);
+          }
+        }
+      }
+
       // TEE-only mode: verify attestation without encryption
       if (useTEE && !useE2EE) {
         try {
@@ -358,15 +373,6 @@ export function registerChatCommand(program: Command): void {
       if (options.continue) {
         const lastConv = getLastConversation();
         if (lastConv) {
-          const currentPrivacy = useE2EE ? 'e2ee' : useTEE ? 'tee' : 'plain';
-          const continueError = continueConversationError(lastConv, {
-            model,
-            privacy: currentPrivacy,
-          });
-          if (continueError) {
-            console.error(formatError(continueError));
-            process.exit(1);
-          }
           for (const msg of lastConv.messages) {
             messages.push(msg as Message);
           }
@@ -917,29 +923,38 @@ export function getAvailableCharacters(): string[] {
   return Object.keys(CHARACTER_PROMPTS);
 }
 
-export function inferConversationPrivacy(lastConv: {
-  model: string;
-  privacy?: string;
-}): 'plain' | 'e2ee' | 'tee' {
-  if (lastConv.privacy === 'e2ee' || lastConv.privacy === 'tee' || lastConv.privacy === 'plain') {
-    return lastConv.privacy;
-  }
-
-  const id = lastConv.model.toLowerCase();
-  if (id.includes('e2ee')) return 'e2ee';
-  if (id.startsWith('tee-') || id.includes('-tee')) return 'tee';
-  return 'plain';
+export function modelImpliesPrivateHistory(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  return id.includes('e2ee') || id.startsWith('tee-') || id.includes('-tee');
 }
 
 export function continueConversationError(
   lastConv: { model: string; privacy?: string },
   current: { model: string; privacy: 'plain' | 'e2ee' | 'tee' }
 ): string | undefined {
-  const previousPrivacy = inferConversationPrivacy(lastConv);
+  if (!lastConv.privacy) {
+    if (modelImpliesPrivateHistory(lastConv.model) && current.privacy === 'plain') {
+      return (
+        'Cannot continue a conversation from an E2EE/TEE model into a plaintext session. ' +
+        'Start a new chat or continue with the same private model.'
+      );
+    }
+    if (
+      modelImpliesPrivateHistory(lastConv.model) &&
+      (current.privacy === 'e2ee' || current.privacy === 'tee') &&
+      lastConv.model !== current.model
+    ) {
+      return (
+        `Cannot continue a private conversation with a different model ` +
+        `(was ${lastConv.model}, now ${current.model}).`
+      );
+    }
+    return undefined;
+  }
 
-  if (previousPrivacy !== current.privacy) {
+  if (lastConv.privacy !== current.privacy) {
     return (
-      `Cannot continue a ${previousPrivacy} conversation with a ${current.privacy} session. ` +
+      `Cannot continue a ${lastConv.privacy} conversation with a ${current.privacy} session. ` +
       'Start a new chat or match the previous privacy mode.'
     );
   }
