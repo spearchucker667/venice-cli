@@ -8,7 +8,13 @@ import { requireApiKey, trackUsage } from './config.js';
 import { startSpinner, stopSpinner } from './output.js';
 import { getVersion } from './version.js';
 import { Readable } from 'stream';
-import type { Message, ToolDefinition, Model, Character } from '../types/index.js';
+import type {
+  Message,
+  ToolDefinition,
+  Model,
+  Character,
+  ImageGenerationOptions,
+} from '../types/index.js';
 import {
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
@@ -375,27 +381,53 @@ export async function* chatCompletionStream(
 }
 
 // Image generation (Venice-native endpoint)
-export async function generateImage(
+export function buildImageGenerationBody(
   prompt: string,
-  options: {
-    model?: string;
-    width?: number;
-    height?: number;
-    n?: number;
-    format?: 'png' | 'jpeg' | 'webp';
-  } = {}
-): Promise<string[]> {
+  options: Omit<ImageGenerationOptions, 'output'> = {}
+): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: options.model || 'flux-2-pro',
     prompt,
-    width: options.width || 1024,
-    height: options.height || 1024,
     format: options.format || 'png',
   };
 
-  if (options.n && options.n > 1) {
-    body.variants = options.n;
+  const optionalFields: Array<[keyof Omit<ImageGenerationOptions, 'output'>, string]> = [
+    ['width', 'width'],
+    ['height', 'height'],
+    ['aspectRatio', 'aspect_ratio'],
+    ['resolution', 'resolution'],
+    ['quality', 'quality'],
+    ['stylePreset', 'style_preset'],
+    ['styleReferences', 'style_references'],
+    ['negativePrompt', 'negative_prompt'],
+    ['seed', 'seed'],
+    ['cfgScale', 'cfg_scale'],
+    ['steps', 'steps'],
+    ['loraStrength', 'lora_strength'],
+    ['hideWatermark', 'hide_watermark'],
+    ['safeMode', 'safe_mode'],
+    ['embedExifMetadata', 'embed_exif_metadata'],
+  ];
+
+  for (const [optionName, fieldName] of optionalFields) {
+    const value = options[optionName];
+    if (value !== undefined) {
+      body[fieldName] = value;
+    }
   }
+
+  if (options.count !== undefined && options.count > 1) {
+    body.variants = options.count;
+  }
+
+  return body;
+}
+
+export async function generateImage(
+  prompt: string,
+  options: Omit<ImageGenerationOptions, 'output'> = {}
+): Promise<string[]> {
+  const body = buildImageGenerationBody(prompt, options);
 
   const response = await apiRequest<{
     id: string;

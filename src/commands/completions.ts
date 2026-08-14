@@ -94,6 +94,14 @@ _venice_completion() {
             COMPREPLY=( \$(compgen -W "\${formats}" -- "\${cur}") )
             return 0
             ;;
+        --resolution)
+            COMPREPLY=( \$(compgen -W "1K 2K 4K" -- "\${cur}") )
+            return 0
+            ;;
+        --quality)
+            COMPREPLY=( \$(compgen -W "low medium high" -- "\${cur}") )
+            return 0
+            ;;
         completions)
             COMPREPLY=( \$(compgen -W "bash zsh fish" -- "\${cur}") )
             return 0
@@ -110,7 +118,7 @@ _venice_completion() {
             return 0
             ;;
         image)
-            COMPREPLY=( \$(compgen -W "-m --model -o --output -w --width -h --height -n --count -f --format" -- "\${cur}") )
+            COMPREPLY=( \$(compgen -W "-m --model -o --output -w --width -h --height -a --aspect-ratio --resolution --quality --style --style-reference --negative --seed --cfg-scale --steps --lora-strength --hide-watermark --no-hide-watermark --safe-mode --no-safe-mode --embed-exif-metadata --no-embed-exif-metadata -n --count -f --format" -- "\${cur}") )
             return 0
             ;;
         tts|speak)
@@ -293,6 +301,22 @@ _venice() {
                         '-o[Output file]:file:_files' \\
                         '-w[Width]:pixels:' \\
                         '-h[Height]:pixels:' \\
+                        '-a[Aspect ratio]:ratio:(1:1 3:2 2:3 4:3 3:4 16:9 9:16 21:9)' \\
+                        '--resolution[Resolution tier]:tier:(1K 2K 4K)' \\
+                        '--quality[Output quality]:quality:(low medium high)' \\
+                        '--style[Style preset]:style:' \\
+                        '*--style-reference[Style reference URL/base64]:reference:' \\
+                        '--negative[Negative prompt]:prompt:' \\
+                        '--seed[Random seed]:integer:' \\
+                        '--cfg-scale[CFG scale]:number:' \\
+                        '--steps[Inference steps]:integer:' \\
+                        '--lora-strength[LoRA strength]:integer:' \\
+                        '--hide-watermark[Hide Venice watermark]' \\
+                        '--no-hide-watermark[Keep Venice watermark]' \\
+                        '--safe-mode[Enable adult-content blurring]' \\
+                        '--no-safe-mode[Disable adult-content blurring]' \\
+                        '--embed-exif-metadata[Embed generation metadata]' \\
+                        '--no-embed-exif-metadata[Do not embed generation metadata]' \\
                         '-n[Number of images]:count:' \\
                         '-f[Output format]:format:((pretty json))' \\
                         '*:prompt:'
@@ -412,6 +436,22 @@ complete -c venice -n "__fish_seen_subcommand_from image" -s m -l model -d "Mode
 complete -c venice -n "__fish_seen_subcommand_from image" -s o -l output -d "Output file" -r
 complete -c venice -n "__fish_seen_subcommand_from image" -s w -l width -d "Width"
 complete -c venice -n "__fish_seen_subcommand_from image" -s h -l height -d "Height"
+complete -c venice -n "__fish_seen_subcommand_from image" -s a -l aspect-ratio -d "Aspect ratio" -xa "1:1 3:2 2:3 4:3 3:4 16:9 9:16 21:9"
+complete -c venice -n "__fish_seen_subcommand_from image" -l resolution -d "Resolution tier" -xa "1K 2K 4K"
+complete -c venice -n "__fish_seen_subcommand_from image" -l quality -d "Output quality" -xa "low medium high"
+complete -c venice -n "__fish_seen_subcommand_from image" -l style -d "Style preset"
+complete -c venice -n "__fish_seen_subcommand_from image" -l style-reference -d "Style reference URL/base64"
+complete -c venice -n "__fish_seen_subcommand_from image" -l negative -d "Negative prompt"
+complete -c venice -n "__fish_seen_subcommand_from image" -l seed -d "Random seed"
+complete -c venice -n "__fish_seen_subcommand_from image" -l cfg-scale -d "CFG scale"
+complete -c venice -n "__fish_seen_subcommand_from image" -l steps -d "Inference steps"
+complete -c venice -n "__fish_seen_subcommand_from image" -l lora-strength -d "LoRA strength"
+complete -c venice -n "__fish_seen_subcommand_from image" -l hide-watermark -d "Hide Venice watermark"
+complete -c venice -n "__fish_seen_subcommand_from image" -l no-hide-watermark -d "Keep Venice watermark"
+complete -c venice -n "__fish_seen_subcommand_from image" -l safe-mode -d "Enable adult-content blurring"
+complete -c venice -n "__fish_seen_subcommand_from image" -l no-safe-mode -d "Disable adult-content blurring"
+complete -c venice -n "__fish_seen_subcommand_from image" -l embed-exif-metadata -d "Embed generation metadata"
+complete -c venice -n "__fish_seen_subcommand_from image" -l no-embed-exif-metadata -d "Do not embed generation metadata"
 
 # TTS options
 complete -c venice -n "__fish_seen_subcommand_from tts" -s v -l voice -d "Voice" -xa "$voices"

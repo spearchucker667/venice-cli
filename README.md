@@ -147,9 +147,26 @@ venice image -o sunset.png "A serene mountain lake at sunset"
 # Custom dimensions
 venice image -w 1024 -h 768 "Landscape photograph"
 
+# Aspect ratio and resolution-tier sizing
+venice image -m nano-banana-pro -a 16:9 --resolution 2K --quality medium "Canal at sunset"
+
+# Prompt and style controls
+venice image --negative "clouds, rain" --seed 123 --style "3D Model" "A sunny city square"
+
+# Guide the style with one or more references (optional strength: 0.1-1)
+venice image --style-reference "https://example.com/style.png::0.75" "A woodland cabin"
+
 # Use a specific model
 venice image -m flux-1-dev "Artistic portrait"
 ```
+
+Image sizing is model-specific. Use `--width` and `--height` together for
+pixel-based models, `--aspect-ratio` for ratio-based models, and add
+`--resolution` for models with `1K`, `2K`, or `4K` tiers. These sizing modes
+cannot be mixed.
+
+Run `venice image --help` for all generation controls, including CFG scale,
+steps, LoRA strength, watermark, safe-mode, and EXIF metadata flags.
 
 ### Image Upscaling
 
