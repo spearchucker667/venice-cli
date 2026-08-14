@@ -102,7 +102,7 @@ _venice_completion() {
 
     case "\${words[1]}" in
         chat)
-            COMPREPLY=( \$(compgen -W "-m --model -s --system -c --character -t --tools --interactive-tools --continue --no-stream --web-search --x-search --json --json-schema --reasoning-effort --prompt-cache-key --prompt-cache-retention -f --format --list-tools" -- "\${cur}") )
+            COMPREPLY=( \$(compgen -W "-m --model -s --system -c --character -t --tools --interactive-tools --continue --no-stream --web-search --x-search --json --json-schema --reasoning-effort --prompt-cache-key --prompt-cache-retention --image --file --audio --video -f --format --list-tools" -- "\${cur}") )
             return 0
             ;;
         search)
@@ -282,6 +282,10 @@ _venice() {
                         '--reasoning-effort[Reasoning effort]:level:(none minimal low medium high xhigh max)' \\
                         '--prompt-cache-key[Prompt cache key]:key:' \\
                         '--prompt-cache-retention[Prompt cache retention]:mode:(default extended 24h)' \\
+                        '--image[Attach an image file or URL]:file:_files' \\
+                        '--file[Attach a document or source file]:file:_files' \\
+                        '--audio[Attach an audio file or URL]:file:_files' \\
+                        '--video[Attach a video file or URL]:file:_files' \\
                         '-f[Output format]:format:((\$formats))' \\
                         '--format[Output format]:format:((\$formats))' \\
                         '--list-tools[List available tools]' \\
@@ -419,6 +423,10 @@ complete -c venice -n "__fish_seen_subcommand_from chat" -l json-schema -d "JSON
 complete -c venice -n "__fish_seen_subcommand_from chat" -l reasoning-effort -d "Reasoning effort" -xa "none minimal low medium high xhigh max"
 complete -c venice -n "__fish_seen_subcommand_from chat" -l prompt-cache-key -d "Prompt cache key"
 complete -c venice -n "__fish_seen_subcommand_from chat" -l prompt-cache-retention -d "Prompt cache retention" -xa "default extended 24h"
+complete -c venice -n "__fish_seen_subcommand_from chat" -l image -d "Attach an image file or URL" -r
+complete -c venice -n "__fish_seen_subcommand_from chat" -l file -d "Attach a document or source file" -r
+complete -c venice -n "__fish_seen_subcommand_from chat" -l audio -d "Attach an audio file or URL" -r
+complete -c venice -n "__fish_seen_subcommand_from chat" -l video -d "Attach a video file or URL" -r
 complete -c venice -n "__fish_seen_subcommand_from chat" -s f -l format -d "Format" -xa "$formats"
 
 # Image options

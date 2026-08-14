@@ -56,6 +56,28 @@ test('buildChatCompletionBody includes json_object response_format', () => {
   assert.deepEqual(body.response_format, { type: 'json_object' });
 });
 
+test('buildChatCompletionBody preserves multimodal message content', () => {
+  const body = buildChatCompletionBody(
+    [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is in this picture?' },
+        { type: 'image_url', image_url: { url: 'https://example.com/photo.jpg' } },
+      ],
+    }],
+    { model: 'qwen3-vl-235b-a22b' },
+    false
+  );
+
+  assert.deepEqual(body.messages, [{
+    role: 'user',
+    content: [
+      { type: 'text', text: 'what is in this picture?' },
+      { type: 'image_url', image_url: { url: 'https://example.com/photo.jpg' } },
+    ],
+  }]);
+});
+
 test('capability helpers read advertised model features', () => {
   const model: Model = {
     id: 'grok-4-20',

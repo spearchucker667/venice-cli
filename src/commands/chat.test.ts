@@ -31,6 +31,10 @@ test('chat --help lists structured output, reasoning, and X search flags', () =>
     assert.match(result.stdout, /--x-search/);
     assert.match(result.stdout, /--prompt-cache-key/);
     assert.match(result.stdout, /--prompt-cache-retention/);
+    assert.match(result.stdout, /--image/);
+    assert.match(result.stdout, /--file/);
+    assert.match(result.stdout, /--audio/);
+    assert.match(result.stdout, /--video/);
   } finally {
     rmSync(homeDir, { recursive: true, force: true });
   }
@@ -104,6 +108,21 @@ test('chat rejects --no-thinking with a non-none reasoning effort', () => {
     );
     assert.notEqual(result.status, 0);
     assert.match(`${result.stderr}\n${result.stdout}`, /Cannot combine --no-thinking/i);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('chat --image fails before the API when the file is missing', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-image-'));
+
+  try {
+    const result = runCli(
+      ['chat', '--image', join(homeDir, 'missing.jpg'), 'what is in this picture?'],
+      homeDir
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}\n${result.stdout}`, /Image not found/i);
   } finally {
     rmSync(homeDir, { recursive: true, force: true });
   }

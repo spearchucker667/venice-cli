@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import type { VeniceConfig } from '../types/index.js';
+import type { Message, VeniceConfig } from '../types/index.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.venice');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
@@ -123,7 +123,7 @@ export function shouldShowUsage(): boolean {
 export interface ConversationEntry {
   id: string;
   timestamp: string;
-  messages: Array<{ role: string; content: string }>;
+  messages: Message[];
   model: string;
   character?: string;
 }

@@ -10,6 +10,10 @@ export const MAX_VIDEO_DOWNLOAD_BYTES = 1024 * MB;
 export const MAX_UPSCALE_IMAGE_BYTES = 25 * MB;
 export const MAX_TRANSCRIPTION_AUDIO_BYTES = 200 * MB;
 export const MAX_VIDEO_REFERENCE_IMAGE_BYTES = 20 * MB;
+export const MAX_CHAT_IMAGE_BYTES = 20 * MB;
+export const MAX_CHAT_FILE_BYTES = 25 * MB;
+export const MAX_CHAT_AUDIO_BYTES = 25 * MB;
+export const MAX_CHAT_VIDEO_BYTES = 50 * MB;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 120000;
 
 export function formatBytes(bytes: number): string {
@@ -54,6 +58,8 @@ export function mimeTypeFromPath(filePath: string, fallback = 'application/octet
     '.gif': 'image/gif',
     '.bmp': 'image/bmp',
     '.mp4': 'video/mp4',
+    '.mpeg': 'video/mpeg',
+    '.mpg': 'video/mpeg',
     '.mov': 'video/quicktime',
     '.webm': 'video/webm',
     '.mkv': 'video/x-matroska',
@@ -63,6 +69,32 @@ export function mimeTypeFromPath(filePath: string, fallback = 'application/octet
     '.flac': 'audio/flac',
     '.aac': 'audio/aac',
     '.m4a': 'audio/mp4',
+    '.ogg': 'audio/ogg',
+    '.aiff': 'audio/aiff',
+    '.aif': 'audio/aiff',
+    '.pdf': 'application/pdf',
+    '.epub': 'application/epub+zip',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.xls': 'application/vnd.ms-excel',
+    '.csv': 'text/csv',
+    '.md': 'text/markdown',
+    '.txt': 'text/plain',
+    '.json': 'application/json',
+    '.py': 'text/x-python',
+    '.js': 'text/javascript',
+    '.ts': 'text/plain',
+    '.c': 'text/x-c',
+    '.cpp': 'text/x-c++',
+    '.java': 'text/x-java-source',
+    '.go': 'text/x-go',
+    '.rs': 'text/x-rust',
+    '.ps1': 'text/plain',
+    '.sh': 'text/x-shellscript',
+    '.yaml': 'text/yaml',
+    '.yml': 'text/yaml',
+    '.sql': 'text/plain',
   };
 
   return mimeByExtension[ext] || fallback;
@@ -170,6 +202,106 @@ export async function downloadToFile(
       throw new Error(`Download timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`);
     }
 
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export function readFileAsBase64(
+  filePath: string,
+  maxBytes: number,
+  label: string
+): { base64: string; mimeType: string; filename: string } {
+  assertFileSizeWithinLimit(filePath, maxBytes, label);
+  const buffer = fs.readFileSync(filePath);
+  return {
+    base64: buffer.toString('base64'),
+    mimeType: mimeTypeFromPath(filePath),
+    filename: path.basename(filePath),
+  };
+}
+
+export function readFileAsDataUrl(
+  filePath: string,
+  maxBytes: number,
+  label: string
+): { dataUrl: string; mimeType: string; filename: string } {
+  const file = readFileAsBase64(filePath, maxBytes, label);
+  return {
+    dataUrl: `data:${file.mimeType};base64,${file.base64}`,
+    mimeType: file.mimeType,
+    filename: file.filename,
+  };
+}
+
+export function audioFormatFromPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const formatByExtension: Record<string, string> = {
+    '.wav': 'wav',
+    '.mp3': 'mp3',
+    '.aiff': 'aiff',
+    '.aif': 'aiff',
+    '.aac': 'aac',
+    '.ogg': 'ogg',
+    '.flac': 'flac',
+    '.m4a': 'm4a',
+  };
+  return formatByExtension[ext] || 'wav';
+}
+
+export async function downloadToBuffer(
+  url: string,
+  options: {
+    maxBytes: number;
+    timeoutMs?: number;
+  }
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+    }
+
+    const contentTypeHeader = response.headers.get('content-type');
+    const contentType = contentTypeHeader?.split(';')[0].trim().toLowerCase() || 'application/octet-stream';
+    const contentLength = parseContentLength(response.headers.get('content-length'));
+    if (contentLength !== null && contentLength > options.maxBytes) {
+      throw new Error(
+        `Refusing to download ${formatBytes(contentLength)}. ` +
+        `Maximum allowed size is ${formatBytes(options.maxBytes)}.`
+      );
+    }
+
+    if (!response.body) {
+      throw new Error('Download response has no body.');
+    }
+
+    const chunks: Buffer[] = [];
+    let bytesWritten = 0;
+    for await (const chunk of Readable.fromWeb(
+      response.body as unknown as globalThis.ReadableStream<Uint8Array>
+    )) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytesWritten += buffer.length;
+      if (bytesWritten > options.maxBytes) {
+        throw new Error(
+          `Download exceeded limit of ${formatBytes(options.maxBytes)}. ` +
+          'The remote file may be unexpectedly large.'
+        );
+      }
+      chunks.push(buffer);
+    }
+
+    return { buffer: Buffer.concat(chunks), contentType };
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Download timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`);
+    }
     throw error;
   } finally {
     clearTimeout(timeoutId);

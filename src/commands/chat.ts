@@ -62,6 +62,15 @@ import {
   REASONING_EFFORTS,
 } from '../lib/structured-output.js';
 import type { ChatCompletionRequestOptions } from '../lib/api.js';
+import {
+  assertAttachmentCapabilities,
+  assertAttachmentsAllowedForPrivacy,
+  assertLocalAttachmentFiles,
+  buildUserMessageContent,
+  collectOptionValue,
+  hasChatAttachments,
+  parseChatAttachments,
+} from '../lib/chat-attachments.js';
 
 interface E2EEContext {
   privateKey: Uint8Array;
@@ -244,6 +253,11 @@ function encryptMessagesForE2EE(
 ): Message[] {
   return messages.map((msg) => {
     if (msg.role === 'user' || msg.role === 'system') {
+      if (typeof msg.content !== 'string') {
+        throw new Error(
+          'E2EE does not support multimodal attachments. Use a text-only prompt, or omit --image/--file/--audio/--video.'
+        );
+      }
       return {
         ...msg,
         content: encryptMessage(msg.content, modelPublicKey),
@@ -281,6 +295,10 @@ export function registerChatCommand(program: Command): void {
     .option('-q, --quiet', 'Hide E2EE/TEE status messages (show only response)')
     .option('-f, --format <format>', 'Output format (pretty|json|markdown|raw)')
     .option('--list-tools', 'List available tools')
+    .option('--image <path>', 'Attach an image file or URL (repeatable)', collectOptionValue, [])
+    .option('--file <path>', 'Attach a document or source file (repeatable)', collectOptionValue, [])
+    .option('--audio <path>', 'Attach an audio file or URL (repeatable)', collectOptionValue, [])
+    .option('--video <path>', 'Attach a video file or URL (repeatable)', collectOptionValue, [])
     .action(async (promptParts: string[], options) => {
       const c = getChalk();
 
@@ -332,13 +350,21 @@ export function registerChatCommand(program: Command): void {
 
       // Get prompt from args or stdin
       let prompt = promptParts.join(' ');
+      const attachments = parseChatAttachments(options);
+
+      try {
+        assertLocalAttachmentFiles(attachments);
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
       
       if (!prompt && !process.stdin.isTTY) {
         // Read from stdin
         prompt = await readStdin();
       }
 
-      if (!prompt) {
+      if (!prompt && !hasChatAttachments(attachments)) {
         console.error(formatError('No prompt provided. Usage: venice chat "Your message"'));
         process.exit(1);
       }
@@ -406,6 +432,16 @@ export function registerChatCommand(program: Command): void {
           ));
           process.exit(1);
         }
+
+        if (hasChatAttachments(attachments)) {
+          try {
+            assertAttachmentsAllowedForPrivacy(useE2EE, useTEE);
+            assertAttachmentCapabilities(modelInfo, attachments);
+          } catch (error) {
+            console.error(formatError(error instanceof Error ? error.message : String(error)));
+            process.exit(1);
+          }
+        }
       }
 
       // TEE-only mode: verify attestation without encryption
@@ -464,7 +500,14 @@ export function registerChatCommand(program: Command): void {
       }
 
       // Add user message
-      messages.push({ role: 'user', content: prompt });
+      let userContent: Message['content'];
+      try {
+        userContent = await buildUserMessageContent(prompt, attachments);
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+      messages.push({ role: 'user', content: userContent });
 
       // Get tool definitions
       const toolNames = options.tools?.split(',').map((t: string) => t.trim()) || [];
