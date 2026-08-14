@@ -950,7 +950,12 @@ export function continueConversationError(
     current.privacy === 'tee' ||
     modelImpliesPrivateHistory(current.model);
 
-  if (current.catalogAvailable === false && !lastConv.privacy && lastConv.model !== current.model) {
+  if (
+    !lastConv.privacy &&
+    !modelImpliesPrivateHistory(lastConv.model) &&
+    lastConv.model !== current.model &&
+    (current.catalogAvailable === false || !current.lastModel)
+  ) {
     return (
       'Cannot continue this conversation because model capabilities could not be confirmed. ' +
       'Retry when /models is reachable, or start a new chat.'

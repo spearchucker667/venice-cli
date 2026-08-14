@@ -45,14 +45,14 @@ test('continueConversationError rejects untagged private-model history into plai
   assert.match(
     continueConversationError(
       { model: 'e2ee-qwen3-5-122b-a10b' },
-      { model: 'kimi-k2-5', privacy: 'plain' }
+      { model: 'kimi-k2-5', privacy: 'plain', catalogAvailable: true, lastModel: { id: 'e2ee-qwen3-5-122b-a10b', type: 'text' } }
     ) || '',
     mixError
   );
   assert.match(
     continueConversationError(
       { model: 'tee-qwen3-5-122b-a10b' },
-      { model: 'kimi-k2-5', privacy: 'plain' }
+      { model: 'kimi-k2-5', privacy: 'plain', catalogAvailable: true, lastModel: { id: 'tee-qwen3-5-122b-a10b', type: 'text' } }
     ) || '',
     mixError
   );
@@ -62,7 +62,12 @@ test('continueConversationError rejects untagged plaintext history into E2EE/TEE
   assert.match(
     continueConversationError(
       { model: 'kimi-k2-5' },
-      { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'e2ee' }
+      {
+        model: 'e2ee-qwen3-5-122b-a10b',
+        privacy: 'e2ee',
+        catalogAvailable: true,
+        lastModel: { id: 'kimi-k2-5', type: 'text' },
+      }
     ) || '',
     mixError
   );
