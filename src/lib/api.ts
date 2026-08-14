@@ -742,6 +742,107 @@ export async function listCharacters(): Promise<Character[]> {
   }
 }
 
+export type VideoStatusResult = {
+  status: string;
+  average_execution_time?: number;
+  execution_duration?: number;
+  video_url?: string;
+  download_url?: string;
+  error?: string;
+  model?: string;
+  duration?: number;
+};
+
+export type VideoRetrieveResult =
+  | { kind: 'status'; status: VideoStatusResult }
+  | { kind: 'video'; bytes: Buffer; contentType: string };
+
+export function classifyVideoRetrieveContentType(
+  contentType: string | null | undefined
+): 'json' | 'video' | 'unknown' {
+  const type = (contentType || '').split(';')[0].trim().toLowerCase();
+  if (!type) return 'unknown';
+  if (type === 'application/json' || type.endsWith('+json')) return 'json';
+  if (type.startsWith('video/') || type === 'application/octet-stream') return 'video';
+  return 'unknown';
+}
+
+async function retrieveVideoResponse(
+  queueId: string,
+  model: string,
+  options: {
+    deleteOnCompletion?: boolean;
+    spinnerText?: string;
+  } = {}
+): Promise<VideoRetrieveResult> {
+  const spinner = startSpinner(options.spinnerText || 'Checking video status...');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  try {
+    const body: Record<string, unknown> = { queue_id: queueId, model };
+    if (options.deleteOnCompletion !== undefined) {
+      body.delete_media_on_completion = options.deleteOnCompletion;
+    }
+
+    const response = await fetch(`${VENICE_API}/video/retrieve`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw VeniceApiError.fromResponse(response.status, errorBody);
+    }
+
+    const classified = classifyVideoRetrieveContentType(response.headers.get('content-type'));
+    if (classified === 'json') {
+      const status = await response.json() as VideoStatusResult;
+      if (spinner) stopSpinner(true);
+      return { kind: 'status', status };
+    }
+
+    if (classified === 'unknown') {
+      const peek = Buffer.from(await response.arrayBuffer());
+      if (peek.length > 0 && peek[0] === 0x7b) {
+        const status = JSON.parse(peek.toString('utf-8')) as VideoStatusResult;
+        if (spinner) stopSpinner(true);
+        return { kind: 'status', status };
+      }
+      if (isMp4Buffer(peek)) {
+        if (spinner) stopSpinner(true);
+        return { kind: 'video', bytes: peek, contentType: 'video/mp4' };
+      }
+      throw new Error(
+        `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}".`
+      );
+    }
+
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (spinner) stopSpinner(true);
+    return {
+      kind: 'video',
+      bytes,
+      contentType: response.headers.get('content-type') || 'video/mp4',
+    };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (spinner) stopSpinner(false);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Video retrieve request timed out. Please try again later.');
+    }
+    throw error;
+  }
+}
+
+function isMp4Buffer(bytes: Buffer): boolean {
+  return bytes.length >= 8 && bytes.subarray(4, 8).toString('ascii') === 'ftyp';
+}
+
 // Video generation - queue job
 export async function queueVideoGeneration(
   prompt: string,
@@ -756,8 +857,10 @@ export async function queueVideoGeneration(
     model: options.model || 'wan-2.6-text-to-video',
     prompt,
     duration: options.duration || '5s',
-    aspect_ratio: options.aspectRatio || '16:9',
   };
+  if (options.aspectRatio) {
+    body.aspect_ratio = options.aspectRatio;
+  }
   if (options.imageUrl) {
     body.image_url = options.imageUrl;
   }
@@ -783,33 +886,26 @@ export async function queueVideoGeneration(
 export async function getVideoStatus(
   queueId: string,
   model: string
-): Promise<{
-  status: 'PROCESSING' | 'completed' | 'failed';
-  average_execution_time?: number;
-  execution_duration?: number;
-  video_url?: string;
-  error?: string;
-}> {
-  return apiRequest('/video/retrieve', {
-    method: 'POST',
-    body: { queue_id: queueId, model },
+): Promise<VideoStatusResult> {
+  const result = await retrieveVideoResponse(queueId, model, {
     spinnerText: 'Checking video status...',
   });
+
+  if (result.kind === 'video') {
+    return { status: 'completed' };
+  }
+
+  return result.status;
 }
 
 // Video generation - retrieve video
 export async function retrieveVideo(
   queueId: string,
-  model: string
-): Promise<{
-  video_url?: string;
-  status?: string;
-  model: string;
-  duration?: number;
-}> {
-  return apiRequest('/video/retrieve', {
-    method: 'POST',
-    body: { queue_id: queueId, model, delete_media_on_completion: false },
+  model: string,
+  options: { deleteOnCompletion?: boolean } = {}
+): Promise<VideoRetrieveResult> {
+  return retrieveVideoResponse(queueId, model, {
+    deleteOnCompletion: options.deleteOnCompletion ?? false,
     spinnerText: 'Retrieving video...',
   });
 }

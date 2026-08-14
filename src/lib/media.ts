@@ -44,6 +44,28 @@ export function assertFileSizeWithinLimit(
   return stats.size;
 }
 
+export function writeBufferToFile(
+  bytes: Buffer,
+  outputPath: string,
+  options: { maxBytes: number; label: string }
+): { bytesWritten: number } {
+  if (bytes.length > options.maxBytes) {
+    throw new Error(
+      `${options.label} is too large (${formatBytes(bytes.length)}). ` +
+      `Maximum allowed size is ${formatBytes(options.maxBytes)}.`
+    );
+  }
+
+  if (bytes.length === 0) {
+    throw new Error(`${options.label} response was empty.`);
+  }
+
+  const outputDir = path.dirname(outputPath);
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(outputPath, bytes);
+  return { bytesWritten: bytes.length };
+}
+
 export function mimeTypeFromPath(filePath: string, fallback = 'application/octet-stream'): string {
   const ext = path.extname(filePath).toLowerCase();
   const mimeByExtension: Record<string, string> = {

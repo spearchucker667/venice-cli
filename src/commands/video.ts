@@ -8,6 +8,7 @@ import * as path from 'path';
 import { queueVideoGeneration, getVideoStatus, retrieveVideo } from '../lib/api.js';
 import {
   downloadToFile,
+  writeBufferToFile,
   assertFileSizeWithinLimit,
   mimeTypeFromPath,
   MAX_VIDEO_DOWNLOAD_BYTES,
@@ -188,33 +189,48 @@ export function registerVideoCommands(program: Command): void {
       try {
         const result = await retrieveVideo(queueId, options.model);
 
-        if (format === 'json') {
-          console.log(JSON.stringify(result, null, 2));
-          return;
-        }
+        if (result.kind === 'status') {
+          const status = result.status;
+          const downloadUrl = status.video_url || status.download_url;
 
-        if (!result.video_url) {
-          if (result.status) {
-            console.log(`${c.dim('Status:')} ${c.yellow(result.status)} — video not ready yet.`);
-            console.log(`${c.dim('Try again with:')} venice video retrieve ${queueId} -m ${options.model}`);
-          } else {
-            console.error(formatError('No video URL returned. The video may still be processing.'));
+          if (!downloadUrl) {
+            if (format === 'json') {
+              console.log(JSON.stringify(status, null, 2));
+            } else if (status.status) {
+              console.log(`${c.dim('Status:')} ${c.yellow(status.status)} — video not ready yet.`);
+              console.log(`${c.dim('Try again with:')} venice video retrieve ${queueId} -m ${options.model}`);
+            } else {
+              console.error(formatError('No video returned. The video may still be processing.'));
+            }
+            return;
           }
-          return;
+
+          console.log(`${c.dim('Downloading video...')}`);
+          await downloadToFile(downloadUrl, options.output, {
+            maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
+            expectedContentTypePrefixes: ['video/'],
+          });
+        } else {
+          writeBufferToFile(result.bytes, options.output, {
+            maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
+            label: 'Video',
+          });
         }
 
-        // Download the video
-        console.log(`${c.dim('Downloading video...')}`);
-        await downloadToFile(result.video_url, options.output, {
-          maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
-          expectedContentTypePrefixes: ['video/'],
-        });
+        if (format === 'json') {
+          console.log(JSON.stringify({
+            status: 'completed',
+            output: options.output,
+            model: options.model,
+            ...(result.kind === 'video'
+              ? { bytes: result.bytes.length, content_type: result.contentType }
+              : {}),
+          }, null, 2));
+          return;
+        }
 
         console.log(formatSuccess(`Video saved to ${options.output}`));
-        console.log(`${c.dim('Model:')} ${result.model}`);
-        if (result.duration) {
-          console.log(`${c.dim('Duration:')} ${result.duration}s`);
-        }
+        console.log(`${c.dim('Model:')} ${options.model}`);
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);
