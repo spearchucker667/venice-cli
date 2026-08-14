@@ -38,3 +38,23 @@ test('continueConversationError allows matching plain sessions', () => {
     undefined
   );
 });
+
+test('continueConversationError infers E2EE from legacy history without privacy', () => {
+  assert.match(
+    continueConversationError(
+      { model: 'e2ee-qwen3-5-122b-a10b' },
+      { model: 'kimi-k2-5', privacy: 'plain' }
+    ) || '',
+    /Cannot continue a e2ee conversation with a plain session/
+  );
+});
+
+test('continueConversationError infers TEE from legacy history without privacy', () => {
+  assert.match(
+    continueConversationError(
+      { model: 'tee-qwen3-5-122b-a10b' },
+      { model: 'kimi-k2-5', privacy: 'plain' }
+    ) || '',
+    /Cannot continue a tee conversation with a plain session/
+  );
+});

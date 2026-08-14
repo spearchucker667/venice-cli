@@ -917,11 +917,25 @@ export function getAvailableCharacters(): string[] {
   return Object.keys(CHARACTER_PROMPTS);
 }
 
+export function inferConversationPrivacy(lastConv: {
+  model: string;
+  privacy?: string;
+}): 'plain' | 'e2ee' | 'tee' {
+  if (lastConv.privacy === 'e2ee' || lastConv.privacy === 'tee' || lastConv.privacy === 'plain') {
+    return lastConv.privacy;
+  }
+
+  const id = lastConv.model.toLowerCase();
+  if (id.includes('e2ee')) return 'e2ee';
+  if (id.startsWith('tee-') || id.includes('-tee')) return 'tee';
+  return 'plain';
+}
+
 export function continueConversationError(
   lastConv: { model: string; privacy?: string },
   current: { model: string; privacy: 'plain' | 'e2ee' | 'tee' }
 ): string | undefined {
-  const previousPrivacy = lastConv.privacy || 'plain';
+  const previousPrivacy = inferConversationPrivacy(lastConv);
 
   if (previousPrivacy !== current.privacy) {
     return (
