@@ -242,7 +242,7 @@ export function registerChatCommand(program: Command): void {
     .description('Chat with an AI model')
     .option('-m, --model <model>', 'Model to use')
     .option('-s, --system <prompt>', 'System prompt')
-    .option('-c, --character <name>', 'Character/persona to use')
+    .option('-c, --character <slug>', 'Character slug from the Venice API catalog (e.g. alan-watts)')
     .option('-t, --tools <tools>', 'Comma-separated list of tools to enable')
     .option('--interactive-tools', 'Require approval for each tool call')
     .option('--continue', 'Continue the last conversation')
@@ -368,14 +368,9 @@ export function registerChatCommand(program: Command): void {
         }
       }
 
-      // Add system prompt
+      // Add system prompt (can be combined with --character)
       if (options.system) {
         messages.push({ role: 'system', content: options.system });
-      } else if (options.character) {
-        const systemPrompt = getCharacterPrompt(options.character);
-        if (systemPrompt) {
-          messages.push({ role: 'system', content: systemPrompt });
-        }
       }
 
       // Add user message
@@ -387,6 +382,9 @@ export function registerChatCommand(program: Command): void {
 
       // Build venice_parameters
       const veniceParams: Record<string, unknown> = {};
+      if (options.character) {
+        veniceParams.character_slug = options.character;
+      }
       if (options.webSearch) {
         veniceParams.enable_web_search = 'on';
       }
@@ -877,31 +875,4 @@ async function readStdin(): Promise<string> {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf-8').trim();
-}
-
-// Character prompts
-const CHARACTER_PROMPTS: Record<string, string> = {
-  pirate: 'You are a pirate captain. Respond in pirate speak with nautical terms, "arr"s, and maritime metaphors. Be adventurous and bold.',
-  
-  wizard: 'You are a wise wizard. Speak in mystical terms, reference ancient knowledge, and occasionally make cryptic prophecies. Use archaic language.',
-  
-  scientist: 'You are a brilliant scientist. Explain things with precision, reference data and studies, and maintain intellectual rigor. Be curious and analytical.',
-  
-  poet: 'You are a romantic poet. Express yourself with beautiful language, metaphors, and emotional depth. Find beauty in everything.',
-  
-  coder: 'You are a senior software engineer. Be practical, reference best practices, and provide code examples when relevant. Value clean, maintainable solutions.',
-  
-  teacher: 'You are a patient teacher. Explain concepts clearly, use examples, and check for understanding. Encourage learning and curiosity.',
-  
-  comedian: 'You are a stand-up comedian. Find humor in everything, make jokes, use wordplay, and keep things light. But still be helpful!',
-  
-  philosopher: 'You are a deep philosopher. Question assumptions, explore ideas from multiple angles, and ponder the nature of existence. Be thoughtful and profound.',
-};
-
-function getCharacterPrompt(character: string): string | undefined {
-  return CHARACTER_PROMPTS[character.toLowerCase()];
-}
-
-export function getAvailableCharacters(): string[] {
-  return Object.keys(CHARACTER_PROMPTS);
 }

@@ -69,8 +69,8 @@ venice chat -m deepseek-v3.2 "Solve this step by step: 15% of 340"
 # With a system prompt
 venice chat -s "You are a helpful coding assistant" "Write a fizzbuzz in Python"
 
-# Use a character persona
-venice chat -c pirate "Tell me about the weather"
+# Use a character from the Venice API catalog
+venice chat -c alan-watts "What is the nature of reality?"
 
 # Continue the previous conversation
 venice chat --continue "What about the next step?"
@@ -103,7 +103,7 @@ venice chat -m e2ee-qwen3-5-122b-a10b -q "This is encrypted but looks like norma
 |--------|-------------|
 | `-m, --model <model>` | Model to use (default: kimi-k2-5) |
 | `-s, --system <prompt>` | System prompt |
-| `-c, --character <name>` | Character persona |
+| `-c, --character <slug>` | Character slug from the Venice API catalog |
 | `-t, --tools <tools>` | Comma-separated list of tools |
 | `--interactive-tools` | Approve each tool call |
 | `--continue` | Continue last conversation |
@@ -368,14 +368,20 @@ venice usage -d 30
 ### Characters
 
 ```bash
-# List available characters
+# List characters from the Venice API catalog
 venice characters
 
-# Use a character
-venice chat -c wizard "What is the nature of magic?"
+# Search the catalog
+venice characters --search philosophy
+
+# Show details (and reviews when available)
+venice characters show alan-watts
+
+# Chat as a catalog character — sends character_slug, not a local system prompt
+venice chat -c alan-watts "What is the nature of reality?"
 ```
 
-Available characters: `pirate`, `wizard`, `scientist`, `poet`, `coder`, `teacher`, `comedian`, `philosopher`
+`-c` / `--character` takes an API slug from `venice characters` (for example `alan-watts`), not a locally hardcoded persona.
 
 ### Voices
 
