@@ -10,6 +10,7 @@
  */
 
 import { Command } from 'commander';
+import updateNotifier from 'update-notifier';
 import { registerChatCommand } from './commands/chat.js';
 import { registerSearchCommand } from './commands/search.js';
 import { registerImageCommand } from './commands/image.js';
@@ -22,8 +23,16 @@ import { registerConfigCommand } from './commands/config.js';
 import { registerCharactersCommand } from './commands/characters.js';
 import { registerCompletionsCommand } from './commands/completions.js';
 import { registerVideoCommands } from './commands/video.js';
+import { registerTeeCommand } from './commands/tee.js';
 import { formatError, getChalk } from './lib/output.js';
 import { getVersion } from './lib/version.js';
+
+// Check for updates in the background (non-blocking, checks once per day)
+const pkg = { name: 'veniceai-cli', version: getVersion() };
+updateNotifier({ pkg, updateCheckInterval: 1000 * 60 * 60 * 24 }).notify({
+  isGlobal: true,
+  message: 'Update available {currentVersion} → {latestVersion}\nRun {updateCommand} to update',
+});
 
 async function main() {
   const program = new Command();
@@ -58,6 +67,7 @@ async function main() {
   registerCharactersCommand(program);
   registerCompletionsCommand(program);
   registerVideoCommands(program);
+  registerTeeCommand(program);
 
   // Handle errors gracefully
   program.exitOverride();
