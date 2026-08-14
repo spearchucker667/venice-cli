@@ -81,6 +81,9 @@ venice chat -t calculator,weather "What's 25 * 4.5?"
 # JSON output for scripting
 venice chat -f json "List 3 colors" | jq '.content'
 
+# Use piped context plus an instruction
+cat error.log | venice chat "find the root cause"
+
 # Disable streaming
 venice chat --no-stream "Quick question"
 
@@ -295,6 +298,9 @@ venice embeddings "Text to embed"
 
 # Save to file
 venice embeddings -o vectors.json "Text to embed"
+
+# From stdin
+echo "Text to embed" | venice embeddings
 ```
 
 ### Configuration
