@@ -44,7 +44,24 @@ import {
   type TeeVerificationResult,
 } from '../lib/tee.js';
 import type { Message, Model, OutputFormat, ToolCall } from '../types/index.js';
-import { isE2EEModel, isTEEModel } from '../types/index.js';
+import {
+  isE2EEModel,
+  isTEEModel,
+  supportsReasoningEffort,
+  supportsResponseSchema,
+  supportsXSearch,
+} from '../types/index.js';
+import {
+  parseStructuredContent,
+  resolveResponseFormat,
+  validateAgainstSchema,
+  type PromptCacheRetention,
+  type ReasoningEffort,
+  type ResponseFormat,
+  PROMPT_CACHE_RETENTIONS,
+  REASONING_EFFORTS,
+} from '../lib/structured-output.js';
+import type { ChatCompletionRequestOptions } from '../lib/api.js';
 
 interface E2EEContext {
   privateKey: Uint8Array;
@@ -248,6 +265,12 @@ export function registerChatCommand(program: Command): void {
     .option('--continue', 'Continue the last conversation')
     .option('--no-stream', 'Disable streaming output')
     .option('--web-search', 'Enable web search for current information')
+    .option('--x-search', 'Enable xAI native search (web + X/Twitter) on supported Grok models')
+    .option('--json', 'Request JSON object output without a schema (disables streaming)')
+    .option('--json-schema <file>', 'Request structured JSON matching a schema file (disables streaming)')
+    .option('--reasoning-effort <level>', `Reasoning effort (${REASONING_EFFORTS.join('|')})`)
+    .option('--prompt-cache-key <key>', 'Route requests for better prompt-cache affinity')
+    .option('--prompt-cache-retention <mode>', `Prompt cache retention (${PROMPT_CACHE_RETENTIONS.join('|')})`)
     .option('--no-thinking', 'Disable reasoning/thinking on reasoning models')
     .option('--strip-thinking', 'Strip thinking blocks from response')
     .option('--no-venice-prompt', 'Disable Venice system prompts')
@@ -267,6 +290,46 @@ export function registerChatCommand(program: Command): void {
         return;
       }
 
+      let responseFormat: ResponseFormat | undefined;
+      try {
+        responseFormat = resolveResponseFormat({
+          json: options.json === true,
+          jsonSchema: options.jsonSchema,
+        });
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+
+      let reasoningEffort: ReasoningEffort | undefined;
+      if (options.reasoningEffort) {
+        const level = String(options.reasoningEffort).toLowerCase();
+        if (!REASONING_EFFORTS.includes(level as ReasoningEffort)) {
+          console.error(formatError(
+            `Invalid --reasoning-effort "${options.reasoningEffort}". Use one of: ${REASONING_EFFORTS.join(', ')}`
+          ));
+          process.exit(1);
+        }
+        reasoningEffort = level as ReasoningEffort;
+      }
+
+      if (options.thinking === false && reasoningEffort && reasoningEffort !== 'none') {
+        console.error(formatError('Cannot combine --no-thinking with --reasoning-effort (except "none").'));
+        process.exit(1);
+      }
+
+      let promptCacheRetention: PromptCacheRetention | undefined;
+      if (options.promptCacheRetention) {
+        const retention = String(options.promptCacheRetention).toLowerCase();
+        if (!PROMPT_CACHE_RETENTIONS.includes(retention as PromptCacheRetention)) {
+          console.error(formatError(
+            `Invalid --prompt-cache-retention "${options.promptCacheRetention}". Use one of: ${PROMPT_CACHE_RETENTIONS.join(', ')}`
+          ));
+          process.exit(1);
+        }
+        promptCacheRetention = retention as PromptCacheRetention;
+      }
+
       // Get prompt from args or stdin
       let prompt = promptParts.join(' ');
       
@@ -282,7 +345,7 @@ export function registerChatCommand(program: Command): void {
 
       const model = options.model || getDefaultModel();
       const format = detectOutputFormat(options.format);
-      const shouldStream = options.stream !== false && !isPiped() && format === 'pretty';
+      const shouldStream = options.stream !== false && !isPiped() && format === 'pretty' && !responseFormat;
 
       let useE2EE = false;
       let useTEE = false;
@@ -326,6 +389,23 @@ export function registerChatCommand(program: Command): void {
             useTEE = true;
           }
         }
+
+        if (responseFormat && !supportsResponseSchema(modelInfo)) {
+          console.error(formatError(`Model "${model}" does not support structured output (supportsResponseSchema).`));
+          process.exit(1);
+        }
+
+        if (reasoningEffort && !supportsReasoningEffort(modelInfo)) {
+          console.error(formatError(`Model "${model}" does not support --reasoning-effort (supportsReasoningEffort).`));
+          process.exit(1);
+        }
+
+        if (options.xSearch && !supportsXSearch(modelInfo)) {
+          console.error(formatError(
+            `Model "${model}" does not support --x-search (supportsXSearch). Use a Grok model that advertises X search.`
+          ));
+          process.exit(1);
+        }
       }
 
       // TEE-only mode: verify attestation without encryption
@@ -336,6 +416,11 @@ export function registerChatCommand(program: Command): void {
           console.error(formatError(error instanceof Error ? error.message : String(error)));
           process.exit(1);
         }
+      }
+
+      if (useE2EE && responseFormat) {
+        console.error(formatError('Structured output (--json / --json-schema) is not supported with E2EE. E2EE requires streaming.'));
+        process.exit(1);
       }
 
       // E2EE mode: full attestation + encryption setup
@@ -387,7 +472,12 @@ export function registerChatCommand(program: Command): void {
 
       // Build venice_parameters
       const veniceParams: Record<string, unknown> = {};
-      if (options.webSearch) {
+      if (options.xSearch) {
+        veniceParams.enable_x_search = true;
+        if (options.webSearch && format === 'pretty') {
+          console.log(c.yellow('⚠ --x-search replaces Venice web search; --web-search will be ignored.\n'));
+        }
+      } else if (options.webSearch) {
         veniceParams.enable_web_search = 'on';
       }
       if (options.thinking === false) {
@@ -407,11 +497,22 @@ export function registerChatCommand(program: Command): void {
         veniceParams.enable_e2ee = false;
       }
 
+      const chatExtras: ChatRunExtras = {
+        veniceParams,
+        e2eeContext,
+        quiet: options.quiet,
+        stripThinking: options.stripThinking,
+        responseFormat,
+        reasoningEffort,
+        promptCacheKey: options.promptCacheKey,
+        promptCacheRetention,
+      };
+
       try {
         if (shouldStream) {
-          await streamChat(messages, model, tools, options.interactiveTools, format, veniceParams, e2eeContext, options.quiet, options.stripThinking);
+          await streamChat(messages, model, tools, options.interactiveTools, format, chatExtras);
         } else {
-          await nonStreamChat(messages, model, tools, options.interactiveTools, format, veniceParams, e2eeContext, options.quiet);
+          await nonStreamChat(messages, model, tools, options.interactiveTools, format, chatExtras);
         }
 
         // Save to history (don't save encrypted content)
@@ -536,18 +637,82 @@ function flushThinkingState(
   return output;
 }
 
+interface ChatRunExtras {
+  veniceParams?: Record<string, unknown>;
+  e2eeContext?: E2EEContext;
+  quiet?: boolean;
+  stripThinking?: boolean;
+  responseFormat?: ResponseFormat;
+  reasoningEffort?: ReasoningEffort;
+  promptCacheKey?: string;
+  promptCacheRetention?: PromptCacheRetention;
+}
+
+function buildRequestOptions(
+  model: string,
+  tools: ReturnType<typeof getToolDefinitions> | undefined,
+  extras: ChatRunExtras,
+  additionalHeaders?: Record<string, string>
+): ChatCompletionRequestOptions {
+  const request: ChatCompletionRequestOptions = { model };
+
+  if (tools?.length) {
+    request.tools = tools;
+  }
+  if (extras.veniceParams && Object.keys(extras.veniceParams).length > 0) {
+    request.venice_parameters = extras.veniceParams;
+  }
+  if (additionalHeaders) {
+    request.additionalHeaders = additionalHeaders;
+  }
+  if (extras.responseFormat) {
+    request.response_format = extras.responseFormat;
+  }
+  if (extras.reasoningEffort) {
+    request.reasoning_effort = extras.reasoningEffort;
+  }
+  if (extras.promptCacheKey) {
+    request.prompt_cache_key = extras.promptCacheKey;
+  }
+  if (extras.promptCacheRetention) {
+    request.prompt_cache_retention = extras.promptCacheRetention;
+  }
+
+  return request;
+}
+
+function outputStructuredResponse(
+  content: string,
+  responseFormat: ResponseFormat,
+  format: OutputFormat
+): void {
+  const parsed = parseStructuredContent(content);
+  if (responseFormat.type === 'json_schema' && responseFormat.json_schema?.schema) {
+    const errors = validateAgainstSchema(parsed, responseFormat.json_schema.schema);
+    if (errors.length > 0) {
+      throw new Error(`Structured output did not match the schema:\n${errors.map((error) => `  - ${error}`).join('\n')}`);
+    }
+  }
+
+  if (format === 'raw') {
+    console.log(JSON.stringify(parsed));
+    return;
+  }
+  console.log(JSON.stringify(parsed, null, 2));
+}
+
 async function streamChat(
   messages: Message[],
   model: string,
   tools: ReturnType<typeof getToolDefinitions>,
   interactiveTools: boolean,
   format: OutputFormat,
-  veniceParams?: Record<string, unknown>,
-  e2eeContext?: E2EEContext,
-  quiet = false,
-  stripThinking = false
+  extras: ChatRunExtras = {}
 ): Promise<void> {
   const c = getChalk();
+  const e2eeContext = extras.e2eeContext;
+  const quiet = extras.quiet ?? false;
+  const stripThinking = extras.stripThinking ?? false;
 
   let fullContent = '';
   let collectedToolCalls: StreamToolCallDelta[] = [];
@@ -566,28 +731,32 @@ async function streamChat(
   // E2EE: Build headers
   const additionalHeaders = e2eeContext ? buildE2EEHeaders(e2eeContext) : undefined;
 
-  // E2EE: Disable tools, web search, and Venice system prompt for E2EE models
+  // E2EE: Disable tools, web search, X search, and Venice system prompt for E2EE models
   // The Venice system prompt would be added server-side unencrypted, breaking E2EE
   const effectiveTools = e2eeContext ? undefined : tools;
-  const effectiveVeniceParams = e2eeContext
-    ? { ...veniceParams, enable_web_search: undefined, include_venice_system_prompt: false }
-    : veniceParams;
+  const effectiveExtras: ChatRunExtras = e2eeContext
+    ? {
+        ...extras,
+        veniceParams: {
+          ...extras.veniceParams,
+          enable_web_search: undefined,
+          enable_x_search: undefined,
+          include_venice_system_prompt: false,
+        },
+      }
+    : extras;
 
   try {
-    const streamOptions: {
-      model: string;
-      tools?: typeof tools;
-      venice_parameters?: Record<string, unknown>;
-      additionalHeaders?: Record<string, string>;
-    } = {
-      model,
-      tools: effectiveTools,
-      additionalHeaders,
-    };
-    if (effectiveVeniceParams && Object.keys(effectiveVeniceParams).length > 0) {
-      streamOptions.venice_parameters = effectiveVeniceParams;
-    }
+    const streamOptions = buildRequestOptions(model, effectiveTools, effectiveExtras, additionalHeaders);
     for await (const chunk of chatCompletionStream(messagesToSend, streamOptions)) {
+      if (chunk.reasoning_content && !stripThinking) {
+        if (spinner) clearSpinner();
+        const reasoning = format === 'pretty'
+          ? c.dim(chunk.reasoning_content)
+          : chunk.reasoning_content;
+        process.stdout.write(reasoning);
+      }
+
       if (chunk.content) {
         if (spinner) clearSpinner();
 
@@ -666,7 +835,14 @@ async function streamChat(
 
         // Get follow-up response
         console.log('\n');
-        for await (const chunk of chatCompletionStream(messages, { model })) {
+        const followUpOptions = buildRequestOptions(model, effectiveTools, {
+          ...effectiveExtras,
+          responseFormat: undefined,
+        });
+        for await (const chunk of chatCompletionStream(messages, followUpOptions)) {
+          if (chunk.reasoning_content && !stripThinking) {
+            process.stdout.write(format === 'pretty' ? c.dim(chunk.reasoning_content) : chunk.reasoning_content);
+          }
           if (chunk.content) {
             process.stdout.write(chunk.content);
           }
@@ -806,25 +982,20 @@ async function nonStreamChat(
   tools: ReturnType<typeof getToolDefinitions>,
   interactiveTools: boolean,
   format: OutputFormat,
-  veniceParams?: Record<string, unknown>,
-  e2eeContext?: E2EEContext,
-  _quiet = false
+  extras: ChatRunExtras = {}
 ): Promise<void> {
   // E2EE requires streaming for response decryption
-  if (e2eeContext) {
+  if (extras.e2eeContext) {
     throw new Error('E2EE requires streaming mode. Remove --no-stream flag when using E2EE models.');
   }
 
-  const chatOptions: { model: string; tools?: typeof tools; venice_parameters?: Record<string, unknown> } = { model, tools };
-  if (veniceParams && Object.keys(veniceParams).length > 0) {
-    chatOptions.venice_parameters = veniceParams;
-  }
+  const chatOptions = buildRequestOptions(model, tools, extras);
   const response = await chatCompletion(messages, chatOptions);
 
   // Handle tool calls
   if (response.tool_calls?.length) {
     for (const toolCall of response.tool_calls) {
-      const args = JSON.parse(toolCall.function.arguments || '{}');
+      const args = parseToolCallArguments(toolCall);
       const result = await executeTool(toolCall.function.name, args, { interactive: interactiveTools });
 
       messages.push({
@@ -840,19 +1011,40 @@ async function nonStreamChat(
     }
 
     // Get follow-up
-    const followUp = await chatCompletion(messages, { model });
-    outputResponse(followUp.content, format);
+    const followUp = await chatCompletion(messages, buildRequestOptions(model, tools, {
+      ...extras,
+      responseFormat: undefined,
+    }));
+    outputChatText(followUp.content, followUp.reasoning_content, format, extras);
     
     if (followUp.usage && format === 'pretty') {
       console.log(formatUsage(followUp.usage));
     }
+  } else if (extras.responseFormat) {
+    outputStructuredResponse(response.content, extras.responseFormat, format);
+    if (response.usage && format === 'pretty') {
+      console.log(formatUsage(response.usage));
+    }
   } else {
-    outputResponse(response.content, format);
+    outputChatText(response.content, response.reasoning_content, format, extras);
     
     if (response.usage && format === 'pretty') {
       console.log(formatUsage(response.usage));
     }
   }
+}
+
+function outputChatText(
+  content: string,
+  reasoningContent: string | undefined,
+  format: OutputFormat,
+  extras: ChatRunExtras
+): void {
+  if (reasoningContent && !extras.stripThinking && format === 'pretty') {
+    const c = getChalk();
+    console.log(c.dim('💭 ' + reasoningContent.trim()));
+  }
+  outputResponse(content, format);
 }
 
 function outputResponse(content: string, format: OutputFormat): void {

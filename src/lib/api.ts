@@ -9,6 +9,11 @@ import { startSpinner, stopSpinner } from './output.js';
 import { getVersion } from './version.js';
 import { Readable } from 'stream';
 import type { Message, ToolDefinition, Model, Character } from '../types/index.js';
+import type {
+  PromptCacheRetention,
+  ReasoningEffort,
+  ResponseFormat,
+} from './structured-output.js';
 import {
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
@@ -202,30 +207,32 @@ export async function apiRequest<T>(
   throw lastError || new Error('Request failed after retries');
 }
 
-// Chat completion (non-streaming)
-export async function chatCompletion(
+export interface ChatCompletionRequestOptions {
+  model?: string;
+  tools?: ToolDefinition[];
+  tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
+  venice_parameters?: Record<string, unknown>;
+  additionalHeaders?: Record<string, string>;
+  response_format?: ResponseFormat;
+  reasoning_effort?: ReasoningEffort;
+  prompt_cache_key?: string;
+  prompt_cache_retention?: PromptCacheRetention;
+}
+
+export function buildChatCompletionBody(
   messages: Message[],
-  options: {
-    model?: string;
-    tools?: ToolDefinition[];
-    tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
-    venice_parameters?: Record<string, unknown>;
-  } = {}
-): Promise<{
-  content: string;
-  tool_calls?: Array<{
-    id: string;
-    type: 'function';
-    function: { name: string; arguments: string };
-  }>;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
-  finish_reason: string;
-}> {
+  options: ChatCompletionRequestOptions,
+  stream: boolean
+): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: options.model || 'kimi-k2-5',
     messages,
-    stream: false,
+    stream,
   };
+
+  if (stream) {
+    body.stream_options = { include_usage: true };
+  }
 
   if (options.tools?.length) {
     body.tools = options.tools;
@@ -236,9 +243,45 @@ export async function chatCompletion(
     body.venice_parameters = options.venice_parameters;
   }
 
+  if (options.response_format) {
+    body.response_format = options.response_format;
+  }
+
+  if (options.reasoning_effort) {
+    body.reasoning_effort = options.reasoning_effort;
+  }
+
+  if (options.prompt_cache_key) {
+    body.prompt_cache_key = options.prompt_cache_key;
+  }
+
+  if (options.prompt_cache_retention) {
+    body.prompt_cache_retention = options.prompt_cache_retention;
+  }
+
+  return body;
+}
+
+// Chat completion (non-streaming)
+export async function chatCompletion(
+  messages: Message[],
+  options: ChatCompletionRequestOptions = {}
+): Promise<{
+  content: string;
+  reasoning_content?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  finish_reason: string;
+}> {
+  const body = buildChatCompletionBody(messages, options, false);
+
   const response = await apiRequest<{
     choices: Array<{
-      message: { content: string; tool_calls?: any[] };
+      message: { content: string; reasoning_content?: string; tool_calls?: any[] };
       finish_reason: string;
     }>;
     usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
@@ -262,6 +305,7 @@ export async function chatCompletion(
 
   return {
     content: choice?.message?.content || '',
+    reasoning_content: choice?.message?.reasoning_content,
     tool_calls: choice?.message?.tool_calls,
     usage,
     finish_reason: choice?.finish_reason || 'stop',
@@ -271,35 +315,16 @@ export async function chatCompletion(
 // Chat completion (streaming)
 export async function* chatCompletionStream(
   messages: Message[],
-  options: {
-    model?: string;
-    tools?: ToolDefinition[];
-    tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
-    venice_parameters?: Record<string, unknown>;
-    additionalHeaders?: Record<string, string>;
-  } = {}
+  options: ChatCompletionRequestOptions = {}
 ): AsyncGenerator<{
   content?: string;
+  reasoning_content?: string;
   tool_calls?: any[];
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
   completionId?: string;
   done: boolean;
 }> {
-  const body: Record<string, unknown> = {
-    model: options.model || 'kimi-k2-5',
-    messages,
-    stream: true,
-    stream_options: { include_usage: true },
-  };
-
-  if (options.tools?.length) {
-    body.tools = options.tools;
-    body.tool_choice = options.tool_choice || 'auto';
-  }
-
-  if (options.venice_parameters) {
-    body.venice_parameters = options.venice_parameters;
-  }
+  const body = buildChatCompletionBody(messages, options, true);
 
   const response = await apiRequest<Response>('/chat/completions', {
     method: 'POST',
@@ -352,6 +377,10 @@ export async function* chatCompletionStream(
 
             if (json.usage) {
               totalUsage = json.usage;
+            }
+
+            if (delta?.reasoning_content) {
+              yield { reasoning_content: delta.reasoning_content, done: false, completionId };
             }
 
             if (delta?.content) {

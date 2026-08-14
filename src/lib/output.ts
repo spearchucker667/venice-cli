@@ -150,6 +150,7 @@ export function formatUsage(usage: {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
 }): string {
   if (!shouldShowUsage()) return '';
   if (!usage.total_tokens) return '';
@@ -159,6 +160,9 @@ export function formatUsage(usage: {
   
   if (usage.prompt_tokens) {
     parts.push(`${c.dim('prompt:')} ${usage.prompt_tokens}`);
+  }
+  if (usage.prompt_tokens_details?.cached_tokens) {
+    parts.push(`${c.dim('cached:')} ${usage.prompt_tokens_details.cached_tokens}`);
   }
   if (usage.completion_tokens) {
     parts.push(`${c.dim('completion:')} ${usage.completion_tokens}`);

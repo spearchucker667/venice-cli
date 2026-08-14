@@ -81,6 +81,21 @@ venice chat -t calculator,weather "What's 25 * 4.5?"
 # JSON output for scripting
 venice chat -f json "List 3 colors" | jq '.content'
 
+# Request JSON object output (no schema)
+venice chat --json "extract the fields as JSON"
+
+# Structured JSON matching a schema file
+venice chat --json-schema schema.json "extract the fields"
+
+# Control reasoning effort on models that advertise it
+venice chat --reasoning-effort high "solve this"
+
+# xAI native search (web + X/Twitter) on supported Grok models
+venice chat --x-search "what is trending about venice ai"
+
+# Improve prompt-cache affinity across related requests
+venice chat --prompt-cache-key session-123 "continue with cached prefix"
+
 # Disable streaming
 venice chat --no-stream "Quick question"
 
@@ -109,6 +124,12 @@ venice chat -m e2ee-qwen3-5-122b-a10b -q "This is encrypted but looks like norma
 | `--continue` | Continue last conversation |
 | `--no-stream` | Disable streaming output |
 | `--web-search` | Enable web search for current information |
+| `--x-search` | Enable xAI native search (web + X/Twitter) on supported Grok models |
+| `--json` | Request JSON object output without a schema |
+| `--json-schema <file>` | Request structured JSON matching a schema file |
+| `--reasoning-effort <level>` | Reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
+| `--prompt-cache-key <key>` | Route requests for better prompt-cache affinity |
+| `--prompt-cache-retention <mode>` | Prompt cache retention (`default`, `extended`, `24h`) |
 | `--no-thinking` | Disable reasoning on reasoning models |
 | `--strip-thinking` | Strip thinking blocks from response |
 | `--no-venice-prompt` | Disable Venice system prompts |
