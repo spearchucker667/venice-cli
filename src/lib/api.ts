@@ -161,7 +161,7 @@ export async function apiRequest<T>(
           if (spinner) stopSpinner(false, 'Authentication failed');
           throw new Error(
             'Authentication failed. Please check your API key.\n' +
-            'Update with: venice config set api_key <your-key>'
+            'Update with: venice config set api_key'
           );
         }
 

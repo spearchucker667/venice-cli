@@ -327,8 +327,11 @@ echo "Text from pipe" | venice tts -o output.mp3
 # Initialize interactively
 venice config init
 
-# Set API key
-venice config set api_key vn-xxxxxxxx
+# Set API key using a hidden prompt
+venice config set api_key
+
+# Or read it from standard input
+printf '%s' "$VENICE_API_KEY" | venice config set api_key --stdin
 
 # Set default model
 venice config set default_model kimi-k2-5

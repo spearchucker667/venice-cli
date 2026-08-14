@@ -25,13 +25,20 @@ npx veniceai-cli chat 'Hello, world!'
 
 2. **Configure the CLI**:
    ```bash
-   venice config set api_key YOUR_API_KEY
+   venice config set api_key
    ```
+
+   The CLI prompts for the key without displaying it. For non-interactive use,
+   pipe the key over standard input with `venice config set api_key --stdin`.
    
    Or use an environment variable:
    ```bash
    export VENICE_API_KEY=YOUR_API_KEY
    ```
+
+   Environment variables are convenient for CI and headless use, but can be
+   inherited by child processes or captured in diagnostic output. Scope them
+   to the process that needs them.
 
 3. **Start chatting**:
    ```bash
@@ -306,8 +313,13 @@ venice config init
 # Show current config
 venice config show
 
-# Set values
-venice config set api_key YOUR_KEY
+# Set the API key using a hidden prompt
+venice config set api_key
+
+# Or read the API key from standard input
+printf '%s' "$VENICE_API_KEY" | venice config set api_key --stdin
+
+# Set non-secret values
 venice config set default_model kimi-k2-5
 venice config set default_voice af_sky
 
@@ -332,6 +344,10 @@ venice config path
 | `output_format` | Default output format |
 | `no_color` | Disable colored output |
 | `show_usage` | Show token usage after requests |
+
+On POSIX systems, the CLI restricts the config directory to `0700` and the
+config file to `0600`. Windows does not implement equivalent POSIX permission
+bits, so protection there depends on the user profile's inherited ACLs.
 
 ### Conversation History
 
