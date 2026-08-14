@@ -78,7 +78,10 @@ export function registerCharactersCommand(program: Command): void {
           console.log('');
 
           for (const review of reviews.data) {
-            const stars = '★'.repeat(review.rating) + '☆'.repeat(Math.max(0, 5 - review.rating));
+            const rating = Number.isFinite(review.rating)
+              ? Math.min(5, Math.max(0, Math.round(review.rating)))
+              : 0;
+            const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
             console.log(`  ${c.yellow(stars)}  ${c.cyan(sanitizeTerminalText(review.username))}`);
             if (review.message) {
               console.log(`    ${sanitizeTerminalText(review.message)}`);
