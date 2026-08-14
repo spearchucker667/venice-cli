@@ -58,12 +58,15 @@ export class VeniceApiError extends Error {
   }
 }
 
-function getHeaders(): Record<string, string> {
-  return {
-    'Authorization': `Bearer ${requireApiKey()}`,
+function getHeaders(auth = true): Record<string, string> {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'User-Agent': `venice-cli/${getVersion()}`,
   };
+  if (auth) {
+    headers['Authorization'] = `Bearer ${requireApiKey()}`;
+  }
+  return headers;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -98,6 +101,8 @@ export async function apiRequest<T>(
     spinnerText?: string;
     timeoutMs?: number;
     additionalHeaders?: Record<string, string>;
+    auth?: boolean;
+    onHeaders?: (headers: Headers) => void;
   } = {}
 ): Promise<T> {
   const {
@@ -109,6 +114,8 @@ export async function apiRequest<T>(
     spinnerText = 'Processing...',
     timeoutMs = DEFAULT_TIMEOUT_MS,
     additionalHeaders = {},
+    auth = true,
+    onHeaders,
   } = options;
 
   let spinner = showSpinner && !stream ? startSpinner(spinnerText) : null;
@@ -121,7 +128,7 @@ export async function apiRequest<T>(
     try {
       const response = await fetch(`${VENICE_API}${endpoint}`, {
         method,
-        headers: { ...getHeaders(), ...additionalHeaders },
+        headers: { ...getHeaders(auth), ...additionalHeaders },
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
@@ -137,6 +144,8 @@ export async function apiRequest<T>(
         stopSpinner(true);
         spinner = null;
       }
+
+      onHeaders?.(response.headers);
 
       if (stream) {
         return response as unknown as T;
@@ -931,4 +940,65 @@ export async function fetchTeeSignature(
     spinnerText: 'Fetching TEE signature...',
     retries: 1,
   });
+}
+
+export type JsonRpcRequest = {
+  jsonrpc: '2.0';
+  method: string;
+  params?: unknown;
+  id: number | string;
+};
+
+export type JsonRpcErrorObject = {
+  code: number;
+  message: string;
+  data?: unknown;
+};
+
+export type JsonRpcResponse = {
+  jsonrpc?: string;
+  id?: number | string;
+  result?: unknown;
+  error?: JsonRpcErrorObject;
+};
+
+export type CryptoRpcResult = {
+  body: JsonRpcResponse | JsonRpcResponse[];
+  credits?: string;
+  costUsd?: string;
+  requestId?: string;
+};
+
+export async function listCryptoNetworks(): Promise<string[]> {
+  const response = await apiRequest<{ networks?: string[] }>('/crypto/rpc/networks', {
+    method: 'GET',
+    auth: false,
+    spinnerText: 'Fetching RPC networks...',
+  });
+  return response.networks ?? [];
+}
+
+export async function cryptoRpc(
+  network: string,
+  body: JsonRpcRequest | JsonRpcRequest[]
+): Promise<CryptoRpcResult> {
+  let credits: string | undefined;
+  let costUsd: string | undefined;
+  let requestId: string | undefined;
+
+  const data = await apiRequest<JsonRpcResponse | JsonRpcResponse[]>(
+    `/crypto/rpc/${encodeURIComponent(network)}`,
+    {
+      method: 'POST',
+      body,
+      spinnerText: 'Sending RPC request...',
+      onHeaders: (headers) => {
+        credits = headers.get('x-venice-rpc-credits') ?? undefined;
+        costUsd = headers.get('x-venice-rpc-cost-usd') ?? undefined;
+        requestId = headers.get('x-request-id') ?? undefined;
+      },
+    }
+  );
+
+  return { body: data, credits, costUsd, requestId };
 }

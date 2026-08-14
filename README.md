@@ -53,6 +53,7 @@ npx veniceai-cli chat 'Hello, world!'
 - 🎭 **Character Personas** for fun interactions
 - 💾 **Conversation History** with continue mode
 - 📊 **Usage Tracking** for token monitoring
+- ⛓️ **Crypto RPC** for Ethereum, Base, Solana, and more
 - 🐚 **Shell Completions** for bash, zsh, fish
 
 ## Commands
@@ -296,6 +297,37 @@ venice embeddings "Text to embed"
 # Save to file
 venice embeddings -o vectors.json "Text to embed"
 ```
+
+### Crypto RPC
+
+Venice proxies JSON-RPC to supported blockchain nodes with the same API key. Listing networks is public and does not require a key.
+
+```bash
+# List supported network slugs (no API key required)
+venice rpc networks
+
+# Call a JSON-RPC method
+venice rpc ethereum-mainnet eth_blockNumber
+venice rpc base-mainnet eth_getBalance 0xYourAddress latest
+
+# JSON object/array/number params are parsed; everything else stays a string
+venice rpc ethereum-mainnet eth_call '{"to":"0x...","data":"0x..."}' latest
+
+# Batch up to 100 JSON-RPC objects from a file
+venice rpc ethereum-mainnet --batch reqs.json
+
+# Machine-readable output
+venice rpc ethereum-mainnet eth_chainId -f json
+```
+
+Pretty mode prints the JSON-RPC result and, when present, `X-Venice-RPC-Credits` / cost headers. JSON-RPC `error` responses exit non-zero.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--batch <file>` | JSON array of JSON-RPC 2.0 objects (max 100) |
+| `-f, --format <format>` | Output format (pretty\|json) |
 
 ### Configuration
 

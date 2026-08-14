@@ -24,6 +24,7 @@ import { registerCharactersCommand } from './commands/characters.js';
 import { registerCompletionsCommand } from './commands/completions.js';
 import { registerVideoCommands } from './commands/video.js';
 import { registerTeeCommand } from './commands/tee.js';
+import { registerRpcCommand } from './commands/rpc.js';
 import { formatError, getChalk } from './lib/output.js';
 import { getVersion } from './lib/version.js';
 
@@ -68,6 +69,7 @@ async function main() {
   registerCompletionsCommand(program);
   registerVideoCommands(program);
   registerTeeCommand(program);
+  registerRpcCommand(program);
 
   // Handle errors gracefully
   program.exitOverride();

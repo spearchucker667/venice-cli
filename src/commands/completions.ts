@@ -44,7 +44,7 @@ _venice_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="chat search image tts transcribe models embeddings upscale history usage config characters voices video completions"
+    local commands="chat search image tts transcribe models embeddings upscale history usage config characters voices video rpc completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
     local video_cmds="generate status retrieve models"
@@ -72,6 +72,10 @@ _venice_completion() {
             ;;
         video)
             COMPREPLY=( \$(compgen -W "\${video_cmds}" -- "\${cur}") )
+            return 0
+            ;;
+        rpc)
+            COMPREPLY=( \$(compgen -W "networks" -- "\${cur}") )
             return 0
             ;;
         -m|--model)
@@ -154,6 +158,10 @@ _venice_completion() {
             COMPREPLY=( \$(compgen -W "-d --days --today --month -f --format" -- "\${cur}") )
             return 0
             ;;
+        rpc)
+            COMPREPLY=( \$(compgen -W "networks --batch -f --format" -- "\${cur}") )
+            return 0
+            ;;
     esac
 
     COMPREPLY=( \$(compgen -W "\${commands}" -- "\${cur}") )
@@ -183,6 +191,7 @@ _venice() {
         'config:Manage configuration'
         'characters:List available characters'
         'voices:List available TTS voices'
+        'rpc:Proxy JSON-RPC requests to blockchain nodes'
         'completions:Generate shell completions'
     )
 
@@ -350,6 +359,15 @@ _venice() {
                     )
                     _describe -t history_cmds 'history commands' history_cmds
                     ;;
+                rpc)
+                    _arguments \\
+                        '--batch[JSON array of JSON-RPC requests]:file:_files' \\
+                        '-f[Output format]:format:((\$formats))' \\
+                        '--format[Output format]:format:((\$formats))' \\
+                        '1:network:(networks ethereum-mainnet base-mainnet solana-mainnet)' \\
+                        '2:method:' \\
+                        '*:params:'
+                    ;;
                 completions)
                     _arguments '1:shell:(bash zsh fish)'
                     ;;
@@ -365,7 +383,7 @@ function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
 # Main commands
-set -l commands chat search image upscale tts transcribe video models embeddings history usage config characters voices completions
+set -l commands chat search image upscale tts transcribe video models embeddings history usage config characters voices rpc completions
 
 # Disable file completions by default
 complete -c venice -f
@@ -386,6 +404,7 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a config -d "
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a characters -d "List characters"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voices -d "List voices"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions -d "Shell completions"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a rpc -d "Crypto JSON-RPC"
 
 # Models
 set -l models kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25
@@ -449,5 +468,10 @@ complete -c venice -n "__fish_seen_subcommand_from history" -a clear -d "Clear h
 complete -c venice -n "__fish_seen_subcommand_from history" -a export -d "Export history"
 
 # Completions
-complete -c venice -n "__fish_seen_subcommand_from completions" -a "bash zsh fish" -d "Shell"`;
+complete -c venice -n "__fish_seen_subcommand_from completions" -a "bash zsh fish" -d "Shell"
+
+# RPC
+complete -c venice -n "__fish_seen_subcommand_from rpc" -a networks -d "List supported networks"
+complete -c venice -n "__fish_seen_subcommand_from rpc" -l batch -d "JSON-RPC batch file" -r
+complete -c venice -n "__fish_seen_subcommand_from rpc" -s f -l format -d "Format" -xa "$formats"`;
 }
