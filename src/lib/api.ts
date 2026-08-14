@@ -281,6 +281,7 @@ export async function* chatCompletionStream(
 ): AsyncGenerator<{
   content?: string;
   tool_calls?: any[];
+  finish_reason?: string;
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
   completionId?: string;
   done: boolean;
@@ -343,7 +344,8 @@ export async function* chatCompletionStream(
 
           try {
             const json = JSON.parse(data);
-            const delta = json.choices?.[0]?.delta;
+            const choice = json.choices?.[0];
+            const delta = choice?.delta;
             
             // Capture completion ID for E2EE signature verification
             if (json.id && !completionId) {
@@ -360,6 +362,10 @@ export async function* chatCompletionStream(
 
             if (delta?.tool_calls) {
               yield { tool_calls: delta.tool_calls, done: false, completionId };
+            }
+
+            if (choice?.finish_reason) {
+              yield { finish_reason: choice.finish_reason, done: false, completionId };
             }
           } catch {
             // Skip malformed JSON
