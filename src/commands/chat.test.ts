@@ -113,6 +113,20 @@ test('chat rejects --no-thinking with a non-none reasoning effort', () => {
   }
 });
 
+test('chat with no prompt on piped stdin does not start a REPL', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-piped-'));
+
+  try {
+    const result = runCli(['chat'], homeDir);
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}\n${result.stdout}`, /No prompt provided/i);
+    assert.doesNotMatch(`${result.stderr}\n${result.stdout}`, /you>/);
+    assert.doesNotMatch(`${result.stderr}\n${result.stdout}`, /Interactive chat/i);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
 test('chat --image fails before the API when the file is missing', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-image-'));
 

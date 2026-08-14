@@ -71,6 +71,7 @@ import {
   hasChatAttachments,
   parseChatAttachments,
 } from '../lib/chat-attachments.js';
+import { runChatRepl, shouldEnterRepl } from '../lib/chat-repl.js';
 
 interface E2EEContext {
   privateKey: Uint8Array;
@@ -270,7 +271,7 @@ function encryptMessagesForE2EE(
 export function registerChatCommand(program: Command): void {
   program
     .command('chat [prompt...]')
-    .description('Chat with an AI model')
+    .description('Chat with an AI model (interactive REPL when run with no prompt on a TTY)')
     .option('-m, --model <model>', 'Model to use')
     .option('-s, --system <prompt>', 'System prompt')
     .option('-c, --character <name>', 'Character/persona to use')
@@ -358,13 +359,15 @@ export function registerChatCommand(program: Command): void {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);
       }
+
+      const enterRepl = shouldEnterRepl(prompt, process.stdin.isTTY);
       
-      if (!prompt && !process.stdin.isTTY) {
+      if (!enterRepl && !prompt && !process.stdin.isTTY) {
         // Read from stdin
         prompt = await readStdin();
       }
 
-      if (!prompt && !hasChatAttachments(attachments)) {
+      if (!enterRepl && !prompt && !hasChatAttachments(attachments)) {
         console.error(formatError('No prompt provided. Usage: venice chat "Your message"'));
         process.exit(1);
       }
@@ -499,16 +502,6 @@ export function registerChatCommand(program: Command): void {
         }
       }
 
-      // Add user message
-      let userContent: Message['content'];
-      try {
-        userContent = await buildUserMessageContent(prompt, attachments);
-      } catch (error) {
-        console.error(formatError(error instanceof Error ? error.message : String(error)));
-        process.exit(1);
-      }
-      messages.push({ role: 'user', content: userContent });
-
       // Get tool definitions
       const toolNames = options.tools?.split(',').map((t: string) => t.trim()) || [];
       const tools = getToolDefinitions(toolNames);
@@ -551,14 +544,26 @@ export function registerChatCommand(program: Command): void {
         promptCacheRetention,
       };
 
-      try {
+      const runChatTurn = async (): Promise<void> => {
         if (shouldStream) {
           await streamChat(messages, model, tools, options.interactiveTools, format, chatExtras);
         } else {
           await nonStreamChat(messages, model, tools, options.interactiveTools, format, chatExtras);
         }
+      };
 
-        // Save to history (don't save encrypted content)
+      const submitUserTurn = async (content: Message['content']): Promise<void> => {
+        messages.push({ role: 'user', content });
+        await runChatTurn();
+      };
+
+      const saveHistoryIfNeeded = (force: boolean): void => {
+        if (!force && (useE2EE || useTEE)) {
+          return;
+        }
+        if (!messages.some((message) => message.role === 'user')) {
+          return;
+        }
         addConversation({
           id: randomUUID(),
           timestamp: new Date().toISOString(),
@@ -566,6 +571,35 @@ export function registerChatCommand(program: Command): void {
           model,
           character: options.character,
         });
+      };
+
+      try {
+        if (enterRepl) {
+          if (format === 'pretty') {
+            console.log(`Interactive chat (${model}). Type exit, quit, or Ctrl-C to leave.\n`);
+          }
+          let firstTurn = true;
+          await runChatRepl({
+            input: process.stdin,
+            output: process.stdout,
+            onTurn: async (line) => {
+              try {
+                const content = firstTurn
+                  ? await buildUserMessageContent(line, attachments)
+                  : line;
+                await submitUserTurn(content);
+                firstTurn = false;
+              } catch (error) {
+                console.error(formatError(error instanceof Error ? error.message : String(error)));
+              }
+            },
+          });
+          saveHistoryIfNeeded(false);
+        } else {
+          const userContent = await buildUserMessageContent(prompt, attachments);
+          await submitUserTurn(userContent);
+          saveHistoryIfNeeded(true);
+        }
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);
@@ -689,6 +723,17 @@ interface ChatRunExtras {
   reasoningEffort?: ReasoningEffort;
   promptCacheKey?: string;
   promptCacheRetention?: PromptCacheRetention;
+}
+
+function appendAssistantMessage(messages: Message[], content: string): void {
+  if (!content) {
+    return;
+  }
+  const last = messages[messages.length - 1];
+  if (last?.role === 'assistant' && last.content === content && !last.tool_calls) {
+    return;
+  }
+  messages.push({ role: 'assistant', content });
 }
 
 function buildRequestOptions(
@@ -882,18 +927,25 @@ async function streamChat(
           ...effectiveExtras,
           responseFormat: undefined,
         });
+        let followUpContent = '';
         for await (const chunk of chatCompletionStream(messages, followUpOptions)) {
           if (chunk.reasoning_content && !stripThinking) {
             process.stdout.write(format === 'pretty' ? c.dim(chunk.reasoning_content) : chunk.reasoning_content);
           }
           if (chunk.content) {
             process.stdout.write(chunk.content);
+            followUpContent += chunk.content;
           }
           if (chunk.usage) {
             usage = chunk.usage;
           }
         }
+        if (followUpContent) {
+          appendAssistantMessage(messages, followUpContent);
+        }
       }
+    } else {
+      appendAssistantMessage(messages, fullContent);
     }
 
     console.log('\n');
@@ -1059,17 +1111,20 @@ async function nonStreamChat(
       responseFormat: undefined,
     }));
     outputChatText(followUp.content, followUp.reasoning_content, format, extras);
+    appendAssistantMessage(messages, followUp.content);
     
     if (followUp.usage && format === 'pretty') {
       console.log(formatUsage(followUp.usage));
     }
   } else if (extras.responseFormat) {
     outputStructuredResponse(response.content, extras.responseFormat, format);
+    appendAssistantMessage(messages, response.content);
     if (response.usage && format === 'pretty') {
       console.log(formatUsage(response.usage));
     }
   } else {
     outputChatText(response.content, response.reasoning_content, format, extras);
+    appendAssistantMessage(messages, response.content);
     
     if (response.usage && format === 'pretty') {
       console.log(formatUsage(response.usage));
