@@ -288,11 +288,12 @@ export function registerChatCommand(program: Command): void {
       let useTEE = false;
       let e2eeContext: E2EEContext | undefined;
       let modelInfo: Model | undefined;
+      let catalog: Model[] = [];
 
       // Fetch model capabilities from API
       try {
-        const models = await listModels({ showSpinner: !options.quiet });
-        modelInfo = models.find((m) => m.id === model);
+        catalog = await listModels({ showSpinner: !options.quiet });
+        modelInfo = catalog.find((m) => m.id === model);
       } catch {
         // If we can't fetch models and user explicitly requested E2EE, fail
         if (options.e2ee === true) {
@@ -335,6 +336,7 @@ export function registerChatCommand(program: Command): void {
           const continueError = continueConversationError(lastConv, {
             model,
             privacy: currentPrivacy,
+            lastModel: catalog.find((m) => m.id === lastConv.model),
           });
           if (continueError) {
             console.error(formatError(continueError));
@@ -930,12 +932,13 @@ export function modelImpliesPrivateHistory(modelId: string): boolean {
 
 export function continueConversationError(
   lastConv: { model: string; privacy?: string },
-  current: { model: string; privacy: 'plain' | 'e2ee' | 'tee' }
+  current: { model: string; privacy: 'plain' | 'e2ee' | 'tee'; lastModel?: Model }
 ): string | undefined {
   const lastPrivate =
     lastConv.privacy === 'e2ee' ||
     lastConv.privacy === 'tee' ||
-    modelImpliesPrivateHistory(lastConv.model);
+    modelImpliesPrivateHistory(lastConv.model) ||
+    (current.lastModel ? isE2EEModel(current.lastModel) || isTEEModel(current.lastModel) : false);
   const currentPrivate =
     current.privacy === 'e2ee' ||
     current.privacy === 'tee' ||

@@ -78,6 +78,24 @@ test('continueConversationError allows untagged private-model history into the s
   );
 });
 
+test('continueConversationError uses catalog capabilities when the model id is not obviously private', () => {
+  assert.match(
+    continueConversationError(
+      { model: 'qwen3-5-122b-a10b' },
+      {
+        model: 'kimi-k2-5',
+        privacy: 'plain',
+        lastModel: {
+          id: 'qwen3-5-122b-a10b',
+          type: 'text',
+          model_spec: { capabilities: { supportsTeeAttestation: true } },
+        },
+      }
+    ) || '',
+    mixError
+  );
+});
+
 test('continueConversationError rejects plain-tagged private-model history into another plain model', () => {
   assert.match(
     continueConversationError(
