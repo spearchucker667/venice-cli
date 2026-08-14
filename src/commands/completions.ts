@@ -44,16 +44,16 @@ _venice_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="chat search image tts transcribe models embeddings upscale history usage config characters voices video completions"
+    local commands="chat search image tts transcribe models embeddings upscale history usage config characters voices voice video completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
     local video_cmds="generate status retrieve models"
+    local voice_cmds="clone"
     local formats="pretty json markdown raw"
     local models="kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25"
     local image_models="flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro"
     local video_models="wan-2.6-text-to-video wan-2.6-image-to-video veo3-fast-text-to-video sora2-text-to-video kling-v3-pro-text-to-video"
     local asr_models="nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3"
-    local voices="af_sky af_bella af_nicole am_adam am_michael bf_emma bf_isabella bm_george bm_lewis"
     local characters="pirate wizard scientist poet coder teacher comedian philosopher"
     local tools="calculator weather datetime random base64 hash"
 
@@ -74,12 +74,12 @@ _venice_completion() {
             COMPREPLY=( \$(compgen -W "\${video_cmds}" -- "\${cur}") )
             return 0
             ;;
-        -m|--model)
-            COMPREPLY=( \$(compgen -W "\${models} \${image_models}" -- "\${cur}") )
+        voice)
+            COMPREPLY=( \$(compgen -W "\${voice_cmds}" -- "\${cur}") )
             return 0
             ;;
-        -v|--voice)
-            COMPREPLY=( \$(compgen -W "\${voices}" -- "\${cur}") )
+        -m|--model)
+            COMPREPLY=( \$(compgen -W "\${models} \${image_models}" -- "\${cur}") )
             return 0
             ;;
         -c|--character)
@@ -114,7 +114,11 @@ _venice_completion() {
             return 0
             ;;
         tts|speak)
-            COMPREPLY=( \$(compgen -W "-v --voice -m --model -o --output --format" -- "\${cur}") )
+            COMPREPLY=( \$(compgen -W "-v --voice -m --model -o --output --format -s --speed --temperature --streaming" -- "\${cur}") )
+            return 0
+            ;;
+        voice)
+            COMPREPLY=( \$(compgen -W "clone" -- "\${cur}") )
             return 0
             ;;
         transcribe)
@@ -183,6 +187,7 @@ _venice() {
         'config:Manage configuration'
         'characters:List available characters'
         'voices:List available TTS voices'
+        'voice:Create and manage cloned voices'
         'completions:Generate shell completions'
     )
 
@@ -215,14 +220,6 @@ _venice() {
     local -a asr_models=(
         'nvidia/parakeet-tdt-0.6b-v3:Parakeet ASR (fast, default)'
         'openai/whisper-large-v3:Whisper Large V3'
-    )
-
-    local -a voices=(
-        'af_sky:Sky (American Female)'
-        'af_bella:Bella (American Female)'
-        'am_adam:Adam (American Male)'
-        'bf_emma:Emma (British Female)'
-        'bm_george:George (British Male)'
     )
 
     local -a characters=(
@@ -299,11 +296,22 @@ _venice() {
                     ;;
                 tts|speak)
                     _arguments \\
-                        '-v[Voice to use]:voice:((\$voices))' \\
+                        '-v[Voice to use]:voice:' \\
                         '-m[Model to use]:model:(tts-kokoro)' \\
                         '-o[Output file]:file:_files' \\
-                        '--format[Audio format]:format:(mp3 wav opus)' \\
+                        '--format[Audio format]:format:(mp3 wav opus aac flac pcm)' \\
+                        '-s[Speech speed]:speed:' \\
+                        '--speed[Speech speed]:speed:' \\
+                        '--temperature[Sampling temperature]:temperature:' \\
+                        '--streaming[Request sentence streaming]' \\
                         '*:text:'
+                    ;;
+                voice)
+                    _arguments \\
+                        '1:action:(clone)' \\
+                        '2:audio file:_files' \\
+                        '-m[Voice cloning model]:model:' \\
+                        '-f[Output format]:format:(pretty json)'
                     ;;
                 transcribe)
                     _arguments \\
@@ -365,7 +373,7 @@ function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
 # Main commands
-set -l commands chat search image upscale tts transcribe video models embeddings history usage config characters voices completions
+set -l commands chat search image upscale tts transcribe video models embeddings history usage config characters voices voice completions
 
 # Disable file completions by default
 complete -c venice -f
@@ -385,6 +393,7 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a usage -d "S
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a config -d "Manage config"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a characters -d "List characters"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voices -d "List voices"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voice -d "Create and manage cloned voices"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions -d "Shell completions"
 
 # Models
@@ -392,7 +401,6 @@ set -l models kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-o
 set -l image_models flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro
 set -l video_models wan-2.6-text-to-video wan-2.6-image-to-video veo3-fast-text-to-video sora2-text-to-video kling-v3-pro-text-to-video
 set -l asr_models nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3
-set -l voices af_sky af_bella af_nicole am_adam am_michael bf_emma bm_george
 set -l characters pirate wizard scientist poet coder teacher comedian philosopher
 set -l tools calculator weather datetime random base64 hash
 set -l formats pretty json markdown raw
@@ -414,8 +422,17 @@ complete -c venice -n "__fish_seen_subcommand_from image" -s w -l width -d "Widt
 complete -c venice -n "__fish_seen_subcommand_from image" -s h -l height -d "Height"
 
 # TTS options
-complete -c venice -n "__fish_seen_subcommand_from tts" -s v -l voice -d "Voice" -xa "$voices"
+complete -c venice -n "__fish_seen_subcommand_from tts" -s v -l voice -d "Voice"
 complete -c venice -n "__fish_seen_subcommand_from tts" -s o -l output -d "Output file" -r
+complete -c venice -n "__fish_seen_subcommand_from tts" -s s -l speed -d "Speech speed"
+complete -c venice -n "__fish_seen_subcommand_from tts" -l temperature -d "Sampling temperature"
+complete -c venice -n "__fish_seen_subcommand_from tts" -l streaming -d "Request sentence streaming"
+
+# Voice cloning
+complete -c venice -n "__fish_seen_subcommand_from voice; and not __fish_seen_subcommand_from clone" -a clone -d "Clone a reference voice"
+complete -c venice -n "__fish_seen_subcommand_from voice; and __fish_seen_subcommand_from clone" -s m -l model -d "Voice cloning model"
+complete -c venice -n "__fish_seen_subcommand_from voice; and __fish_seen_subcommand_from clone" -s f -l format -d "Output format" -xa "pretty json"
+complete -c venice -n "__fish_seen_subcommand_from voice; and __fish_seen_subcommand_from clone" -r
 
 # Transcribe options
 complete -c venice -n "__fish_seen_subcommand_from transcribe" -s m -l model -d "Model" -xa "$asr_models"

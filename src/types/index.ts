@@ -67,6 +67,10 @@ export interface TTSOptions {
   voice?: string;
   model?: string;
   output?: string;
+  format?: 'mp3' | 'wav' | 'opus' | 'aac' | 'flac' | 'pcm';
+  speed?: number;
+  temperature?: number;
+  streaming?: boolean;
 }
 
 export interface TranscribeOptions {
@@ -109,6 +113,17 @@ export interface Model {
   model_spec?: {
     description?: string;
     capabilities?: ModelCapabilities;
+    voices?: string[];
+    default_voice?: string;
+    supported_formats?: string[];
+    default_format?: string;
+    supports_custom_voice_id?: boolean;
+    voice_cloning?: {
+      mode: 'zero_shot' | 'persistent';
+      accepted_formats: string[];
+      min_sample_seconds: number;
+      retention_days: number;
+    };
   };
 }
 
