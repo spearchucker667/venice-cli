@@ -9,6 +9,15 @@ test('isLegacyLocalCharacter only matches the old built-in personas', () => {
   assert.equal(isLegacyLocalCharacter(undefined), false);
 });
 
+test('explicit -c slugs are sent as-is even when they match old persona names', () => {
+  // Selection is not denylisted; restoreCharacterSlug is only for --continue.
+  assert.equal(isLegacyLocalCharacter('poet'), true);
+  assert.equal(
+    restoreCharacterSlug({ character: 'poet', messages: [{ role: 'user' }] }),
+    'poet'
+  );
+});
+
 test('restoreCharacterSlug keeps catalog slugs that collide with old persona names', () => {
   assert.equal(
     restoreCharacterSlug({ character: 'poet', messages: [{ role: 'user' }] }),

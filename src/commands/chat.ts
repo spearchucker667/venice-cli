@@ -330,14 +330,9 @@ export function registerChatCommand(program: Command): void {
       }
 
       const lastConv = options.continue ? getLastConversation() : undefined;
-      if (options.character && isLegacyLocalCharacter(options.character)) {
-        console.error(formatError(
-          `Local persona "${options.character}" is no longer built in. ` +
-          'Use a catalog slug from `venice characters`.'
-        ));
-        process.exit(1);
-      }
-
+      // Send -c/--character to the API as a catalog slug, including names that
+      // used to be local personas (poet, pirate, …). Only skip those names when
+      // restoring old local-persona history that already has a system prompt.
       const historyCharacter = options.character
         ? String(options.character)
         : restoreCharacterSlug(lastConv);
