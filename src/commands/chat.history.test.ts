@@ -56,6 +56,16 @@ test('continueConversationError rejects untagged private-model history into plai
   );
 });
 
+test('continueConversationError rejects untagged plaintext history into E2EE/TEE', () => {
+  assert.match(
+    continueConversationError(
+      { model: 'kimi-k2-5' },
+      { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'e2ee' }
+    ) || '',
+    /plaintext conversation with an E2EE\/TEE session/
+  );
+});
+
 test('continueConversationError allows untagged private-model history into the same model', () => {
   assert.equal(
     continueConversationError(

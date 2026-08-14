@@ -940,6 +940,15 @@ export function continueConversationError(
       );
     }
     if (
+      !modelImpliesPrivateHistory(lastConv.model) &&
+      (current.privacy === 'e2ee' || current.privacy === 'tee')
+    ) {
+      return (
+        'Cannot continue a plaintext conversation with an E2EE/TEE session. ' +
+        'Start a new chat or continue with a non-private model.'
+      );
+    }
+    if (
       modelImpliesPrivateHistory(lastConv.model) &&
       (current.privacy === 'e2ee' || current.privacy === 'tee') &&
       lastConv.model !== current.model
