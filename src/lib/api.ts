@@ -10,6 +10,7 @@ import { getVersion } from './version.js';
 import { Readable } from 'stream';
 import type { Message, ToolDefinition, Model, Character } from '../types/index.js';
 import {
+  MAX_IMAGE_EDIT_BYTES,
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
   assertFileSizeWithinLimit,
@@ -58,12 +59,15 @@ export class VeniceApiError extends Error {
   }
 }
 
-function getHeaders(): Record<string, string> {
-  return {
-    'Authorization': `Bearer ${requireApiKey()}`,
+function getHeaders(authenticated = true): Record<string, string> {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'User-Agent': `venice-cli/${getVersion()}`,
   };
+  if (authenticated) {
+    headers.Authorization = `Bearer ${requireApiKey()}`;
+  }
+  return headers;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -98,6 +102,8 @@ export async function apiRequest<T>(
     spinnerText?: string;
     timeoutMs?: number;
     additionalHeaders?: Record<string, string>;
+    responseType?: 'json' | 'arrayBuffer';
+    authenticated?: boolean;
   } = {}
 ): Promise<T> {
   const {
@@ -109,6 +115,8 @@ export async function apiRequest<T>(
     spinnerText = 'Processing...',
     timeoutMs = DEFAULT_TIMEOUT_MS,
     additionalHeaders = {},
+    responseType = 'json',
+    authenticated = true,
   } = options;
 
   let spinner = showSpinner && !stream ? startSpinner(spinnerText) : null;
@@ -121,7 +129,7 @@ export async function apiRequest<T>(
     try {
       const response = await fetch(`${VENICE_API}${endpoint}`, {
         method,
-        headers: { ...getHeaders(), ...additionalHeaders },
+        headers: { ...getHeaders(authenticated), ...additionalHeaders },
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
@@ -142,6 +150,9 @@ export async function apiRequest<T>(
         return response as unknown as T;
       }
 
+      if (responseType === 'arrayBuffer') {
+        return await response.arrayBuffer() as T;
+      }
       return await response.json() as T;
     } catch (error) {
       clearTimeout(timeoutId);
@@ -383,6 +394,7 @@ export async function generateImage(
     height?: number;
     n?: number;
     format?: 'png' | 'jpeg' | 'webp';
+    stylePreset?: string;
   } = {}
 ): Promise<string[]> {
   const body: Record<string, unknown> = {
@@ -395,6 +407,9 @@ export async function generateImage(
 
   if (options.n && options.n > 1) {
     body.variants = options.n;
+  }
+  if (options.stylePreset) {
+    body.style_preset = options.stylePreset;
   }
 
   const response = await apiRequest<{
@@ -412,6 +427,101 @@ export async function generateImage(
   });
 
   return response.images;
+}
+
+type ImageEditOptions = {
+  model?: string;
+  aspectRatio?: string;
+  enhancePrompt?: boolean;
+  safeMode?: boolean;
+};
+
+async function readImageAsBase64(imagePath: string): Promise<string> {
+  const fs = await import('fs');
+
+  if (!fs.existsSync(imagePath)) {
+    throw new Error(`File not found: ${imagePath}`);
+  }
+  assertFileSizeWithinLimit(imagePath, MAX_IMAGE_EDIT_BYTES, 'Image file');
+  return (await fs.promises.readFile(imagePath)).toString('base64');
+}
+
+// Edit a single local image
+export async function editImage(
+  imagePath: string,
+  prompt: string,
+  options: ImageEditOptions = {}
+): Promise<ArrayBuffer> {
+  const body: Record<string, unknown> = {
+    image: await readImageAsBase64(imagePath),
+    prompt,
+  };
+  if (options.model) body.model = options.model;
+  if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+  if (options.enhancePrompt) body.enhance_prompt = true;
+  if (options.safeMode === false) body.safe_mode = false;
+
+  const response = await apiRequest<ArrayBuffer>('/image/edit', {
+    method: 'POST',
+    body,
+    responseType: 'arrayBuffer',
+    spinnerText: 'Editing image...',
+  });
+
+  trackUsage({ command: 'image edit', model: options.model || 'default' });
+  return response;
+}
+
+// Edit using one to three local image layers
+export async function multiEditImage(
+  imagePaths: string[],
+  prompt: string,
+  options: ImageEditOptions = {}
+): Promise<ArrayBuffer> {
+  if (imagePaths.length < 1 || imagePaths.length > 3) {
+    throw new Error('Multi-edit requires between 1 and 3 images.');
+  }
+
+  const body: Record<string, unknown> = {
+    images: await Promise.all(imagePaths.map(readImageAsBase64)),
+    prompt,
+  };
+  if (options.model) body.modelId = options.model;
+  if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+  if (options.enhancePrompt) body.enhance_prompt = true;
+  if (options.safeMode === false) body.safe_mode = false;
+
+  const response = await apiRequest<ArrayBuffer>('/image/multi-edit', {
+    method: 'POST',
+    body,
+    responseType: 'arrayBuffer',
+    spinnerText: 'Editing image layers...',
+  });
+
+  trackUsage({ command: 'image multi-edit', model: options.model || 'default' });
+  return response;
+}
+
+// Remove the background from a local image
+export async function removeImageBackground(imagePath: string): Promise<ArrayBuffer> {
+  const response = await apiRequest<ArrayBuffer>('/image/background-remove', {
+    method: 'POST',
+    body: { image: await readImageAsBase64(imagePath) },
+    responseType: 'arrayBuffer',
+    spinnerText: 'Removing background...',
+  });
+
+  trackUsage({ command: 'image bg-remove', model: 'background-remove' });
+  return response;
+}
+
+// List style presets accepted by image generation
+export async function listImageStyles(): Promise<string[]> {
+  const response = await apiRequest<{ data: string[] }>('/image/styles', {
+    showSpinner: false,
+    authenticated: false,
+  });
+  return response.data || [];
 }
 
 // Image upscale

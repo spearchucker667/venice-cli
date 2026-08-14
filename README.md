@@ -149,6 +149,31 @@ venice image -w 1024 -h 768 "Landscape photograph"
 
 # Use a specific model
 venice image -m flux-1-dev "Artistic portrait"
+
+# Apply a style preset
+venice image --style Cinematic "A gondola at sunset"
+```
+
+### Image Editing
+
+```bash
+# Edit a local image
+venice image-edit photo.jpg "Remove the cars in the background" -o edited.png
+
+# Enhance the prompt using the input image
+venice image-edit portrait.jpg "Turn this into an illustration" \
+  --enhance-prompt -o illustrated.png
+
+# Edit with up to three layered images
+venice image-multi-edit base.jpg overlay.png \
+  --prompt "Blend the overlay into the scene" -o composited.png
+
+# Remove a background and save a transparent PNG
+venice image-bg-remove product.jpg -o cutout.png
+
+# List available style presets
+venice image-styles
+venice image-styles --format json
 ```
 
 ### Image Upscaling
