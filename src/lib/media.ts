@@ -10,6 +10,7 @@ export const MAX_VIDEO_DOWNLOAD_BYTES = 1024 * MB;
 export const MAX_UPSCALE_IMAGE_BYTES = 25 * MB;
 export const MAX_TRANSCRIPTION_AUDIO_BYTES = 200 * MB;
 export const MAX_VIDEO_REFERENCE_IMAGE_BYTES = 20 * MB;
+export const MAX_VIDEO_UPSCALE_BYTES = 200 * MB;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 120000;
 
 export function formatBytes(bytes: number): string {
@@ -66,6 +67,34 @@ export function mimeTypeFromPath(filePath: string, fallback = 'application/octet
   };
 
   return mimeByExtension[ext] || fallback;
+}
+
+export async function fileToDataUrl(
+  filePath: string,
+  maxBytes: number,
+  label: string
+): Promise<string> {
+  assertFileSizeWithinLimit(filePath, maxBytes, label);
+  const data = await fs.promises.readFile(filePath);
+  const mimeType = mimeTypeFromPath(filePath, 'video/mp4');
+  return `data:${mimeType};base64,${data.toString('base64')}`;
+}
+
+export function writeBufferToFile(
+  outputPath: string,
+  data: Buffer,
+  maxBytes: number
+): void {
+  if (data.length > maxBytes) {
+    throw new Error(
+      `Refusing to write ${formatBytes(data.length)}. ` +
+      `Maximum allowed size is ${formatBytes(maxBytes)}.`
+    );
+  }
+
+  const outputDir = path.dirname(outputPath);
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(outputPath, data);
 }
 
 function parseContentLength(value: string | null): number | null {

@@ -47,7 +47,7 @@ npx veniceai-cli chat 'Hello, world!'
 - 🖼️ **Image Generation** from text prompts
 - 🔊 **Text-to-Speech** with 35+ voices across languages
 - 🎤 **Speech-to-Text** transcription with timestamps
-- 🎬 **Video Generation** (text-to-video, image-to-video)
+- 🎬 **Video Generation** (quotes, transcription, upscaling, live models)
 - 📐 **Embeddings** generation
 - 🔧 **Function Calling** with built-in tools
 - 🎭 **Character Personas** for fun interactions
@@ -215,25 +215,37 @@ venice video generate -m wan-2.6-image-to-video -i photo.jpg "The scene comes al
 venice video generate -d 10s -a 16:9 "A peaceful forest scene"
 
 # Check status of a video job
-venice video status <queue_id>
+venice video status <queue_id> -m wan-2.6-text-to-video
 
 # Wait for completion (polls every 5s)
-venice video status -w <queue_id>
+venice video status -w <queue_id> -m wan-2.6-text-to-video
 
 # Download completed video
-venice video retrieve <queue_id> -o my_video.mp4
+venice video retrieve <queue_id> -m wan-2.6-text-to-video -o my_video.mp4
 
-# List available video models
+# Delete media after download
+venice video retrieve <queue_id> -m wan-2.6-text-to-video --complete
+
+# Or clean up later
+venice video complete <queue_id> -m wan-2.6-text-to-video
+
+# Estimate price before queueing
+venice video quote -m veo3-fast-text-to-video -d 5s -a 16:9 "sunset"
+
+# Transcribe speech from a public video URL
+venice video transcribe https://example.com/clip.mp4
+
+# Upscale a local file or public URL (2x or 4x)
+venice video upscale clip.mp4 --factor 2 -o clip_2x.mp4
+venice video upscale https://example.com/clip.mp4 --factor 4 --no-wait
+
+# List current video models from the API
 venice video models
 ```
 
-**Available Video Models:**
-- **Wan 2.6**: `wan-2.6-text-to-video`, `wan-2.6-image-to-video`
-- **Veo3**: `veo3-fast-text-to-video`, `veo3-fast-image-to-video`
-- **Sora2**: `sora2-text-to-video`, `sora2-image-to-video`
-- **Kling V3**: `kling-v3-pro-text-to-video`, `kling-v3-pro-image-to-video`
-- **Grok Imagine**: `grok-imagine-text-to-video`, `grok-imagine-image-to-video`
-- **LTX2**: `ltx2-fast-text-to-video`, `ltx2-fast-image-to-video`
+`venice video models` loads the live catalog from `GET /models?type=video`. If that request fails, the CLI prints a short fallback list and says so.
+
+Video transcription accepts a public HTTP(S) URL only. Local files can be upscaled as data URLs (MP4, MOV, or WebM) within the existing size limit.
 
 ### TEE Attestation
 

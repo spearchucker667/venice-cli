@@ -664,18 +664,37 @@ export async function generateEmbeddings(
 
 // List models
 export async function listModels(
-  options: { showSpinner?: boolean } = {}
+  options: { showSpinner?: boolean; type?: string } = {}
 ): Promise<Model[]> {
-  const { showSpinner: showSpinnerOption = true } = options;
+  const { showSpinner: showSpinnerOption = true, type } = options;
+
+  if (type) {
+    const response = await apiRequest<{ data: Model[] }>(
+      `/models?type=${encodeURIComponent(type)}`,
+      {
+        method: 'GET',
+        spinnerText: 'Fetching models...',
+        showSpinner: showSpinnerOption,
+      }
+    );
+
+    return (response.data || []).map((model) => {
+      if (!model.type || model.type.toLowerCase() === 'text') {
+        return { ...model, type };
+      }
+      return model;
+    });
+  }
+
   const modelTypes = ['text', 'asr', 'embedding', 'image', 'tts', 'upscale', 'inpaint', 'video'];
   const merged = new Map<string, Model>();
 
   // API defaults to text-only when no type is provided, so iterate known types
   const requests: Array<{ endpoint: string; requestedType?: string; showSpinner: boolean }> = [
     { endpoint: '/models', showSpinner: showSpinnerOption },
-    ...modelTypes.map((type) => ({
-      endpoint: `/models?type=${encodeURIComponent(type)}`,
-      requestedType: type,
+    ...modelTypes.map((modelType) => ({
+      endpoint: `/models?type=${encodeURIComponent(modelType)}`,
+      requestedType: modelType,
       showSpinner: false,
     })),
   ];
@@ -742,6 +761,112 @@ export async function listCharacters(): Promise<Character[]> {
   }
 }
 
+export type VideoStatusResult = {
+  status: string;
+  average_execution_time?: number;
+  execution_duration?: number;
+  video_url?: string;
+  url?: string;
+  download_url?: string;
+  error?: string;
+  model?: string;
+  duration?: number;
+};
+
+export type VideoRetrieveResult =
+  | { kind: 'status'; status: VideoStatusResult }
+  | { kind: 'video'; bytes: Buffer; contentType: string };
+
+export function classifyVideoRetrieveContentType(
+  contentType: string | null | undefined
+): 'json' | 'video' | 'unknown' {
+  const type = (contentType || '').split(';')[0].trim().toLowerCase();
+  if (!type) return 'unknown';
+  if (type === 'application/json' || type.endsWith('+json')) return 'json';
+  if (type.startsWith('video/') || type === 'application/octet-stream') return 'video';
+  return 'unknown';
+}
+
+export function videoUrlFromStatus(status: VideoStatusResult): string | undefined {
+  return status.video_url || status.url || status.download_url;
+}
+
+function isMp4Buffer(bytes: Buffer): boolean {
+  return bytes.length >= 8 && bytes.subarray(4, 8).toString('ascii') === 'ftyp';
+}
+
+async function retrieveVideoResponse(
+  queueId: string,
+  model: string,
+  options: {
+    deleteOnCompletion?: boolean;
+    spinnerText?: string;
+  } = {}
+): Promise<VideoRetrieveResult> {
+  const spinner = startSpinner(options.spinnerText || 'Checking video status...');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  try {
+    const body: Record<string, unknown> = { queue_id: queueId, model };
+    if (options.deleteOnCompletion !== undefined) {
+      body.delete_media_on_completion = options.deleteOnCompletion;
+    }
+
+    const response = await fetch(`${VENICE_API}/video/retrieve`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw VeniceApiError.fromResponse(response.status, errorBody);
+    }
+
+    const classified = classifyVideoRetrieveContentType(response.headers.get('content-type'));
+    if (classified === 'json') {
+      const status = await response.json() as VideoStatusResult;
+      if (spinner) stopSpinner(true);
+      return { kind: 'status', status };
+    }
+
+    if (classified === 'unknown') {
+      const peek = Buffer.from(await response.arrayBuffer());
+      if (peek.length > 0 && peek[0] === 0x7b) {
+        const status = JSON.parse(peek.toString('utf-8')) as VideoStatusResult;
+        if (spinner) stopSpinner(true);
+        return { kind: 'status', status };
+      }
+      if (isMp4Buffer(peek)) {
+        if (spinner) stopSpinner(true);
+        return { kind: 'video', bytes: peek, contentType: 'video/mp4' };
+      }
+      throw new Error(
+        `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}".`
+      );
+    }
+
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (spinner) stopSpinner(true);
+    return {
+      kind: 'video',
+      bytes,
+      contentType: response.headers.get('content-type') || 'video/mp4',
+    };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (spinner) stopSpinner(false);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Video retrieve request timed out. Please try again later.');
+    }
+    throw error;
+  }
+}
+
 // Video generation - queue job
 export async function queueVideoGeneration(
   prompt: string,
@@ -756,8 +881,10 @@ export async function queueVideoGeneration(
     model: options.model || 'wan-2.6-text-to-video',
     prompt,
     duration: options.duration || '5s',
-    aspect_ratio: options.aspectRatio || '16:9',
   };
+  if (options.aspectRatio) {
+    body.aspect_ratio = options.aspectRatio;
+  }
   if (options.imageUrl) {
     body.image_url = options.imageUrl;
   }
@@ -779,37 +906,118 @@ export async function queueVideoGeneration(
   return response;
 }
 
+export async function queueVideoUpscale(
+  videoUrl: string,
+  options: {
+    model?: string;
+    upscaleFactor?: number;
+  } = {}
+): Promise<{ queue_id: string; model: string }> {
+  const model = options.model || 'topaz-video-upscale';
+  const body: Record<string, unknown> = {
+    model,
+    video_url: videoUrl,
+    upscale_factor: options.upscaleFactor ?? 2,
+  };
+
+  const response = await apiRequest<{
+    queue_id: string;
+    model: string;
+  }>('/video/queue', {
+    method: 'POST',
+    body,
+    spinnerText: 'Queueing video upscale...',
+  });
+
+  trackUsage({
+    command: 'video',
+    model,
+  });
+
+  return response;
+}
+
+export async function quoteVideoGeneration(options: {
+  model: string;
+  duration: string;
+  aspectRatio?: string;
+  resolution?: string;
+  upscaleFactor?: number;
+  audio?: boolean;
+  videoUrl?: string;
+}): Promise<{ quote: number }> {
+  const body: Record<string, unknown> = {
+    model: options.model,
+    duration: options.duration,
+  };
+  if (options.aspectRatio) {
+    body.aspect_ratio = options.aspectRatio;
+  }
+  if (options.resolution) {
+    body.resolution = options.resolution;
+  }
+  if (options.upscaleFactor !== undefined) {
+    body.upscale_factor = options.upscaleFactor;
+  }
+  if (options.audio !== undefined) {
+    body.audio = options.audio;
+  }
+  if (options.videoUrl) {
+    body.video_url = options.videoUrl;
+  }
+
+  return apiRequest('/video/quote', {
+    method: 'POST',
+    body,
+    spinnerText: 'Fetching video quote...',
+  });
+}
+
+export async function completeVideo(
+  queueId: string,
+  model: string
+): Promise<{ success: boolean }> {
+  return apiRequest('/video/complete', {
+    method: 'POST',
+    body: { queue_id: queueId, model },
+    spinnerText: 'Cleaning up video...',
+  });
+}
+
+export async function transcribeVideo(
+  url: string
+): Promise<{ transcript: string; lang?: string }> {
+  return apiRequest('/video/transcriptions', {
+    method: 'POST',
+    body: { url, response_format: 'json' },
+    spinnerText: 'Transcribing video...',
+  });
+}
+
 // Video generation - check status / retrieve result
 export async function getVideoStatus(
   queueId: string,
   model: string
-): Promise<{
-  status: 'PROCESSING' | 'completed' | 'failed';
-  average_execution_time?: number;
-  execution_duration?: number;
-  video_url?: string;
-  error?: string;
-}> {
-  return apiRequest('/video/retrieve', {
-    method: 'POST',
-    body: { queue_id: queueId, model },
+): Promise<VideoStatusResult> {
+  const result = await retrieveVideoResponse(queueId, model, {
     spinnerText: 'Checking video status...',
   });
+
+  if (result.kind === 'video') {
+    return { status: 'completed' };
+  }
+
+  return result.status;
 }
 
 // Video generation - retrieve video
 export async function retrieveVideo(
   queueId: string,
-  model: string
-): Promise<{
-  video_url?: string;
-  status?: string;
-  model: string;
-  duration?: number;
-}> {
-  return apiRequest('/video/retrieve', {
-    method: 'POST',
-    body: { queue_id: queueId, model, delete_media_on_completion: false },
+  model: string,
+  options: { deleteOnCompletion?: boolean } = {}
+): Promise<VideoRetrieveResult> {
+  return retrieveVideoResponse(queueId, model, {
+    deleteOnCompletion: options.deleteOnCompletion ?? false,
     spinnerText: 'Retrieving video...',
   });
 }

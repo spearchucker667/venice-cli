@@ -47,7 +47,7 @@ _venice_completion() {
     local commands="chat search image tts transcribe models embeddings upscale history usage config characters voices video completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
-    local video_cmds="generate status retrieve models"
+    local video_cmds="generate quote status retrieve complete transcribe upscale models"
     local formats="pretty json markdown raw"
     local models="kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25"
     local image_models="flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro"
@@ -126,11 +126,23 @@ _venice_completion() {
                 generate|gen)
                     COMPREPLY=( \$(compgen -W "-m --model -d --duration -a --aspect-ratio -i --image -f --format" -- "\${cur}") )
                     ;;
+                quote)
+                    COMPREPLY=( \$(compgen -W "-m --model -d --duration -a --aspect-ratio -r --resolution --factor --audio --no-audio --video-url -f --format" -- "\${cur}") )
+                    ;;
                 status)
                     COMPREPLY=( \$(compgen -W "-w --wait -f --format" -- "\${cur}") )
                     ;;
                 retrieve|download)
-                    COMPREPLY=( \$(compgen -W "-o --output -f --format" -- "\${cur}") )
+                    COMPREPLY=( \$(compgen -W "-o --output --complete --delete -f --format" -- "\${cur}") )
+                    ;;
+                complete)
+                    COMPREPLY=( \$(compgen -W "-m --model -f --format" -- "\${cur}") )
+                    ;;
+                transcribe)
+                    COMPREPLY=( \$(compgen -W "-f --format" -- "\${cur}") )
+                    ;;
+                upscale)
+                    COMPREPLY=( \$(compgen -W "-m --model --factor -o --output --no-wait --complete -f --format" -- "\${cur}") )
                     ;;
                 *)
                     COMPREPLY=( \$(compgen -W "\${video_cmds}" -- "\${cur}") )
@@ -317,8 +329,12 @@ _venice() {
                 video)
                     local -a video_cmds=(
                         'generate:Queue video generation'
+                        'quote:Estimate video generation price'
                         'status:Check generation status'
                         'retrieve:Download completed video'
+                        'complete:Delete retrieved video from storage'
+                        'transcribe:Transcribe speech from a video URL'
+                        'upscale:Upscale a video'
                         'models:List video models'
                     )
                     _describe -t video_cmds 'video commands' video_cmds
@@ -424,8 +440,12 @@ complete -c venice -n "__fish_seen_subcommand_from transcribe" -r
 
 # Video subcommands
 complete -c venice -n "__fish_seen_subcommand_from video" -a generate -d "Queue video generation"
+complete -c venice -n "__fish_seen_subcommand_from video" -a quote -d "Estimate video price"
 complete -c venice -n "__fish_seen_subcommand_from video" -a status -d "Check status"
 complete -c venice -n "__fish_seen_subcommand_from video" -a retrieve -d "Download video"
+complete -c venice -n "__fish_seen_subcommand_from video" -a complete -d "Delete retrieved video"
+complete -c venice -n "__fish_seen_subcommand_from video" -a transcribe -d "Transcribe a video URL"
+complete -c venice -n "__fish_seen_subcommand_from video" -a upscale -d "Upscale a video"
 complete -c venice -n "__fish_seen_subcommand_from video" -a models -d "List video models"
 
 # Video generate options
