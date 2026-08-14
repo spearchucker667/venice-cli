@@ -44,10 +44,12 @@ _venice_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="chat search image tts transcribe models embeddings upscale history usage config characters voices video completions"
+    local commands="chat search image tts transcribe models embeddings upscale history usage billing keys config characters voices video completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
     local video_cmds="generate status retrieve models"
+    local billing_cmds="balance usage analytics"
+    local keys_cmds="list create delete rate-limits"
     local formats="pretty json markdown raw"
     local models="kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25"
     local image_models="flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro"
@@ -72,6 +74,14 @@ _venice_completion() {
             ;;
         video)
             COMPREPLY=( \$(compgen -W "\${video_cmds}" -- "\${cur}") )
+            return 0
+            ;;
+        billing)
+            COMPREPLY=( \$(compgen -W "\${billing_cmds}" -- "\${cur}") )
+            return 0
+            ;;
+        keys)
+            COMPREPLY=( \$(compgen -W "\${keys_cmds}" -- "\${cur}") )
             return 0
             ;;
         -m|--model)
@@ -154,6 +164,14 @@ _venice_completion() {
             COMPREPLY=( \$(compgen -W "-d --days --today --month -f --format" -- "\${cur}") )
             return 0
             ;;
+        billing)
+            COMPREPLY=( \$(compgen -W "\${billing_cmds} -d --days -c --currency -l --lookback -f --format" -- "\${cur}") )
+            return 0
+            ;;
+        keys)
+            COMPREPLY=( \$(compgen -W "\${keys_cmds} -n --name -t --type --expires --usd-limit --diem-limit --limit-period --force -f --format" -- "\${cur}") )
+            return 0
+            ;;
     esac
 
     COMPREPLY=( \$(compgen -W "\${commands}" -- "\${cur}") )
@@ -180,6 +198,8 @@ _venice() {
         'embeddings:Generate text embeddings'
         'history:View conversation history'
         'usage:Show usage statistics'
+        'billing:Show account billing and billed usage'
+        'keys:Manage API keys'
         'config:Manage configuration'
         'characters:List available characters'
         'voices:List available TTS voices'
@@ -350,6 +370,23 @@ _venice() {
                     )
                     _describe -t history_cmds 'history commands' history_cmds
                     ;;
+                billing)
+                    local -a billing_cmds=(
+                        'balance:Show current account balances'
+                        'usage:Show account-wide billed usage'
+                        'analytics:Show aggregated usage analytics'
+                    )
+                    _describe -t billing_cmds 'billing commands' billing_cmds
+                    ;;
+                keys)
+                    local -a keys_cmds=(
+                        'list:List API key metadata'
+                        'create:Create an API key'
+                        'delete:Permanently delete an API key'
+                        'rate-limits:Show current key limits'
+                    )
+                    _describe -t keys_cmds 'API key commands' keys_cmds
+                    ;;
                 completions)
                     _arguments '1:shell:(bash zsh fish)'
                     ;;
@@ -365,7 +402,7 @@ function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
 # Main commands
-set -l commands chat search image upscale tts transcribe video models embeddings history usage config characters voices completions
+set -l commands chat search image upscale tts transcribe video models embeddings history usage billing keys config characters voices completions
 
 # Disable file completions by default
 complete -c venice -f
@@ -382,6 +419,8 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a models -d "
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a embeddings -d "Generate embeddings"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a history -d "View history"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a usage -d "Show usage stats"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a billing -d "Show account billing"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a keys -d "Manage API keys"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a config -d "Manage config"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a characters -d "List characters"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voices -d "List voices"
@@ -447,6 +486,17 @@ complete -c venice -n "__fish_seen_subcommand_from history" -a list -d "List his
 complete -c venice -n "__fish_seen_subcommand_from history" -a show -d "Show conversation"
 complete -c venice -n "__fish_seen_subcommand_from history" -a clear -d "Clear history"
 complete -c venice -n "__fish_seen_subcommand_from history" -a export -d "Export history"
+
+# Billing subcommands
+complete -c venice -n "__fish_seen_subcommand_from billing" -a balance -d "Show balances"
+complete -c venice -n "__fish_seen_subcommand_from billing" -a usage -d "Show billed usage"
+complete -c venice -n "__fish_seen_subcommand_from billing" -a analytics -d "Show usage analytics"
+
+# API key subcommands
+complete -c venice -n "__fish_seen_subcommand_from keys" -a list -d "List API keys"
+complete -c venice -n "__fish_seen_subcommand_from keys" -a create -d "Create API key"
+complete -c venice -n "__fish_seen_subcommand_from keys" -a delete -d "Delete API key"
+complete -c venice -n "__fish_seen_subcommand_from keys" -a rate-limits -d "Show rate limits"
 
 # Completions
 complete -c venice -n "__fish_seen_subcommand_from completions" -a "bash zsh fish" -d "Shell"`;
