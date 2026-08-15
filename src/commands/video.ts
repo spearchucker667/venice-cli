@@ -142,6 +142,8 @@ export function registerVideoCommands(program: Command): void {
 
         if (result.video_url) {
           console.log(`\n${c.dim('Video URL:')} ${c.cyan(result.video_url)}`);
+        }
+        if (statusLabel === 'completed') {
           console.log(`\n${c.dim('Download with:')} venice video retrieve ${queueId} -m ${options.model}`);
         }
 
@@ -186,35 +188,50 @@ export function registerVideoCommands(program: Command): void {
       const c = getChalk();
 
       try {
-        const result = await retrieveVideo(queueId, options.model);
-
-        if (format === 'json') {
-          console.log(JSON.stringify(result, null, 2));
-          return;
-        }
-
-        if (!result.video_url) {
-          if (result.status) {
-            console.log(`${c.dim('Status:')} ${c.yellow(result.status)} — video not ready yet.`);
-            console.log(`${c.dim('Try again with:')} venice video retrieve ${queueId} -m ${options.model}`);
-          } else {
-            console.error(formatError('No video URL returned. The video may still be processing.'));
-          }
-          return;
-        }
-
-        // Download the video
-        console.log(`${c.dim('Downloading video...')}`);
-        await downloadToFile(result.video_url, options.output, {
+        const result = await retrieveVideo(queueId, options.model, {
+          outputPath: options.output,
           maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
-          expectedContentTypePrefixes: ['video/'],
         });
 
-        console.log(formatSuccess(`Video saved to ${options.output}`));
-        console.log(`${c.dim('Model:')} ${result.model}`);
-        if (result.duration) {
-          console.log(`${c.dim('Duration:')} ${result.duration}s`);
+        if (result.kind === 'status') {
+          const status = result.status;
+          const downloadUrl = status.video_url || status.download_url;
+
+          if (!downloadUrl) {
+            if (format === 'json') {
+              console.log(JSON.stringify(status, null, 2));
+            } else if (status.status) {
+              console.log(`${c.dim('Status:')} ${c.yellow(status.status)} — video not ready yet.`);
+              console.log(`${c.dim('Try again with:')} venice video retrieve ${queueId} -m ${options.model}`);
+            } else {
+              console.error(formatError('No video returned. The video may still be processing.'));
+            }
+            return;
+          }
+
+          if (format !== 'json') {
+            console.log(`${c.dim('Downloading video...')}`);
+          }
+          await downloadToFile(downloadUrl, options.output, {
+            maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
+            expectedContentTypePrefixes: ['video/'],
+          });
         }
+
+        if (format === 'json') {
+          console.log(JSON.stringify({
+            status: 'completed',
+            output: options.output,
+            model: options.model,
+            ...(result.kind === 'video'
+              ? { bytes: result.bytesWritten, content_type: result.contentType }
+              : {}),
+          }, null, 2));
+          return;
+        }
+
+        console.log(formatSuccess(`Video saved to ${options.output}`));
+        console.log(`${c.dim('Model:')} ${options.model}`);
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);

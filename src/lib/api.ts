@@ -13,9 +13,11 @@ import {
   MAX_IMAGE_DOWNLOAD_BYTES,
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
+  MAX_VIDEO_DOWNLOAD_BYTES,
   assertFileSizeWithinLimit,
   formatBytes,
   mimeTypeFromPath,
+  streamResponseToFile,
 } from './media.js';
 
 // TODO: Remove VENICE_API_BASE_URL override before release - only for local dev testing
@@ -23,6 +25,7 @@ const VENICE_API = process.env.VENICE_API_BASE_URL || 'https://api.venice.ai/api
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes default timeout
+const MAX_VIDEO_STATUS_BYTES = 1024 * 1024;
 
 export class VeniceApiError extends Error {
   constructor(
@@ -847,6 +850,224 @@ export async function listCharacters(): Promise<Character[]> {
   }
 }
 
+export type VideoStatusResult = {
+  status: string;
+  average_execution_time?: number;
+  execution_duration?: number;
+  video_url?: string;
+  download_url?: string;
+  error?: string;
+  model?: string;
+  duration?: number;
+};
+
+export type VideoRetrieveResult =
+  | { kind: 'status'; status: VideoStatusResult }
+  | { kind: 'video'; bytesWritten: number; contentType: string };
+
+export function classifyVideoRetrieveContentType(
+  contentType: string | null | undefined
+): 'json' | 'video' | 'unknown' {
+  const type = (contentType || '').split(';')[0].trim().toLowerCase();
+  if (!type) return 'unknown';
+  if (type === 'application/json' || type.endsWith('+json')) return 'json';
+  if (type.startsWith('video/') || type === 'application/octet-stream') return 'video';
+  return 'unknown';
+}
+
+async function retrieveVideoResponse(
+  queueId: string,
+  model: string,
+  options: {
+    deleteOnCompletion?: boolean;
+    spinnerText?: string;
+    statusOnly?: boolean;
+    outputPath?: string;
+    maxBytes?: number;
+  } = {}
+): Promise<VideoRetrieveResult> {
+  const spinner = startSpinner(options.spinnerText || 'Checking video status...');
+  const body: Record<string, unknown> = { queue_id: queueId, model };
+  if (options.deleteOnCompletion !== undefined) {
+    body.delete_media_on_completion = options.deleteOnCompletion;
+  }
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    let fileWriteStarted = false;
+    let requestTimeoutActive = true;
+    const clearRequestTimeout = () => {
+      if (requestTimeoutActive) {
+        clearTimeout(timeoutId);
+        requestTimeoutActive = false;
+      }
+    };
+
+    try {
+      const response = await fetch(`${VENICE_API}/video/retrieve`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw VeniceApiError.fromResponse(response.status, errorBody);
+      }
+
+      const inspected = await inspectVideoRetrieveResponse(response);
+      if (inspected.kind === 'status') {
+        if (spinner) stopSpinner(true);
+        return inspected;
+      }
+
+      // The request deadline bounds headers and body inspection only. Once an
+      // MP4 is confirmed, chunk-level inactivity timeouts protect the download.
+      clearRequestTimeout();
+
+      if (options.statusOnly) {
+        await inspected.reader.cancel();
+        inspected.reader.releaseLock();
+        if (spinner) stopSpinner(true);
+        return { kind: 'status', status: { status: 'completed' } };
+      }
+
+      if (!options.outputPath) {
+        await inspected.reader.cancel();
+        inspected.reader.releaseLock();
+        throw new VideoRetrieveValidationError(
+          'An output path is required to save the retrieved video.'
+        );
+      }
+
+      fileWriteStarted = true;
+      const saved = await streamResponseToFile(
+        response,
+        inspected.reader,
+        inspected.initialChunks,
+        options.outputPath,
+        {
+          maxBytes: options.maxBytes ?? MAX_VIDEO_DOWNLOAD_BYTES,
+          label: 'Video',
+        }
+      );
+      if (spinner) stopSpinner(true);
+      return { kind: 'video', ...saved };
+    } catch (error) {
+      const retryable =
+        !fileWriteStarted &&
+        attempt < MAX_RETRIES &&
+        !(error instanceof VideoRetrieveValidationError) &&
+        (
+          !(error instanceof VeniceApiError) ||
+          error.isRetryable() ||
+          error.isRateLimited()
+        );
+
+      if (retryable) {
+        await sleep(RETRY_DELAY_MS * (attempt + 1) * (
+          error instanceof VeniceApiError && error.isRateLimited() ? 2 : 1
+        ));
+        continue;
+      }
+
+      if (spinner) stopSpinner(false);
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('Video retrieve request timed out. Please try again later.');
+      }
+      throw error;
+    } finally {
+      clearRequestTimeout();
+    }
+  }
+
+  if (spinner) stopSpinner(false);
+  throw new Error('Video retrieve request failed after retries.');
+}
+
+type InspectedVideoResponse =
+  | { kind: 'status'; status: VideoStatusResult }
+  | {
+      kind: 'video';
+      reader: ReadableStreamDefaultReader<Uint8Array>;
+      initialChunks: Buffer[];
+    };
+
+class VideoRetrieveValidationError extends Error {}
+
+async function inspectVideoRetrieveResponse(
+  response: Response
+): Promise<InspectedVideoResponse> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new VideoRetrieveValidationError('Video retrieve response had no body.');
+  }
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let readingJson = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = Buffer.from(value);
+      chunks.push(chunk);
+      totalBytes += chunk.length;
+      const buffered = Buffer.concat(chunks, totalBytes);
+
+      if (!readingJson && buffered.length >= 8) {
+        if (isMp4Buffer(buffered)) {
+          return { kind: 'video', reader, initialChunks: chunks };
+        }
+
+        const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
+        if (firstNonWhitespace === 0x7b) {
+          readingJson = true;
+        } else if (firstNonWhitespace !== undefined) {
+          throw unexpectedVideoRetrieveType(response);
+        }
+      }
+
+      if (totalBytes > MAX_VIDEO_STATUS_BYTES) {
+        throw new VideoRetrieveValidationError(
+          'Video status response exceeded the maximum expected size.'
+        );
+      }
+    }
+
+    const buffered = Buffer.concat(chunks, totalBytes);
+    const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
+    if (readingJson || firstNonWhitespace === 0x7b) {
+      const status = JSON.parse(buffered.toString('utf-8')) as VideoStatusResult;
+      reader.releaseLock();
+      return { kind: 'status', status };
+    }
+    if (isMp4Buffer(buffered)) {
+      return { kind: 'video', reader, initialChunks: chunks };
+    }
+    throw unexpectedVideoRetrieveType(response);
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+    throw error;
+  }
+}
+
+function unexpectedVideoRetrieveType(response: Response): Error {
+  return new VideoRetrieveValidationError(
+    `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}": ` +
+    'response is neither JSON nor a valid MP4.'
+  );
+}
+
+function isMp4Buffer(bytes: Buffer): boolean {
+  return bytes.length >= 8 && bytes.subarray(4, 8).toString('ascii') === 'ftyp';
+}
+
 // Video generation - queue job
 export async function queueVideoGeneration(
   prompt: string,
@@ -861,8 +1082,10 @@ export async function queueVideoGeneration(
     model: options.model || 'wan-2.6-text-to-video',
     prompt,
     duration: options.duration || '5s',
-    aspect_ratio: options.aspectRatio || '16:9',
   };
+  if (options.aspectRatio) {
+    body.aspect_ratio = options.aspectRatio;
+  }
   if (options.imageUrl) {
     body.image_url = options.imageUrl;
   }
@@ -888,34 +1111,34 @@ export async function queueVideoGeneration(
 export async function getVideoStatus(
   queueId: string,
   model: string
-): Promise<{
-  status: 'PROCESSING' | 'completed' | 'failed';
-  average_execution_time?: number;
-  execution_duration?: number;
-  video_url?: string;
-  error?: string;
-}> {
-  return apiRequest('/video/retrieve', {
-    method: 'POST',
-    body: { queue_id: queueId, model },
+): Promise<VideoStatusResult> {
+  const result = await retrieveVideoResponse(queueId, model, {
     spinnerText: 'Checking video status...',
+    statusOnly: true,
   });
+
+  if (result.kind === 'video') {
+    return { status: 'completed' };
+  }
+
+  return result.status;
 }
 
 // Video generation - retrieve video
 export async function retrieveVideo(
   queueId: string,
-  model: string
-): Promise<{
-  video_url?: string;
-  status?: string;
-  model: string;
-  duration?: number;
-}> {
-  return apiRequest('/video/retrieve', {
-    method: 'POST',
-    body: { queue_id: queueId, model, delete_media_on_completion: false },
+  model: string,
+  options: {
+    deleteOnCompletion?: boolean;
+    outputPath?: string;
+    maxBytes?: number;
+  } = {}
+): Promise<VideoRetrieveResult> {
+  return retrieveVideoResponse(queueId, model, {
+    deleteOnCompletion: options.deleteOnCompletion ?? false,
     spinnerText: 'Retrieving video...',
+    outputPath: options.outputPath,
+    maxBytes: options.maxBytes,
   });
 }
 
