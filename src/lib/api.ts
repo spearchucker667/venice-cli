@@ -10,9 +10,11 @@ import { getVersion } from './version.js';
 import { Readable } from 'stream';
 import type { Message, ToolDefinition, Model, Character } from '../types/index.js';
 import {
+  MAX_IMAGE_DOWNLOAD_BYTES,
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
   assertFileSizeWithinLimit,
+  formatBytes,
   mimeTypeFromPath,
 } from './media.js';
 
@@ -434,6 +436,53 @@ export function looksLikeImageBytes(bytes: Buffer): boolean {
   return false;
 }
 
+async function readResponseBodyWithLimit(
+  response: Response,
+  maxBytes: number,
+  label: string
+): Promise<Buffer> {
+  const contentLengthHeader = response.headers.get('content-length');
+  if (contentLengthHeader) {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && contentLength >= 0 && contentLength > maxBytes) {
+      await response.body?.cancel();
+      throw new Error(
+        `${label} is too large (${formatBytes(contentLength)}). ` +
+        `Maximum allowed size is ${formatBytes(maxBytes)}.`
+      );
+    }
+  }
+
+  if (!response.body) {
+    return Buffer.alloc(0);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new Error(
+          `${label} exceeded the limit of ${formatBytes(maxBytes)}.`
+        );
+      }
+
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, totalBytes);
+}
+
 // Image upscale
 export async function upscaleImage(
   imagePath: string,
@@ -469,15 +518,18 @@ export async function upscaleImage(
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
+    const bytes = await readResponseBodyWithLimit(
+      response,
+      MAX_IMAGE_DOWNLOAD_BYTES,
+      response.ok ? 'Upscaled image response' : 'Upscale API error response'
+    );
 
     if (!response.ok) {
-      const errorBody = await response.text();
+      const errorBody = bytes.toString('utf-8');
       throw VeniceApiError.fromResponse(response.status, errorBody);
     }
 
     const contentType = response.headers.get('content-type') || '';
-    const bytes = Buffer.from(await response.arrayBuffer());
 
     if (!isImageContentType(contentType) && !looksLikeImageBytes(bytes)) {
       const preview = bytes.subarray(0, 200).toString('utf-8');
@@ -499,12 +551,13 @@ export async function upscaleImage(
       contentType: contentType.split(';')[0].trim() || 'image/png',
     };
   } catch (error) {
-    clearTimeout(timeoutId);
     if (spinner) stopSpinner(false);
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('Image upscale request timed out. Please try again later.');
     }
     throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

@@ -83,3 +83,85 @@ test('upscaleImage does not report success for JSON error bodies', async () => {
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test('upscaleImage rejects chunked responses that exceed the download limit', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const tempDir = mkdtempSync(join(tmpdir(), 'venice-upscale-test-'));
+  const imagePath = join(tempDir, 'photo.png');
+  writeFileSync(imagePath, PNG_MAGIC);
+
+  process.env.VENICE_API_KEY = 'test-key';
+  const chunk = new Uint8Array(1024 * 1024);
+  let bodyCancelled = false;
+  globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(chunk);
+    },
+    cancel() {
+      bodyCancelled = true;
+    },
+  }), {
+    headers: { 'Content-Type': 'image/png' },
+  })) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => upscaleImage(imagePath),
+      /Upscaled image response exceeded the limit of 50\.0 MB/
+    );
+    assert.equal(bodyCancelled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('upscaleImage keeps its timeout active while reading the response body', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const tempDir = mkdtempSync(join(tmpdir(), 'venice-upscale-test-'));
+  const imagePath = join(tempDir, 'photo.png');
+  writeFileSync(imagePath, PNG_MAGIC);
+
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => originalSetTimeout(callback, delay === 120000 ? 10 : delay, ...args)) as typeof setTimeout;
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        init?.signal?.addEventListener('abort', () => {
+          controller.error(new DOMException('The operation was aborted', 'AbortError'));
+        }, { once: true });
+      },
+    });
+    return new Response(body, {
+      headers: { 'Content-Type': 'image/png' },
+    });
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => upscaleImage(imagePath),
+      /Image upscale request timed out/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
