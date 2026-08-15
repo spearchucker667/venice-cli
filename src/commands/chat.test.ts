@@ -17,6 +17,7 @@ import { getToolDefinitions } from '../lib/tools.js';
 import type { Message } from '../types/index.js';
 
 const cliPath = fileURLToPath(new URL('../index.js', import.meta.url));
+const catalogCharacterSlug = 'test-catalog-character';
 
 interface ChatRequest {
   messages: Message[];
@@ -95,6 +96,8 @@ test('chat preserves options and enforces the allowlist across tool rounds', asy
           'test-model',
           '--tools',
           'datetime',
+          '--character',
+          catalogCharacterSlug,
           '--web-search',
           'Use two tools',
         ],
@@ -126,6 +129,10 @@ test('chat preserves options and enforces the allowlist across tool rounds', asy
         ['datetime']
       );
       assert.equal(request.venice_parameters?.enable_web_search, 'on');
+      assert.equal(
+        request.venice_parameters?.character_slug,
+        catalogCharacterSlug
+      );
     }
 
     assert.equal(
@@ -199,7 +206,10 @@ test('streaming chat preserves options and handles sequential tool rounds', asyn
     getToolDefinitions(['datetime']),
     false,
     'raw',
-    { enable_web_search: 'on' },
+    {
+      enable_web_search: 'on',
+      character_slug: catalogCharacterSlug,
+    },
     undefined,
     true,
     false,
@@ -221,6 +231,10 @@ test('streaming chat preserves options and handles sequential tool rounds', asyn
       ['datetime']
     );
     assert.equal(options.venice_parameters?.enable_web_search, 'on');
+    assert.equal(
+      options.venice_parameters?.character_slug,
+      catalogCharacterSlug
+    );
   }
 });
 

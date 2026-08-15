@@ -23,6 +23,7 @@ import {
 import {
   formatUsage,
   formatError,
+  formatWarning,
   getChalk,
   startSpinner,
   clearSpinner,
@@ -246,7 +247,7 @@ export function registerChatCommand(program: Command): void {
     .description('Chat with an AI model')
     .option('-m, --model <model>', 'Model to use')
     .option('-s, --system <prompt>', 'System prompt')
-    .option('-c, --character <name>', 'Character/persona to use')
+    .option('-c, --character <slug>', 'Character slug from the Venice API catalog (e.g. alan-watts)')
     .option('-t, --tools <tools>', 'Comma-separated list of tools to enable')
     .option('--interactive-tools', 'Require approval for each tool call')
     .option('--continue', 'Continue the last conversation')
@@ -336,6 +337,27 @@ export function registerChatCommand(program: Command): void {
         }
       }
 
+      const lastConv = options.continue ? getLastConversation() : undefined;
+      // Send -c/--character to the API as a catalog slug, including names that
+      // used to be local personas (poet, pirate, …). Continue only skips those
+      // names when history still contains the old injected persona prompt.
+      const historyCharacter = options.character
+        ? String(options.character)
+        : restoreCharacterSlug(lastConv);
+      const continuedCharacter = useE2EE ? undefined : historyCharacter;
+      if (options.character && useE2EE) {
+        console.error(formatError(
+          'Characters are applied server-side and cannot be used with E2EE. ' +
+          'Omit -c/--character or use --no-e2ee.'
+        ));
+        process.exit(1);
+      }
+      if (useE2EE && historyCharacter && !options.character && format === 'pretty' && !options.quiet) {
+        console.log(formatWarning(
+          `Saved character "${historyCharacter}" will not be applied; E2EE cannot use server-side personas.`
+        ));
+      }
+
       // TEE-only mode: verify attestation without encryption
       if (useTEE && !useE2EE) {
         try {
@@ -363,27 +385,19 @@ export function registerChatCommand(program: Command): void {
       const messages: Message[] = [];
 
       // Handle --continue flag
-      if (options.continue) {
-        const lastConv = getLastConversation();
-        if (lastConv) {
-          for (const msg of lastConv.messages) {
-            messages.push(msg as Message);
-          }
-          if (format === 'pretty') {
-            console.log(c.dim(`Continuing conversation (${lastConv.messages.length} previous messages)\n`));
-            console.log(c.dim('Note: --continue replays local history and is not covered by TEE/E2EE enclave guarantees.\n'));
-          }
+      if (lastConv) {
+        for (const msg of lastConv.messages) {
+          messages.push(msg as Message);
+        }
+        if (format === 'pretty') {
+          console.log(c.dim(`Continuing conversation (${lastConv.messages.length} previous messages)\n`));
+          console.log(c.dim('Note: --continue replays local history and is not covered by TEE/E2EE enclave guarantees.\n'));
         }
       }
 
-      // Add system prompt
+      // Add system prompt (can be combined with --character)
       if (options.system) {
         messages.push({ role: 'system', content: options.system });
-      } else if (options.character) {
-        const systemPrompt = getCharacterPrompt(options.character);
-        if (systemPrompt) {
-          messages.push({ role: 'system', content: systemPrompt });
-        }
       }
 
       // Add user message from stdin/args
@@ -395,6 +409,9 @@ export function registerChatCommand(program: Command): void {
 
       // Build venice_parameters
       const veniceParams: Record<string, unknown> = {};
+      if (continuedCharacter) {
+        veniceParams.character_slug = continuedCharacter;
+      }
       if (options.webSearch) {
         veniceParams.enable_web_search = 'on';
       }
@@ -429,7 +446,7 @@ export function registerChatCommand(program: Command): void {
             timestamp: new Date().toISOString(),
             messages,
             model,
-            character: options.character,
+            character: historyCharacter,
             privacy: 'plain',
           });
         }
@@ -570,7 +587,12 @@ export async function streamChat(
   // The Venice system prompt would be added server-side unencrypted, breaking E2EE
   const effectiveTools = e2eeContext ? undefined : tools;
   const effectiveVeniceParams = e2eeContext
-    ? { ...veniceParams, enable_web_search: undefined, include_venice_system_prompt: false }
+    ? {
+        ...veniceParams,
+        enable_web_search: undefined,
+        include_venice_system_prompt: false,
+        character_slug: undefined,
+      }
     : veniceParams;
   const allowedTools = new Set((effectiveTools || []).map((tool) => tool.function.name));
 
@@ -937,31 +959,42 @@ export function buildChatUserMessage(prompt: string, pipedInput?: string): Messa
   return null;
 }
 
-// Character prompts
-const CHARACTER_PROMPTS: Record<string, string> = {
+const LEGACY_LOCAL_CHARACTER_PROMPTS: Record<string, string> = {
   pirate: 'You are a pirate captain. Respond in pirate speak with nautical terms, "arr"s, and maritime metaphors. Be adventurous and bold.',
-  
   wizard: 'You are a wise wizard. Speak in mystical terms, reference ancient knowledge, and occasionally make cryptic prophecies. Use archaic language.',
-  
   scientist: 'You are a brilliant scientist. Explain things with precision, reference data and studies, and maintain intellectual rigor. Be curious and analytical.',
-  
   poet: 'You are a romantic poet. Express yourself with beautiful language, metaphors, and emotional depth. Find beauty in everything.',
-  
   coder: 'You are a senior software engineer. Be practical, reference best practices, and provide code examples when relevant. Value clean, maintainable solutions.',
-  
   teacher: 'You are a patient teacher. Explain concepts clearly, use examples, and check for understanding. Encourage learning and curiosity.',
-  
   comedian: 'You are a stand-up comedian. Find humor in everything, make jokes, use wordplay, and keep things light. But still be helpful!',
-  
   philosopher: 'You are a deep philosopher. Question assumptions, explore ideas from multiple angles, and ponder the nature of existence. Be thoughtful and profound.',
 };
 
-function getCharacterPrompt(character: string): string | undefined {
-  return CHARACTER_PROMPTS[character.toLowerCase()];
+export function isLegacyLocalCharacter(character?: string): boolean {
+  return Boolean(character && character.toLowerCase() in LEGACY_LOCAL_CHARACTER_PROMPTS);
 }
 
-export function getAvailableCharacters(): string[] {
-  return Object.keys(CHARACTER_PROMPTS);
+function hasLegacyLocalPersonaPrompt(
+  character: string,
+  messages?: Array<{ role: string; content?: string }>
+): boolean {
+  const prompt = LEGACY_LOCAL_CHARACTER_PROMPTS[character.toLowerCase()];
+  if (!prompt) return false;
+  return Boolean(messages?.some((message) => message.role === 'system' && message.content === prompt));
+}
+
+export function restoreCharacterSlug(lastConv?: {
+  character?: string;
+  messages?: Array<{ role: string; content?: string }>;
+}): string | undefined {
+  if (!lastConv?.character) return undefined;
+  // Old local personas stored the name plus an injected system prompt. Skip
+  // those so we do not send a leftover slug. A catalog character combined with
+  // --system still restores, because that system text is not the old prompt.
+  if (hasLegacyLocalPersonaPrompt(lastConv.character, lastConv.messages)) {
+    return undefined;
+  }
+  return lastConv.character;
 }
 
 export function modelIdImpliesPrivateMode(modelId: string): boolean {

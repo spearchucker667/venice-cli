@@ -56,7 +56,6 @@ _venice_completion() {
     local music_models="elevenlabs-music elevenlabs-sound-effects-v2"
     local asr_models="nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3"
     local voices="af_sky af_bella af_nicole am_adam am_michael bf_emma bf_isabella bm_george bm_lewis"
-    local characters="pirate wizard scientist poet coder teacher comedian philosopher"
     local tools="calculator weather datetime random base64 hash"
 
     case "\${prev}" in
@@ -89,7 +88,6 @@ _venice_completion() {
             return 0
             ;;
         -c|--character)
-            COMPREPLY=( \$(compgen -W "\${characters}" -- "\${cur}") )
             return 0
             ;;
         -t|--tools)
@@ -179,6 +177,10 @@ _venice_completion() {
             COMPREPLY=( \$(compgen -W "-t --type -s --search --privacy -f --format" -- "\${cur}") )
             return 0
             ;;
+        characters)
+            COMPREPLY=( \$(compgen -W "show -s --search --limit --offset -f --format" -- "\${cur}") )
+            return 0
+            ;;
         embeddings|embed)
             COMPREPLY=( \$(compgen -W "-m --model -o --output -f --format --file" -- "\${cur}") )
             return 0
@@ -219,7 +221,7 @@ _venice() {
         'history:View conversation history'
         'usage:Show usage statistics'
         'config:Manage configuration'
-        'characters:List available characters'
+        'characters:List characters from the Venice API catalog'
         'voices:List available TTS voices'
         'completions:Generate shell completions'
     )
@@ -263,17 +265,6 @@ _venice() {
         'bm_george:George (British Male)'
     )
 
-    local -a characters=(
-        'pirate:Swashbuckling sea captain'
-        'wizard:Mystical sage'
-        'scientist:Analytical mind'
-        'poet:Romantic artist'
-        'coder:Senior engineer'
-        'teacher:Patient educator'
-        'comedian:Humorous helper'
-        'philosopher:Deep thinker'
-    )
-
     local -a tools=(
         'calculator:Math operations'
         'weather:Weather info (simulated)'
@@ -306,8 +297,8 @@ _venice() {
                         '--model[Model to use]:model:(\$models)' \\
                         '-s[System prompt]:prompt:' \\
                         '--system[System prompt]:prompt:' \\
-                        '-c[Character to use]:character:((\$characters))' \\
-                        '--character[Character to use]:character:((\$characters))' \\
+                        '-c[Character slug from the Venice API catalog]:slug:' \\
+                        '--character[Character slug from the Venice API catalog]:slug:' \\
                         '-t[Tools to enable]:tools:((\$tools))' \\
                         '--tools[Tools to enable]:tools:((\$tools))' \\
                         '--interactive-tools[Require tool approval]' \\
@@ -395,6 +386,12 @@ _venice() {
                         '--privacy[Privacy models only]' \\
                         '-f[Output format]:format:((pretty json))'
                     ;;
+                characters)
+                    local -a character_cmds=(
+                        'show:Show character details'
+                    )
+                    _describe -t character_cmds 'character commands' character_cmds
+                    ;;
                 config)
                     local -a config_cmds=(
                         'show:Show configuration'
@@ -449,7 +446,7 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a embeddings 
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a history -d "View history"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a usage -d "Show usage stats"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a config -d "Manage config"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a characters -d "List characters"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a characters -d "List API characters"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voices -d "List voices"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions -d "Shell completions"
 
@@ -460,14 +457,13 @@ set -l video_models wan-2.6-text-to-video wan-2.6-image-to-video veo3-fast-text-
 set -l music_models elevenlabs-music elevenlabs-sound-effects-v2
 set -l asr_models nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3
 set -l voices af_sky af_bella af_nicole am_adam am_michael bf_emma bm_george
-set -l characters pirate wizard scientist poet coder teacher comedian philosopher
 set -l tools calculator weather datetime random base64 hash
 set -l formats pretty json markdown raw
 
 # Chat options
 complete -c venice -n "__fish_seen_subcommand_from chat" -s m -l model -d "Model" -xa "$models"
 complete -c venice -n "__fish_seen_subcommand_from chat" -s s -l system -d "System prompt"
-complete -c venice -n "__fish_seen_subcommand_from chat" -s c -l character -d "Character" -xa "$characters"
+complete -c venice -n "__fish_seen_subcommand_from chat" -s c -l character -d "Character slug from the API catalog"
 complete -c venice -n "__fish_seen_subcommand_from chat" -s t -l tools -d "Tools" -xa "$tools"
 complete -c venice -n "__fish_seen_subcommand_from chat" -l interactive-tools -d "Approve tools"
 complete -c venice -n "__fish_seen_subcommand_from chat" -l continue -d "Continue conversation"
@@ -516,6 +512,13 @@ complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcom
 complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from generate" -s d -l duration -d "Duration"
 complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from generate" -s a -l aspect-ratio -d "Aspect ratio" -xa "16:9 9:16 1:1"
 complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from generate" -s i -l image -d "Reference image" -r
+
+# Characters
+complete -c venice -n "__fish_seen_subcommand_from characters" -a show -d "Show character details"
+complete -c venice -n "__fish_seen_subcommand_from characters" -s s -l search -d "Search characters"
+complete -c venice -n "__fish_seen_subcommand_from characters" -l limit -d "Number of characters to return"
+complete -c venice -n "__fish_seen_subcommand_from characters" -l offset -d "Number of characters to skip"
+complete -c venice -n "__fish_seen_subcommand_from characters" -s f -l format -d "Format" -xa "$formats"
 
 # Music subcommands
 complete -c venice -n "__fish_seen_subcommand_from music" -a generate -d "Queue audio generation"

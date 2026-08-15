@@ -140,11 +140,57 @@ export const isE2EEModel = (model: Model): boolean =>
 export const isTEEModel = (model: Model): boolean =>
   model.model_spec?.capabilities?.supportsTeeAttestation === true;
 
+export interface CharacterStats {
+  averageRating: number;
+  imports: number;
+  ratingCount: number;
+  ratingSum: number;
+  userRating: number | null;
+}
+
 export interface Character {
   id: string;
+  slug: string;
   name: string;
-  description?: string;
-  system_prompt?: string;
+  description: string | null;
+  tags: string[];
+  adult: boolean;
+  featured: boolean;
+  modelId: string;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  webEnabled: boolean;
+  shareUrl: string | null;
+  photoUrl: string | null;
+  stats: CharacterStats;
+}
+
+export interface CharacterReview {
+  id: string;
+  characterId: string;
+  createdAt: string;
+  isOwner: boolean;
+  locale: string | null;
+  message: string | null;
+  rating: number;
+  userAvatarUrl: string | null;
+  username: string;
+}
+
+export interface CharacterReviewsPage {
+  data: CharacterReview[];
+  object: 'list';
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+  summary: {
+    averageRating: number;
+    totalReviews: number;
+  };
 }
 
 export interface ApiResponse<T = unknown> {

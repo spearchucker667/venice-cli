@@ -13,6 +13,7 @@ import type {
   ToolDefinition,
   Model,
   Character,
+  CharacterReviewsPage,
   ImageGenerationOptions,
 } from '../types/index.js';
 import {
@@ -883,21 +884,76 @@ export async function listModels(
   return [...models];
 }
 
-// List characters (if Venice supports this endpoint)
-export async function listCharacters(): Promise<Character[]> {
-  try {
-    const response = await apiRequest<{
-      data: Character[];
-    }>('/characters', {
-      method: 'GET',
-      spinnerText: 'Fetching characters...',
-      retries: 0,
-    });
-    return response.data || [];
-  } catch {
-    // Characters endpoint might not exist
-    return [];
+export type ListCharactersOptions = {
+  search?: string;
+  limit?: number;
+  offset?: number;
+  showSpinner?: boolean;
+};
+
+function clampCharacterLimit(limit?: number): number {
+  const value = limit ?? 50;
+  if (!Number.isFinite(value)) return 50;
+  return Math.min(Math.max(Math.trunc(value), 1), 100);
+}
+
+function clampCharacterOffset(offset?: number): number {
+  if (offset === undefined || !Number.isFinite(offset)) return 0;
+  return Math.max(Math.trunc(offset), 0);
+}
+
+export async function listCharacters(
+  options: ListCharactersOptions = {}
+): Promise<Character[]> {
+  const params = new URLSearchParams();
+  params.set('limit', String(clampCharacterLimit(options.limit)));
+  params.set('offset', String(clampCharacterOffset(options.offset)));
+  if (options.search) {
+    params.set('search', options.search);
   }
+
+  const response = await apiRequest<{ data: Character[] }>(`/characters?${params}`, {
+    method: 'GET',
+    spinnerText: 'Fetching characters...',
+    showSpinner: options.showSpinner ?? true,
+  });
+  return response.data || [];
+}
+
+export async function getCharacter(
+  slug: string,
+  options: { showSpinner?: boolean } = {}
+): Promise<Character> {
+  const response = await apiRequest<{ data: Character }>(
+    `/characters/${encodeURIComponent(slug)}`,
+    {
+      method: 'GET',
+      spinnerText: 'Fetching character...',
+      showSpinner: options.showSpinner ?? true,
+    }
+  );
+  return response.data;
+}
+
+export async function getCharacterReviews(
+  slug: string,
+  options: { page?: number; pageSize?: number; showSpinner?: boolean } = {}
+): Promise<CharacterReviewsPage> {
+  const params = new URLSearchParams();
+  if (options.page !== undefined) {
+    params.set('page', String(options.page));
+  }
+  if (options.pageSize !== undefined) {
+    params.set('pageSize', String(options.pageSize));
+  }
+  const query = params.toString();
+  const endpoint = `/characters/${encodeURIComponent(slug)}/reviews${query ? `?${query}` : ''}`;
+
+  return apiRequest<CharacterReviewsPage>(endpoint, {
+    method: 'GET',
+    spinnerText: 'Fetching reviews...',
+    showSpinner: options.showSpinner ?? true,
+  });
 }
 
 export type VideoStatusResult = {
