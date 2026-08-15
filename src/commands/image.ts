@@ -5,7 +5,14 @@
 import { Command } from 'commander';
 import * as fs from 'fs';
 import * as path from 'path';
-import { generateImage, upscaleImage } from '../lib/api.js';
+import {
+  editImage,
+  generateImage,
+  listImageStyles,
+  multiEditImage,
+  removeImageBackground,
+  upscaleImage,
+} from '../lib/api.js';
 import { writeBufferToFile, MAX_IMAGE_DOWNLOAD_BYTES } from '../lib/media.js';
 import { getDefaultImageModel } from '../lib/config.js';
 import type {
@@ -225,6 +232,96 @@ export function registerImageCommand(program: Command): void {
       }
     });
 
+  program
+    .command('image-edit <image> <prompt...>')
+    .description('Edit a local image using a text prompt')
+    .option('-m, --model <model>', 'Edit model to use')
+    .option('-o, --output <path>', 'Save result to file')
+    .option('-a, --aspect-ratio <ratio>', 'Output aspect ratio (for example, 16:9 or auto)')
+    .option('--enhance-prompt', 'Enhance the prompt using the input image')
+    .option('--no-safe-mode', 'Disable adult-content blurring')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (imagePath: string, promptParts: string[], options) => {
+      const format = detectOutputFormat(options.format);
+      try {
+        const result = await editImage(path.resolve(imagePath), promptParts.join(' '), {
+          model: options.model,
+          aspectRatio: options.aspectRatio,
+          enhancePrompt: options.enhancePrompt,
+          safeMode: options.safeMode,
+        });
+        writeImageResult(result, options.output || `edited_${Date.now()}.png`, format, 'edited image');
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+
+  program
+    .command('image-multi-edit <images...>')
+    .description('Edit using one to three local image layers')
+    .requiredOption('-p, --prompt <prompt>', 'Edit instructions')
+    .option('-m, --model <model>', 'Edit model to use')
+    .option('-o, --output <path>', 'Save result to file')
+    .option('-a, --aspect-ratio <ratio>', 'Output aspect ratio (for example, 16:9 or auto)')
+    .option('--enhance-prompt', 'Enhance the prompt using the input images')
+    .option('--no-safe-mode', 'Disable adult-content blurring')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (imagePaths: string[], options) => {
+      const format = detectOutputFormat(options.format);
+      try {
+        const result = await multiEditImage(
+          imagePaths.map(imagePath => path.resolve(imagePath)),
+          options.prompt,
+          {
+            model: options.model,
+            aspectRatio: options.aspectRatio,
+            enhancePrompt: options.enhancePrompt,
+            safeMode: options.safeMode,
+          }
+        );
+        writeImageResult(result, options.output || `multi_edited_${Date.now()}.png`, format, 'edited image');
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+
+  program
+    .command('image-bg-remove <image>')
+    .description('Remove the background from a local image')
+    .option('-o, --output <path>', 'Save result to file')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (imagePath: string, options) => {
+      const format = detectOutputFormat(options.format);
+      try {
+        const result = await removeImageBackground(path.resolve(imagePath));
+        writeImageResult(result, options.output || `cutout_${Date.now()}.png`, format, 'cutout');
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+
+  program
+    .command('image-styles')
+    .description('List available image style presets')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (options) => {
+      const format = detectOutputFormat(options.format);
+      try {
+        const styles = await listImageStyles();
+        if (format === 'json') {
+          console.log(JSON.stringify({ data: styles, object: 'list' }, null, 2));
+        } else {
+          console.log(styles.join('\n'));
+        }
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+
   // Upscale image
   program
     .command('upscale <image>')
@@ -282,4 +379,23 @@ export function registerImageCommand(program: Command): void {
         process.exit(1);
       }
     });
+}
+
+function writeImageResult(
+  result: ArrayBuffer,
+  outputPath: string,
+  format: string,
+  label: string
+): void {
+  const imageData = Buffer.from(result);
+  if (format === 'json') {
+    console.log(JSON.stringify({ image: { b64_json: imageData.toString('base64') } }, null, 2));
+    return;
+  }
+
+  writeBufferToFile(imageData, outputPath, {
+    maxBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    label,
+  });
+  console.log(formatSuccess(`Saved ${label} to ${outputPath}`));
 }

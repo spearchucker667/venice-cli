@@ -44,7 +44,7 @@ _venice_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="chat search image tts transcribe models embeddings upscale history usage config characters voices video music completions"
+    local commands="chat search image image-edit image-multi-edit image-bg-remove image-styles tts transcribe models embeddings upscale history usage config characters voices video music completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
     local video_cmds="generate status retrieve models"
@@ -52,6 +52,7 @@ _venice_completion() {
     local formats="pretty json markdown raw"
     local models="kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25"
     local image_models="flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro"
+    local edit_models="qwen-edit firered-image-edit qwen-edit-uncensored grok-imagine-edit grok-imagine-quality-edit qwen-image-2-edit qwen-image-2-pro-edit wan-2-7-pro-edit flux-2-max-edit gpt-image-2-edit gpt-image-1-5-edit nano-banana-2-edit nano-banana-pro-edit seedream-v5-lite-edit seedream-v5-pro-edit seedream-v4-edit qwen-image-3-edit qwen-image-3-pro-edit"
     local video_models="wan-2.6-text-to-video wan-2.6-image-to-video veo3-fast-text-to-video sora2-text-to-video kling-v3-pro-text-to-video"
     local music_models="elevenlabs-music elevenlabs-sound-effects-v2"
     local asr_models="nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3"
@@ -80,7 +81,11 @@ _venice_completion() {
             return 0
             ;;
         -m|--model)
-            COMPREPLY=( \$(compgen -W "\${models} \${image_models} \${video_models} \${music_models}" -- "\${cur}") )
+            if [[ "\${words[1]}" == "image-edit" || "\${words[1]}" == "image-multi-edit" ]]; then
+                COMPREPLY=( \$(compgen -W "\${edit_models}" -- "\${cur}") )
+            else
+                COMPREPLY=( \$(compgen -W "\${models} \${image_models} \${video_models} \${music_models}" -- "\${cur}") )
+            fi
             return 0
             ;;
         -v|--voice)
@@ -123,6 +128,22 @@ _venice_completion() {
             ;;
         image)
             COMPREPLY=( \$(compgen -W "-m --model -o --output -w --width -h --height -a --aspect-ratio --resolution --quality --style --style-reference --negative --seed --cfg-scale --steps --lora-strength --hide-watermark --no-hide-watermark --safe-mode --no-safe-mode --embed-exif-metadata --no-embed-exif-metadata -n --count -f --format" -- "\${cur}") )
+            return 0
+            ;;
+        image-edit)
+            COMPREPLY=( \$(compgen -W "-m --model -o --output -a --aspect-ratio --enhance-prompt --no-safe-mode -f --format" -- "\${cur}") )
+            return 0
+            ;;
+        image-multi-edit)
+            COMPREPLY=( \$(compgen -W "-p --prompt -m --model -o --output -a --aspect-ratio --enhance-prompt --no-safe-mode -f --format" -- "\${cur}") )
+            return 0
+            ;;
+        image-bg-remove)
+            COMPREPLY=( \$(compgen -W "-o --output -f --format" -- "\${cur}") )
+            return 0
+            ;;
+        image-styles)
+            COMPREPLY=( \$(compgen -W "-f --format" -- "\${cur}") )
             return 0
             ;;
         tts|speak)
@@ -211,6 +232,10 @@ _venice() {
         'chat:Chat with an AI model'
         'search:Web search with AI synthesis'
         'image:Generate an image'
+        'image-edit:Edit a local image'
+        'image-multi-edit:Edit layered local images'
+        'image-bg-remove:Remove an image background'
+        'image-styles:List image style presets'
         'upscale:Upscale an image'
         'tts:Convert text to speech'
         'transcribe:Transcribe audio to text'
@@ -241,6 +266,16 @@ _venice() {
         'flux-1-dev'
         'flux-1-schnell'
         'akash-sdxl'
+    )
+
+    local -a edit_models=(
+        'qwen-edit' 'firered-image-edit' 'qwen-edit-uncensored'
+        'grok-imagine-edit' 'grok-imagine-quality-edit'
+        'qwen-image-2-edit' 'qwen-image-2-pro-edit' 'wan-2-7-pro-edit'
+        'flux-2-max-edit' 'gpt-image-2-edit' 'gpt-image-1-5-edit'
+        'nano-banana-2-edit' 'nano-banana-pro-edit'
+        'seedream-v5-lite-edit' 'seedream-v5-pro-edit' 'seedream-v4-edit'
+        'qwen-image-3-edit' 'qwen-image-3-pro-edit'
     )
 
     local -a video_models=(
@@ -339,8 +374,40 @@ _venice() {
                         '--embed-exif-metadata[Embed generation metadata]' \\
                         '--no-embed-exif-metadata[Do not embed generation metadata]' \\
                         '-n[Number of images]:count:' \\
+                        '--style[Image style preset]:preset:' \\
                         '-f[Output format]:format:((pretty json))' \\
                         '*:prompt:'
+                    ;;
+                image-edit)
+                    _arguments \\
+                        '-m[Edit model]:model:(\$edit_models)' \\
+                        '-o[Output file]:file:_files' \\
+                        '-a[Output aspect ratio]:ratio:' \\
+                        '--enhance-prompt[Enhance edit prompt]' \\
+                        '--no-safe-mode[Disable safe mode]' \\
+                        '-f[Output format]:format:((pretty json))' \\
+                        '1:input image:_files' \\
+                        '*:prompt:'
+                    ;;
+                image-multi-edit)
+                    _arguments \\
+                        '-p[Edit instructions]:prompt:' \\
+                        '-m[Edit model]:model:(\$edit_models)' \\
+                        '-o[Output file]:file:_files' \\
+                        '-a[Output aspect ratio]:ratio:' \\
+                        '--enhance-prompt[Enhance edit prompt]' \\
+                        '--no-safe-mode[Disable safe mode]' \\
+                        '-f[Output format]:format:((pretty json))' \\
+                        '*:input images:_files'
+                    ;;
+                image-bg-remove)
+                    _arguments \\
+                        '-o[Output file]:file:_files' \\
+                        '-f[Output format]:format:((pretty json))' \\
+                        '1:input image:_files'
+                    ;;
+                image-styles)
+                    _arguments '-f[Output format]:format:((pretty json))'
                     ;;
                 tts|speak)
                     _arguments \\
@@ -427,7 +494,7 @@ function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
 # Main commands
-set -l commands chat search image upscale tts transcribe video music models embeddings history usage config characters voices completions
+set -l commands chat search image image-edit image-multi-edit image-bg-remove image-styles upscale tts transcribe video music models embeddings history usage config characters voices completions
 
 # Disable file completions by default
 complete -c venice -f
@@ -436,6 +503,10 @@ complete -c venice -f
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a chat -d "Chat with an AI model"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a search -d "Web search with AI synthesis"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image -d "Generate an image"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-edit -d "Edit a local image"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-multi-edit -d "Edit layered local images"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-bg-remove -d "Remove an image background"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-styles -d "List image style presets"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a upscale -d "Upscale an image"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a tts -d "Convert text to speech"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a transcribe -d "Transcribe audio"
@@ -453,6 +524,7 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions
 # Models
 set -l models kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25
 set -l image_models flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro
+set -l edit_models qwen-edit firered-image-edit qwen-edit-uncensored grok-imagine-edit grok-imagine-quality-edit qwen-image-2-edit qwen-image-2-pro-edit wan-2-7-pro-edit flux-2-max-edit gpt-image-2-edit gpt-image-1-5-edit nano-banana-2-edit nano-banana-pro-edit seedream-v5-lite-edit seedream-v5-pro-edit seedream-v4-edit qwen-image-3-edit qwen-image-3-pro-edit
 set -l video_models wan-2.6-text-to-video wan-2.6-image-to-video veo3-fast-text-to-video sora2-text-to-video kling-v3-pro-text-to-video
 set -l music_models elevenlabs-music elevenlabs-sound-effects-v2
 set -l asr_models nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3
@@ -491,6 +563,13 @@ complete -c venice -n "__fish_seen_subcommand_from image" -l safe-mode -d "Enabl
 complete -c venice -n "__fish_seen_subcommand_from image" -l no-safe-mode -d "Disable adult-content blurring"
 complete -c venice -n "__fish_seen_subcommand_from image" -l embed-exif-metadata -d "Embed generation metadata"
 complete -c venice -n "__fish_seen_subcommand_from image" -l no-embed-exif-metadata -d "Do not embed generation metadata"
+complete -c venice -n "__fish_seen_subcommand_from image-edit image-multi-edit" -s m -l model -d "Edit model" -xa "$edit_models"
+complete -c venice -n "__fish_seen_subcommand_from image-edit image-multi-edit image-bg-remove" -s o -l output -d "Output file" -r
+complete -c venice -n "__fish_seen_subcommand_from image-edit image-multi-edit image-bg-remove image-styles" -s f -l format -d "Output format" -xa "pretty json"
+complete -c venice -n "__fish_seen_subcommand_from image-edit image-multi-edit" -s a -l aspect-ratio -d "Output aspect ratio"
+complete -c venice -n "__fish_seen_subcommand_from image-edit image-multi-edit" -l enhance-prompt -d "Enhance edit prompt"
+complete -c venice -n "__fish_seen_subcommand_from image-edit image-multi-edit" -l no-safe-mode -d "Disable safe mode"
+complete -c venice -n "__fish_seen_subcommand_from image-multi-edit" -s p -l prompt -d "Edit instructions"
 
 # TTS options
 complete -c venice -n "__fish_seen_subcommand_from tts" -s v -l voice -d "Voice" -xa "$voices"

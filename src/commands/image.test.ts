@@ -241,3 +241,120 @@ test('upscale JSON returns base64 without files while pretty output writes a fil
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test('image edit JSON skips file writes and pretty output creates nested directories', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const tempDir = mkdtempSync(join(tmpdir(), 'venice-edit-cli-test-'));
+  const inputPath = join(tempDir, 'input.png');
+  const ignoredOutputPath = join(tempDir, 'ignored', 'result.png');
+  const nestedOutputPath = join(tempDir, 'nested', 'images', 'result.png');
+
+  writeFileSync(inputPath, PNG_BYTES);
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = async () => new Response(PNG_BYTES, {
+    headers: { 'Content-Type': 'image/png' },
+  });
+
+  try {
+    const jsonOutput = await runImageCommand([
+      'image-edit',
+      inputPath,
+      'Improve',
+      'it',
+      '--format',
+      'json',
+      '--output',
+      ignoredOutputPath,
+    ]);
+    assert.deepEqual(JSON.parse(jsonOutput.join('\n')), {
+      image: { b64_json: PNG_BYTES.toString('base64') },
+    });
+    assert.equal(existsSync(ignoredOutputPath), false);
+
+    await runImageCommand([
+      'image-edit',
+      inputPath,
+      'Improve',
+      'it',
+      '--output',
+      nestedOutputPath,
+    ]);
+    assert.equal(readFileSync(nestedOutputPath).equals(PNG_BYTES), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('image-styles honors its output format option', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const output: string[] = [];
+
+  globalThis.fetch = async (): Promise<Response> =>
+    Response.json({ data: ['Cinematic'], object: 'list' });
+  console.log = (...values: unknown[]) => {
+    output.push(values.map(String).join(' '));
+  };
+
+  try {
+    const program = new Command();
+    program.exitOverride();
+    registerImageCommand(program);
+    await program.parseAsync(['node', 'venice', 'image-styles', '--format', 'json']);
+
+    assert.deepEqual(JSON.parse(output.join('\n')), {
+      data: ['Cinematic'],
+      object: 'list',
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+  }
+});
+
+test('image generation accepts prompts beginning with editing command words', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  let requestBody: Record<string, unknown> = {};
+  process.env.VENICE_API_KEY = 'test-key';
+
+  globalThis.fetch = async (_input, init): Promise<Response> => {
+    requestBody = JSON.parse(String(init?.body));
+    return Response.json({ id: 'image-id', images: ['generated-image'] });
+  };
+  console.log = () => {};
+
+  try {
+    const program = new Command();
+    program.exitOverride();
+    registerImageCommand(program);
+    await program.parseAsync([
+      'node',
+      'venice',
+      'image',
+      'edit',
+      'the',
+      'lighting',
+      '--format',
+      'json',
+    ]);
+
+    assert.equal(requestBody.prompt, 'edit the lighting');
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});

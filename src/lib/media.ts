@@ -7,6 +7,7 @@ import type { ReadableStreamReadResult } from 'stream/web';
 const MB = 1024 * 1024;
 
 export const MAX_IMAGE_DOWNLOAD_BYTES = 50 * MB;
+export const MAX_IMAGE_EDIT_BYTES = 25 * MB;
 export const MAX_AUDIO_DOWNLOAD_BYTES = 500 * MB;
 export const MAX_VIDEO_DOWNLOAD_BYTES = 1024 * MB;
 export const MAX_UPSCALE_IMAGE_BYTES = 25 * MB;

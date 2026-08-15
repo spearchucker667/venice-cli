@@ -17,6 +17,7 @@ import type {
   ImageGenerationOptions,
 } from '../types/index.js';
 import {
+  MAX_IMAGE_EDIT_BYTES,
   MAX_IMAGE_DOWNLOAD_BYTES,
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
@@ -70,12 +71,15 @@ export class VeniceApiError extends Error {
   }
 }
 
-function getHeaders(): Record<string, string> {
-  return {
-    'Authorization': `Bearer ${requireApiKey()}`,
+function getHeaders(authenticated = true): Record<string, string> {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'User-Agent': `venice-cli/${getVersion()}`,
   };
+  if (authenticated) {
+    headers.Authorization = `Bearer ${requireApiKey()}`;
+  }
+  return headers;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -99,18 +103,42 @@ async function checkOnline(): Promise<boolean> {
   }
 }
 
+type ApiRequestOptions = {
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  body?: unknown;
+  retries?: number;
+  showSpinner?: boolean;
+  spinnerText?: string;
+  timeoutMs?: number;
+  additionalHeaders?: Record<string, string>;
+  authenticated?: boolean;
+} & (
+  | {
+      responseType?: 'json';
+      stream?: boolean;
+      maxResponseBytes?: never;
+      responseLabel?: never;
+      expectedContentType?: never;
+    }
+  | {
+      responseType: 'arrayBuffer';
+      stream?: false;
+      maxResponseBytes: number;
+      responseLabel: string;
+      expectedContentType: 'image';
+    }
+);
+
+class BinaryResponseValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BinaryResponseValidationError';
+  }
+}
+
 export async function apiRequest<T>(
   endpoint: string,
-  options: {
-    method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
-    body?: unknown;
-    stream?: boolean;
-    retries?: number;
-    showSpinner?: boolean;
-    spinnerText?: string;
-    timeoutMs?: number;
-    additionalHeaders?: Record<string, string>;
-  } = {}
+  options: ApiRequestOptions = {}
 ): Promise<T> {
   const {
     method = 'GET',
@@ -121,7 +149,23 @@ export async function apiRequest<T>(
     spinnerText = 'Processing...',
     timeoutMs = DEFAULT_TIMEOUT_MS,
     additionalHeaders = {},
+    authenticated = true,
   } = options;
+
+  const binaryOptions = options.responseType === 'arrayBuffer' ? options : undefined;
+  if (binaryOptions && stream) {
+    throw new BinaryResponseValidationError(
+      'Binary responses cannot be returned as an unvalidated stream.'
+    );
+  }
+  if (
+    binaryOptions &&
+    (!Number.isSafeInteger(binaryOptions.maxResponseBytes) || binaryOptions.maxResponseBytes <= 0)
+  ) {
+    throw new BinaryResponseValidationError(
+      'Binary responses require a positive, finite byte limit.'
+    );
+  }
 
   let spinner = showSpinner && !stream ? startSpinner(spinnerText) : null;
   let lastError: VeniceApiError | null = null;
@@ -133,27 +177,76 @@ export async function apiRequest<T>(
     try {
       const response = await fetch(`${VENICE_API}${endpoint}`, {
         method,
-        headers: { ...getHeaders(), ...additionalHeaders },
+        headers: { ...getHeaders(authenticated), ...additionalHeaders },
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-
       if (!response.ok) {
-        const errorBody = await response.text();
+        let errorBody: string;
+        if (binaryOptions) {
+          const errorBytes = await readResponseBodyWithLimit(
+            response,
+            binaryOptions.maxResponseBytes,
+            `${binaryOptions.responseLabel} API error response`
+          );
+          errorBody = errorBytes.toString('utf-8');
+        } else {
+          // Preserve the existing JSON/stream behavior: only binary response
+          // bodies retain the request timeout while they are consumed.
+          clearTimeout(timeoutId);
+          errorBody = await response.text();
+        }
         throw VeniceApiError.fromResponse(response.status, errorBody);
       }
 
+      if (stream) {
+        clearTimeout(timeoutId);
+        if (spinner) {
+          stopSpinner(true);
+          spinner = null;
+        }
+        return response as unknown as T;
+      }
+
+      if (binaryOptions) {
+        const bytes = await readResponseBodyWithLimit(
+          response,
+          binaryOptions.maxResponseBytes,
+          binaryOptions.responseLabel
+        );
+        if (bytes.length === 0) {
+          throw new BinaryResponseValidationError(
+            `${binaryOptions.responseLabel} response was empty.`
+          );
+        }
+
+        const contentType = response.headers.get('content-type');
+        if (binaryOptions.expectedContentType === 'image' && !isImageContentType(contentType)) {
+          throw new BinaryResponseValidationError(
+            `${binaryOptions.responseLabel} did not return an image Content-Type ` +
+            `(received: ${contentType || 'missing'}).`
+          );
+        }
+        if (binaryOptions.expectedContentType === 'image' && !looksLikeImageBytes(bytes)) {
+          throw new BinaryResponseValidationError(
+            `${binaryOptions.responseLabel} did not contain a supported PNG, JPEG, or WebP image.`
+          );
+        }
+
+        clearTimeout(timeoutId);
+        if (spinner) {
+          stopSpinner(true);
+          spinner = null;
+        }
+        return Uint8Array.from(bytes).buffer as T;
+      }
+
+      clearTimeout(timeoutId);
       if (spinner) {
         stopSpinner(true);
         spinner = null;
       }
-
-      if (stream) {
-        return response as unknown as T;
-      }
-
       return await response.json() as T;
     } catch (error) {
       clearTimeout(timeoutId);
@@ -164,6 +257,11 @@ export async function apiRequest<T>(
           `Request timed out after ${timeoutMs / 1000} seconds.\n` +
           'The server may be overloaded. Please try again later.'
         );
+      }
+
+      if (error instanceof BinaryResponseValidationError) {
+        if (spinner) stopSpinner(false);
+        throw error;
       }
 
       if (error instanceof VeniceApiError) {
@@ -427,7 +525,6 @@ export function buildImageGenerationBody(
       body[fieldName] = value;
     }
   }
-
   if (options.count !== undefined && options.count > 1) {
     body.variants = options.count;
   }
@@ -456,6 +553,110 @@ export async function generateImage(
   });
 
   return response.images;
+}
+
+type ImageEditOptions = {
+  model?: string;
+  aspectRatio?: string;
+  enhancePrompt?: boolean;
+  safeMode?: boolean;
+};
+
+async function readImageAsBase64(imagePath: string): Promise<string> {
+  const fs = await import('fs');
+
+  if (!fs.existsSync(imagePath)) {
+    throw new Error(`File not found: ${imagePath}`);
+  }
+  assertFileSizeWithinLimit(imagePath, MAX_IMAGE_EDIT_BYTES, 'Image file');
+  return (await fs.promises.readFile(imagePath)).toString('base64');
+}
+
+// Edit a single local image
+export async function editImage(
+  imagePath: string,
+  prompt: string,
+  options: ImageEditOptions = {}
+): Promise<ArrayBuffer> {
+  const body: Record<string, unknown> = {
+    image: await readImageAsBase64(imagePath),
+    prompt,
+  };
+  if (options.model) body.model = options.model;
+  if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+  if (options.enhancePrompt) body.enhance_prompt = true;
+  if (options.safeMode === false) body.safe_mode = false;
+
+  const response = await apiRequest<ArrayBuffer>('/image/edit', {
+    method: 'POST',
+    body,
+    responseType: 'arrayBuffer',
+    maxResponseBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    responseLabel: 'Edited image',
+    expectedContentType: 'image',
+    spinnerText: 'Editing image...',
+  });
+
+  trackUsage({ command: 'image edit', model: options.model || 'default' });
+  return response;
+}
+
+// Edit using one to three local image layers
+export async function multiEditImage(
+  imagePaths: string[],
+  prompt: string,
+  options: ImageEditOptions = {}
+): Promise<ArrayBuffer> {
+  if (imagePaths.length < 1 || imagePaths.length > 3) {
+    throw new Error('Multi-edit requires between 1 and 3 images.');
+  }
+
+  const body: Record<string, unknown> = {
+    images: await Promise.all(imagePaths.map(readImageAsBase64)),
+    prompt,
+  };
+  if (options.model) body.modelId = options.model;
+  if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+  if (options.enhancePrompt) body.enhance_prompt = true;
+  if (options.safeMode === false) body.safe_mode = false;
+
+  const response = await apiRequest<ArrayBuffer>('/image/multi-edit', {
+    method: 'POST',
+    body,
+    responseType: 'arrayBuffer',
+    maxResponseBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    responseLabel: 'Edited image',
+    expectedContentType: 'image',
+    spinnerText: 'Editing image layers...',
+  });
+
+  trackUsage({ command: 'image multi-edit', model: options.model || 'default' });
+  return response;
+}
+
+// Remove the background from a local image
+export async function removeImageBackground(imagePath: string): Promise<ArrayBuffer> {
+  const response = await apiRequest<ArrayBuffer>('/image/background-remove', {
+    method: 'POST',
+    body: { image: await readImageAsBase64(imagePath) },
+    responseType: 'arrayBuffer',
+    maxResponseBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    responseLabel: 'Background removal image',
+    expectedContentType: 'image',
+    spinnerText: 'Removing background...',
+  });
+
+  trackUsage({ command: 'image bg-remove', model: 'background-remove' });
+  return response;
+}
+
+// List style presets accepted by image generation
+export async function listImageStyles(): Promise<string[]> {
+  const response = await apiRequest<{ data: string[] }>('/image/styles', {
+    showSpinner: false,
+    authenticated: false,
+  });
+  return response.data || [];
 }
 
 export type UpscaleImageResult = {
@@ -487,8 +688,8 @@ async function readResponseBodyWithLimit(
   if (contentLengthHeader) {
     const contentLength = Number(contentLengthHeader);
     if (Number.isFinite(contentLength) && contentLength >= 0 && contentLength > maxBytes) {
-      await response.body?.cancel();
-      throw new Error(
+      await response.body?.cancel().catch(() => undefined);
+      throw new BinaryResponseValidationError(
         `${label} is too large (${formatBytes(contentLength)}). ` +
         `Maximum allowed size is ${formatBytes(maxBytes)}.`
       );
@@ -510,8 +711,8 @@ async function readResponseBodyWithLimit(
 
       totalBytes += value.byteLength;
       if (totalBytes > maxBytes) {
-        await reader.cancel();
-        throw new Error(
+        await reader.cancel().catch(() => undefined);
+        throw new BinaryResponseValidationError(
           `${label} exceeded the limit of ${formatBytes(maxBytes)}.`
         );
       }
