@@ -10,9 +10,11 @@ import { getVersion } from './version.js';
 import { Readable } from 'stream';
 import type { Message, ToolDefinition, Model, Character } from '../types/index.js';
 import {
+  MAX_IMAGE_DOWNLOAD_BYTES,
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
   assertFileSizeWithinLimit,
+  formatBytes,
   mimeTypeFromPath,
 } from './media.js';
 
@@ -414,6 +416,73 @@ export async function generateImage(
   return response.images;
 }
 
+export type UpscaleImageResult = {
+  bytes: Buffer;
+  contentType: string;
+};
+
+export function isImageContentType(contentType: string | null | undefined): boolean {
+  const type = (contentType || '').split(';')[0].trim().toLowerCase();
+  return type.startsWith('image/');
+}
+
+export function looksLikeImageBytes(bytes: Buffer): boolean {
+  if (bytes.length < 12) return false;
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true;
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true;
+  if (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return true;
+  }
+  return false;
+}
+
+async function readResponseBodyWithLimit(
+  response: Response,
+  maxBytes: number,
+  label: string
+): Promise<Buffer> {
+  const contentLengthHeader = response.headers.get('content-length');
+  if (contentLengthHeader) {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && contentLength >= 0 && contentLength > maxBytes) {
+      await response.body?.cancel();
+      throw new Error(
+        `${label} is too large (${formatBytes(contentLength)}). ` +
+        `Maximum allowed size is ${formatBytes(maxBytes)}.`
+      );
+    }
+  }
+
+  if (!response.body) {
+    return Buffer.alloc(0);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new Error(
+          `${label} exceeded the limit of ${formatBytes(maxBytes)}.`
+        );
+      }
+
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, totalBytes);
+}
+
 // Image upscale
 export async function upscaleImage(
   imagePath: string,
@@ -421,7 +490,7 @@ export async function upscaleImage(
     model?: string;
     scale?: number;
   } = {}
-): Promise<{ url: string }> {
+): Promise<UpscaleImageResult> {
   const fs = await import('fs');
 
   if (!fs.existsSync(imagePath)) {
@@ -431,29 +500,65 @@ export async function upscaleImage(
   assertFileSizeWithinLimit(imagePath, MAX_UPSCALE_IMAGE_BYTES, 'Image file for upscaling');
 
   const imageData = await fs.promises.readFile(imagePath);
-  const base64 = imageData.toString('base64');
-  const mimeType = mimeTypeFromPath(imagePath, 'image/png');
-
   const body = {
-    model: options.model || 'upscaler',
-    image: `data:${mimeType};base64,${base64}`,
+    image: imageData.toString('base64'),
     scale: options.scale || 2,
+    ...(options.model ? { model: options.model } : {}),
   };
 
-  const response = await apiRequest<{
-    data: Array<{ url: string }>;
-  }>('/images/upscale', {
-    method: 'POST',
-    body,
-    spinnerText: 'Upscaling image...',
-  });
+  const spinner = startSpinner('Upscaling image...');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
-  trackUsage({
-    command: 'upscale',
-    model: options.model || 'upscaler',
-  });
+  try {
+    const response = await fetch(`${VENICE_API}/image/upscale`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
 
-  return response.data[0];
+    const bytes = await readResponseBodyWithLimit(
+      response,
+      MAX_IMAGE_DOWNLOAD_BYTES,
+      response.ok ? 'Upscaled image response' : 'Upscale API error response'
+    );
+
+    if (!response.ok) {
+      const errorBody = bytes.toString('utf-8');
+      throw VeniceApiError.fromResponse(response.status, errorBody);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+
+    if (!isImageContentType(contentType) && !looksLikeImageBytes(bytes)) {
+      const preview = bytes.subarray(0, 200).toString('utf-8');
+      throw new Error(
+        `Upscale did not return an image (content-type: ${contentType || 'unknown'}). ` +
+        `Response preview: ${preview}`
+      );
+    }
+
+    if (spinner) stopSpinner(true);
+
+    trackUsage({
+      command: 'upscale',
+      model: options.model || 'upscaler',
+    });
+
+    return {
+      bytes,
+      contentType: contentType.split(';')[0].trim() || 'image/png',
+    };
+  } catch (error) {
+    if (spinner) stopSpinner(false);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Image upscale request timed out. Please try again later.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // Text to speech
