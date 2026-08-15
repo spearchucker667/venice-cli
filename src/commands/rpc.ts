@@ -19,12 +19,13 @@ import {
 import type { OutputFormat } from '../types/index.js';
 
 export const MAX_RPC_BATCH = 100;
+export const MAX_RPC_BATCH_BYTES = 1024 * 1024;
 
 export function registerRpcCommand(program: Command): void {
   program
     .command('rpc [network] [method] [params...]')
     .description('Proxy JSON-RPC requests to blockchain nodes')
-    .option('--batch <file>', 'JSON array of JSON-RPC requests (max 100)')
+    .option('--batch <file>', 'JSON array of JSON-RPC requests (max 100 items, 1 MiB)')
     .option('-f, --format <format>', 'Output format (pretty|json)')
     .addHelpText(
       'after',
@@ -111,6 +112,8 @@ export function parseRpcParam(token: string): unknown {
     return token;
   }
 
+  validateRawJsonNumbers(trimmed, 'parameter');
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed) as unknown;
@@ -118,15 +121,86 @@ export function parseRpcParam(token: string): unknown {
     throw new Error(`Invalid JSON parameter: ${token}`);
   }
 
-  if (
-    typeof parsed === 'number' &&
-    (!Number.isFinite(parsed) || (Number.isInteger(parsed) && !Number.isSafeInteger(parsed)))
-  ) {
-    throw new Error(
-      `Unsafe numeric parameter: ${token}. Use a quoted string or chain-native hex quantity.`
-    );
-  }
   return parsed;
+}
+
+function validateRawJsonNumbers(json: string, context: 'parameter' | 'batch file'): void {
+  const numberPattern = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+
+  for (let index = 0; index < json.length;) {
+    if (json[index] === '"') {
+      index++;
+      while (index < json.length) {
+        if (json[index] === '\\') {
+          index += 2;
+        } else if (json[index] === '"') {
+          index++;
+          break;
+        } else {
+          index++;
+        }
+      }
+      continue;
+    }
+
+    numberPattern.lastIndex = index;
+    const match = numberPattern.exec(json);
+    if (!match) {
+      index++;
+      continue;
+    }
+
+    const literal = match[0];
+    const value = Number(literal);
+    if (
+      !Number.isFinite(value) ||
+      exceedsSafeIntegerMagnitude(literal)
+    ) {
+      throw new Error(
+        `Unsafe numeric literal in JSON ${context}: ${literal}. ` +
+        'Quote it as a string or use a chain-native hex quantity.'
+      );
+    }
+    index += literal.length;
+  }
+}
+
+function exceedsSafeIntegerMagnitude(literal: string): boolean {
+  const unsigned = literal.startsWith('-') ? literal.slice(1) : literal;
+  const [mantissa, exponentText] = unsigned.toLowerCase().split('e');
+  const [integerPart, fractionPart = ''] = mantissa.split('.');
+  const digits = integerPart + fractionPart;
+  const firstSignificantIndex = digits.search(/[1-9]/);
+
+  if (firstSignificantIndex === -1) {
+    return false;
+  }
+
+  const exponent = exponentText === undefined ? 0 : Number(exponentText);
+  if (exponent === Number.POSITIVE_INFINITY) {
+    return true;
+  }
+  if (exponent === Number.NEGATIVE_INFINITY) {
+    return false;
+  }
+
+  const significantIntegerDigits =
+    integerPart.length + exponent - firstSignificantIndex;
+  const maxSafeDigits = String(Number.MAX_SAFE_INTEGER);
+
+  if (significantIntegerDigits !== maxSafeDigits.length) {
+    return significantIntegerDigits > maxSafeDigits.length;
+  }
+
+  const significantDigits = digits.slice(firstSignificantIndex);
+  const integerDigits = significantDigits.slice(0, maxSafeDigits.length)
+    .padEnd(maxSafeDigits.length, '0');
+
+  if (integerDigits !== maxSafeDigits) {
+    return integerDigits > maxSafeDigits;
+  }
+
+  return /[1-9]/.test(significantDigits.slice(maxSafeDigits.length));
 }
 
 function looksLikeJson(token: string): boolean {
@@ -155,13 +229,46 @@ export function buildJsonRpcRequest(method: string, params: string[] = []): Json
 }
 
 export function readBatchFile(filePath: string): JsonRpcRequest[] {
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`Batch file not found: ${filePath}`);
+  let descriptor: number;
+  try {
+    descriptor = fs.openSync(filePath, 'r');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Batch file not found: ${filePath}`);
+    }
+    throw error;
   }
+
+  let rawJson: string;
+  try {
+    assertBatchFileSize(fs.fstatSync(descriptor).size);
+
+    const fileContents = Buffer.allocUnsafe(MAX_RPC_BATCH_BYTES + 1);
+    let totalBytesRead = 0;
+    while (totalBytesRead < fileContents.byteLength) {
+      const bytesRead = fs.readSync(
+        descriptor,
+        fileContents,
+        totalBytesRead,
+        fileContents.byteLength - totalBytesRead,
+        null
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      totalBytesRead += bytesRead;
+    }
+    assertBatchFileSize(totalBytesRead);
+    rawJson = fileContents.toString('utf-8', 0, totalBytesRead);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+
+  validateRawJsonNumbers(rawJson, 'batch file');
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    parsed = JSON.parse(rawJson);
   } catch {
     throw new Error(`Batch file is not valid JSON: ${filePath}`);
   }
@@ -183,6 +290,14 @@ export function readBatchFile(filePath: string): JsonRpcRequest[] {
   }
 
   return parsed as JsonRpcRequest[];
+}
+
+function assertBatchFileSize(bytes: number): void {
+  if (bytes > MAX_RPC_BATCH_BYTES) {
+    throw new Error(
+      `Batch file exceeds the ${MAX_RPC_BATCH_BYTES}-byte (1 MiB) limit (got ${bytes} bytes)`
+    );
+  }
 }
 
 function validateRpcMethod(method: string): void {
