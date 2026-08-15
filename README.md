@@ -564,7 +564,9 @@ bits, so protection there depends on the user profile's inherited ACLs.
 
 ### Conversation History
 
-`--continue` replays **local** history from `~/.venice/history.json`. It is not covered by TEE or E2EE enclave guarantees. E2EE and TEE transcripts are not written to history, and `--continue` refuses to mix encrypted and plaintext sessions.
+Remote attachments are downloaded by the CLI before the request rather than fetched by the API server. Local files, data URLs, and downloads are MIME-checked, must be non-empty, use per-type size limits and download timeouts, and share a 100 MiB combined attachment limit.
+
+`--continue` replays **local** history from `~/.venice/history.json`. Attachment bytes and source URLs are not retained there; history stores only the message text and generic attachment markers (including a safe filename summary for files). It is not covered by TEE or E2EE enclave guarantees. E2EE and TEE transcripts are not written to history, and `--continue` refuses to mix encrypted and plaintext sessions.
 
 ```bash
 # List recent conversations

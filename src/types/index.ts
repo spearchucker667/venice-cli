@@ -72,14 +72,33 @@ export function messageContentToText(content: MessageContent): string {
           return '[audio]';
         case 'video_url':
           return '[video]';
-        case 'file':
-          return part.file.filename ? `[file: ${part.file.filename}]` : '[file]';
+        case 'file': {
+          const filename = safeAttachmentFilename(part.file.filename);
+          return filename ? `[file: ${filename}]` : '[file]';
+        }
         default:
           return '';
       }
     })
     .filter(Boolean)
     .join(' ');
+}
+
+function safeAttachmentFilename(filename: string | undefined): string | undefined {
+  if (!filename || /^(?:data|https?):/i.test(filename)) return undefined;
+  const safe = filename
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/[\\/]+/g, '_')
+    .trim()
+    .slice(0, 255);
+  return safe || undefined;
+}
+
+export function sanitizeMessagesForHistory(messages: Message[]): Message[] {
+  return messages.map((message) => ({
+    ...message,
+    content: messageContentToText(message.content),
+  }));
 }
 
 export function isTextMessageContent(content: MessageContent): content is string {

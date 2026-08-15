@@ -6,7 +6,6 @@ import {
   MAX_CHAT_IMAGE_BYTES,
   MAX_CHAT_VIDEO_BYTES,
   assertFileSizeWithinLimit,
-  audioFormatFromPath,
   downloadToBuffer,
   formatBytes,
   mimeTypeFromPath,
@@ -265,40 +264,43 @@ export function assertAttachmentsAllowedForPrivacy(useE2EE: boolean, useTEE: boo
 
 export async function buildUserMessageContent(
   prompt: string,
-  attachments: ChatAttachments
+  attachments: ChatAttachments,
+  options: { downloadTimeoutMs?: number } = {}
 ): Promise<MessageContent> {
-  let totalBytes = inspectAttachmentSources(attachments);
+  inspectAttachmentSources(attachments);
+  let totalBytes = 0;
   const parts: ContentPart[] = [];
   if (prompt.trim()) {
     parts.push({ type: 'text', text: prompt });
   }
 
   for (const image of attachments.images) {
-    parts.push(await buildImagePart(image));
+    const built = await buildAttachmentPart(
+      'image', image, remainingAttachmentBytes(totalBytes), options.downloadTimeoutMs
+    );
+    totalBytes = addAttachmentBytes(totalBytes, built.bytes);
+    parts.push(built.part);
   }
   for (const file of attachments.files) {
-    parts.push(await buildFilePart(file));
+    const built = await buildAttachmentPart(
+      'file', file, remainingAttachmentBytes(totalBytes), options.downloadTimeoutMs
+    );
+    totalBytes = addAttachmentBytes(totalBytes, built.bytes);
+    parts.push(built.part);
   }
   for (const audio of attachments.audio) {
-    if (isHttpUrl(audio)) {
-      const remainingBytes = MAX_CHAT_ATTACHMENT_BYTES - totalBytes;
-      if (remainingBytes <= 0) {
-        throw new Error(
-          `Attachments exceed the maximum combined size of ${formatBytes(MAX_CHAT_ATTACHMENT_BYTES)}.`
-        );
-      }
-      const downloaded = await buildRemoteAudioPart(
-        audio,
-        Math.min(MAX_CHAT_AUDIO_BYTES, remainingBytes)
-      );
-      totalBytes += downloaded.bytes;
-      parts.push(downloaded.part);
-    } else {
-      parts.push(await buildAudioPart(audio));
-    }
+    const built = await buildAttachmentPart(
+      'audio', audio, remainingAttachmentBytes(totalBytes), options.downloadTimeoutMs
+    );
+    totalBytes = addAttachmentBytes(totalBytes, built.bytes);
+    parts.push(built.part);
   }
   for (const video of attachments.videos) {
-    parts.push(await buildVideoPart(video));
+    const built = await buildAttachmentPart(
+      'video', video, remainingAttachmentBytes(totalBytes), options.downloadTimeoutMs
+    );
+    totalBytes = addAttachmentBytes(totalBytes, built.bytes);
+    parts.push(built.part);
   }
 
   if (parts.length === 0) {
@@ -310,92 +312,123 @@ export async function buildUserMessageContent(
   return parts;
 }
 
-async function buildImagePart(source: string): Promise<ImageUrlContentPart> {
-  if (isRemoteOrDataUrl(source)) {
-    return { type: 'image_url', image_url: { url: source } };
-  }
-  const file = readFileAsDataUrl(source, MAX_CHAT_IMAGE_BYTES, 'Image');
-  return { type: 'image_url', image_url: { url: file.dataUrl } };
+type BuiltAttachment = {
+  part: ImageUrlContentPart | FileContentPart | InputAudioContentPart | VideoUrlContentPart;
+  bytes: number;
+};
+
+function maxBytesForKind(kind: AttachmentKind): number {
+  return kind === 'image' ? MAX_CHAT_IMAGE_BYTES :
+    kind === 'file' ? MAX_CHAT_FILE_BYTES :
+    kind === 'audio' ? MAX_CHAT_AUDIO_BYTES :
+    MAX_CHAT_VIDEO_BYTES;
 }
 
-async function buildFilePart(source: string): Promise<FileContentPart> {
-  if (isRemoteOrDataUrl(source)) {
-    return {
-      type: 'file',
-      file: {
-        file_data: source,
-        filename: filenameFromSource(source),
-      },
-    };
-  }
-  const file = readFileAsDataUrl(source, MAX_CHAT_FILE_BYTES, 'File');
-  return {
-    type: 'file',
-    file: {
-      file_data: file.dataUrl,
-      filename: file.filename,
-    },
-  };
+function labelForKind(kind: AttachmentKind): string {
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
 }
 
-async function buildAudioPart(source: string): Promise<InputAudioContentPart> {
-  if (source.startsWith('data:')) {
-    const parsed = parseDataUrl(source, 'Audio');
-    const format = audioFormatFromMime(parsed.mimeType);
-    if (!format) {
-      throw new Error(`Unsupported audio MIME type "${parsed.mimeType}".`);
-    }
-    return {
-      type: 'input_audio',
-      input_audio: {
-        data: parsed.base64,
-        format,
-      },
-    };
+function remainingAttachmentBytes(totalBytes: number): number {
+  const remaining = MAX_CHAT_ATTACHMENT_BYTES - totalBytes;
+  if (remaining <= 0) {
+    throw new Error(
+      `Attachments exceed the maximum combined size of ${formatBytes(MAX_CHAT_ATTACHMENT_BYTES)}.`
+    );
   }
-
-  const file = readFileAsBase64(source, MAX_CHAT_AUDIO_BYTES, 'Audio');
-  return {
-    type: 'input_audio',
-    input_audio: {
-      data: file.base64,
-      format: audioFormatFromPath(source),
-    },
-  };
+  return remaining;
 }
 
-async function buildRemoteAudioPart(
+function addAttachmentBytes(totalBytes: number, bytes: number): number {
+  const nextTotal = totalBytes + bytes;
+  if (nextTotal > MAX_CHAT_ATTACHMENT_BYTES) {
+    throw new Error(
+      `Attachments are too large in aggregate (${formatBytes(nextTotal)}). ` +
+      `Maximum combined size is ${formatBytes(MAX_CHAT_ATTACHMENT_BYTES)}.`
+    );
+  }
+  return nextTotal;
+}
+
+async function buildAttachmentPart(
+  kind: AttachmentKind,
   source: string,
-  maxBytes: number
-): Promise<{ part: InputAudioContentPart; bytes: number }> {
-  const downloaded = await downloadToBuffer(source, { maxBytes });
-  const mimeType = normalizeMimeType(downloaded.contentType);
-  assertSupportedMimeType('audio', mimeType, source);
+  aggregateRemainingBytes: number,
+  downloadTimeoutMs: number | undefined
+): Promise<BuiltAttachment> {
+  const label = labelForKind(kind);
+  const maxBytes = Math.min(maxBytesForKind(kind), aggregateRemainingBytes);
+
+  if (isHttpUrl(source)) {
+    const downloaded = await downloadToBuffer(source, {
+      maxBytes,
+      timeoutMs: downloadTimeoutMs,
+    });
+    const mimeType = normalizeMimeType(downloaded.contentType);
+    assertSupportedMimeType(kind, mimeType, source);
+    assertSizeWithinLimit(downloaded.buffer.length, maxBytes, label);
+    return buildPart(
+      kind,
+      downloaded.buffer.toString('base64'),
+      mimeType,
+      filenameFromSource(source),
+      downloaded.buffer.length
+    );
+  }
+
+  if (source.startsWith('data:')) {
+    const parsed = parseDataUrl(source, label);
+    assertSupportedMimeType(kind, parsed.mimeType, source);
+    const bytes = decodedBase64Length(parsed.base64, label);
+    assertSizeWithinLimit(bytes, maxBytes, label);
+    return buildPart(kind, parsed.base64, parsed.mimeType, undefined, bytes);
+  }
+
+  if (kind === 'audio') {
+    const file = readFileAsBase64(source, maxBytes, label);
+    const bytes = decodedBase64Length(file.base64, label);
+    assertSizeWithinLimit(bytes, maxBytes, label);
+    return buildPart(kind, file.base64, file.mimeType, file.filename, bytes);
+  }
+
+  const file = readFileAsDataUrl(source, maxBytes, label);
+  const parsed = parseDataUrl(file.dataUrl, label);
+  const bytes = decodedBase64Length(parsed.base64, label);
+  assertSizeWithinLimit(bytes, maxBytes, label);
+  return buildPart(kind, parsed.base64, file.mimeType, file.filename, bytes);
+}
+
+function buildPart(
+  kind: AttachmentKind,
+  base64: string,
+  mimeType: string,
+  filename: string | undefined,
+  bytes: number
+): BuiltAttachment {
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  if (kind === 'image') {
+    return { part: { type: 'image_url', image_url: { url: dataUrl } }, bytes };
+  }
+  if (kind === 'file') {
+    return { part: { type: 'file', file: { file_data: dataUrl, filename } }, bytes };
+  }
+  if (kind === 'video') {
+    return { part: { type: 'video_url', video_url: { url: dataUrl } }, bytes };
+  }
+
   const format = audioFormatFromMime(mimeType);
   if (!format) {
-    throw new Error(`Unsupported audio MIME type "${mimeType}" from ${source}.`);
-  }
-  if (downloaded.buffer.length === 0) {
-    throw new Error(`Audio download was empty: ${source}`);
+    throw new Error(`Unsupported audio MIME type "${mimeType}".`);
   }
   return {
     part: {
       type: 'input_audio',
       input_audio: {
-        data: downloaded.buffer.toString('base64'),
+        data: base64,
         format,
       },
     },
-    bytes: downloaded.buffer.length,
+    bytes,
   };
-}
-
-async function buildVideoPart(source: string): Promise<VideoUrlContentPart> {
-  if (isRemoteOrDataUrl(source)) {
-    return { type: 'video_url', video_url: { url: source } };
-  }
-  const file = readFileAsDataUrl(source, MAX_CHAT_VIDEO_BYTES, 'Video');
-  return { type: 'video_url', video_url: { url: file.dataUrl } };
 }
 
 function filenameFromSource(source: string): string | undefined {
@@ -405,7 +438,12 @@ function filenameFromSource(source: string): string | undefined {
   try {
     const url = new URL(source);
     const name = basename(url.pathname);
-    return name || undefined;
+    if (!name) return undefined;
+    try {
+      return decodeURIComponent(name);
+    } catch {
+      return name;
+    }
   } catch {
     return basename(source) || undefined;
   }
