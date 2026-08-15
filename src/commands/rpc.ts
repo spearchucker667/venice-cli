@@ -111,11 +111,22 @@ export function parseRpcParam(token: string): unknown {
     return token;
   }
 
+  let parsed: unknown;
   try {
-    return JSON.parse(trimmed);
+    parsed = JSON.parse(trimmed) as unknown;
   } catch {
     throw new Error(`Invalid JSON parameter: ${token}`);
   }
+
+  if (
+    typeof parsed === 'number' &&
+    (!Number.isFinite(parsed) || (Number.isInteger(parsed) && !Number.isSafeInteger(parsed)))
+  ) {
+    throw new Error(
+      `Unsafe numeric parameter: ${token}. Use a quoted string or chain-native hex quantity.`
+    );
+  }
+  return parsed;
 }
 
 function looksLikeJson(token: string): boolean {
@@ -134,6 +145,7 @@ function looksLikeJson(token: string): boolean {
 }
 
 export function buildJsonRpcRequest(method: string, params: string[] = []): JsonRpcRequest {
+  validateRpcMethod(method);
   return {
     jsonrpc: '2.0',
     method,
@@ -167,15 +179,44 @@ export function readBatchFile(filePath: string): JsonRpcRequest[] {
   }
 
   for (const [index, item] of parsed.entries()) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      throw new Error(`Batch item ${index + 1} must be a JSON-RPC object`);
-    }
-    if (typeof (item as JsonRpcRequest).method !== 'string' || !(item as JsonRpcRequest).method) {
-      throw new Error(`Batch item ${index + 1} is missing a method`);
-    }
+    validateBatchItem(item, index);
   }
 
   return parsed as JsonRpcRequest[];
+}
+
+function validateRpcMethod(method: string): void {
+  if (!/^[A-Za-z][A-Za-z0-9_.-]*$/.test(method)) {
+    throw new Error(`Invalid JSON-RPC method: ${method}`);
+  }
+}
+
+function validateBatchItem(item: unknown, index: number): void {
+  const label = `Batch item ${index + 1}`;
+  if (!item || typeof item !== 'object' || Array.isArray(item)) {
+    throw new Error(`${label} must be a JSON-RPC object`);
+  }
+
+  const request = item as Partial<JsonRpcRequest>;
+  if (request.jsonrpc !== '2.0') {
+    throw new Error(`${label} must set jsonrpc to "2.0"`);
+  }
+  if (typeof request.method !== 'string' || !request.method) {
+    throw new Error(`${label} is missing a method`);
+  }
+  validateRpcMethod(request.method);
+  if (
+    typeof request.id !== 'string' &&
+    (typeof request.id !== 'number' || !Number.isSafeInteger(request.id))
+  ) {
+    throw new Error(`${label} must have a string or safe-integer id`);
+  }
+  if (
+    request.params !== undefined &&
+    (!request.params || typeof request.params !== 'object')
+  ) {
+    throw new Error(`${label} params must be an array or object`);
+  }
 }
 
 export function jsonRpcHasError(body: unknown): boolean {

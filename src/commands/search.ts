@@ -3,7 +3,7 @@
  */
 
 import { Command } from 'commander';
-import { webSearch } from '../lib/api.js';
+import { dedicatedWebSearch, webSearch } from '../lib/api.js';
 import { getDefaultModel } from '../lib/config.js';
 import {
   formatUsage,
@@ -20,17 +20,57 @@ export function registerSearchCommand(program: Command): void {
     .option('-n, --results <number>', 'Number of search results', '5')
     .option('--citations', 'Include source citations in response')
     .option('--scrape', 'Enable web scraping for deeper content')
+    .option('--raw', 'Use the dedicated search API without AI synthesis')
+    .option('--provider <provider>', 'Raw search provider (brave|google)')
     .option('-f, --format <format>', 'Output format (pretty|json|markdown|raw)')
     .action(async (queryParts: string[], options) => {
       const query = queryParts.join(' ');
       const model = options.model || getDefaultModel();
       const format = detectOutputFormat(options.format);
       const c = getChalk();
+      const maxResults = Number.parseInt(options.results, 10);
 
       try {
+        if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 20) {
+          throw new Error('--results must be an integer between 1 and 20');
+        }
+        if (!options.raw && options.provider) {
+          throw new Error('--provider can only be used with --raw');
+        }
+
+        if (options.raw) {
+          if (
+            options.provider !== undefined &&
+            options.provider !== 'brave' &&
+            options.provider !== 'google'
+          ) {
+            throw new Error('--provider must be either "brave" or "google"');
+          }
+
+          const result = await dedicatedWebSearch(query, {
+            limit: maxResults,
+            provider: options.provider ?? 'brave',
+          });
+
+          if (format === 'json') {
+            console.log(JSON.stringify(result, null, 2));
+          } else if (format === 'raw') {
+            console.log(JSON.stringify(result));
+          } else {
+            for (const [index, item] of result.results.entries()) {
+              console.log(`${c.bold(`${index + 1}. ${item.title}`)}`);
+              console.log(c.cyan(item.url));
+              if (item.content) console.log(item.content);
+              if (item.date) console.log(c.dim(item.date));
+              if (index < result.results.length - 1) console.log();
+            }
+          }
+          return;
+        }
+
         const result = await webSearch(query, {
           model,
-          maxResults: parseInt(options.results, 10),
+          maxResults,
           enableCitations: options.citations,
           enableScraping: options.scrape,
         });

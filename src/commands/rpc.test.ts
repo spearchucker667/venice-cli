@@ -24,6 +24,8 @@ test('parseRpcParam keeps hex and tags as strings and parses JSON tokens', () =>
   assert.deepEqual(parseRpcParam('{"to":"0x1"}'), { to: '0x1' });
   assert.deepEqual(parseRpcParam('[1,2]'), [1, 2]);
   assert.throws(() => parseRpcParam('{not-json'), /Invalid JSON parameter/);
+  assert.throws(() => parseRpcParam('9007199254740993'), /Unsafe numeric parameter/);
+  assert.throws(() => parseRpcParam('1e400'), /Unsafe numeric parameter/);
 });
 
 test('buildJsonRpcRequest maps CLI args into a single JSON-RPC body', () => {
@@ -42,6 +44,7 @@ test('buildJsonRpcRequest maps CLI args into a single JSON-RPC body', () => {
       id: 1,
     }
   );
+  assert.throws(() => buildJsonRpcRequest('../eth_blockNumber'), /Invalid JSON-RPC method/);
 });
 
 test('readBatchFile validates a JSON-RPC array and enforces the 100-item cap', () => {
@@ -75,6 +78,17 @@ test('readBatchFile validates a JSON-RPC array and enforces the 100-item cap', (
     const objectPath = join(tempDir, 'object.json');
     writeFileSync(objectPath, JSON.stringify({ method: 'eth_chainId' }));
     assert.throws(() => readBatchFile(objectPath), /JSON array/);
+
+    const invalidEnvelopePath = join(tempDir, 'invalid-envelope.json');
+    writeFileSync(invalidEnvelopePath, JSON.stringify([{ method: 'eth_chainId', id: 1 }]));
+    assert.throws(() => readBatchFile(invalidEnvelopePath), /jsonrpc/);
+
+    const invalidParamsPath = join(tempDir, 'invalid-params.json');
+    writeFileSync(
+      invalidParamsPath,
+      JSON.stringify([{ jsonrpc: '2.0', method: 'eth_chainId', params: 'bad', id: 1 }])
+    );
+    assert.throws(() => readBatchFile(invalidParamsPath), /params must be an array or object/);
 
     assert.throws(() => readBatchFile(join(tempDir, 'missing.json')), /not found/);
   } finally {
