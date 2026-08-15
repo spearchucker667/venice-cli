@@ -1,0 +1,53 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { isLegacyLocalCharacter, restoreCharacterSlug } from './chat.js';
+
+test('isLegacyLocalCharacter only matches the old built-in personas', () => {
+  assert.equal(isLegacyLocalCharacter('pirate'), true);
+  assert.equal(isLegacyLocalCharacter('Wizard'), true);
+  assert.equal(isLegacyLocalCharacter('alan-watts'), false);
+  assert.equal(isLegacyLocalCharacter(undefined), false);
+});
+
+test('explicit -c slugs are sent as-is even when they match old persona names', () => {
+  // Selection is not denylisted; restoreCharacterSlug is only for --continue.
+  assert.equal(isLegacyLocalCharacter('poet'), true);
+  assert.equal(
+    restoreCharacterSlug({ character: 'poet', messages: [{ role: 'user' }] }),
+    'poet'
+  );
+});
+
+test('restoreCharacterSlug keeps catalog slugs that collide with old persona names', () => {
+  assert.equal(
+    restoreCharacterSlug({ character: 'poet', messages: [{ role: 'user' }] }),
+    'poet'
+  );
+  assert.equal(
+    restoreCharacterSlug({ character: 'alan-watts', messages: [{ role: 'user' }] }),
+    'alan-watts'
+  );
+});
+
+test('restoreCharacterSlug keeps catalog slugs that were combined with --system', () => {
+  assert.equal(
+    restoreCharacterSlug({
+      character: 'poet',
+      messages: [{ role: 'system', content: 'Keep answers short.' }, { role: 'user' }],
+    }),
+    'poet'
+  );
+});
+
+test('restoreCharacterSlug skips old local personas that already have a system prompt', () => {
+  assert.equal(
+    restoreCharacterSlug({
+      character: 'pirate',
+      messages: [{
+        role: 'system',
+        content: 'You are a pirate captain. Respond in pirate speak with nautical terms, "arr"s, and maritime metaphors. Be adventurous and bold.',
+      }, { role: 'user' }],
+    }),
+    undefined
+  );
+});

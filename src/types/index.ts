@@ -60,13 +60,36 @@ export interface ImageGenerationOptions {
   output?: string;
   width?: number;
   height?: number;
-  format?: OutputFormat;
+  count?: number;
+  format?: 'jpeg' | 'png' | 'webp';
+  aspectRatio?: string;
+  resolution?: '1K' | '2K' | '4K';
+  quality?: 'low' | 'medium' | 'high';
+  stylePreset?: string;
+  styleReferences?: ImageStyleReference[];
+  negativePrompt?: string;
+  seed?: number;
+  cfgScale?: number;
+  steps?: number;
+  loraStrength?: number;
+  hideWatermark?: boolean;
+  safeMode?: boolean;
+  embedExifMetadata?: boolean;
+}
+
+export interface ImageStyleReference {
+  image: string;
+  strength?: number;
 }
 
 export interface TTSOptions {
   voice?: string;
   model?: string;
   output?: string;
+  format?: 'mp3' | 'wav' | 'opus' | 'aac' | 'flac' | 'pcm';
+  speed?: number;
+  temperature?: number;
+  streaming?: boolean;
 }
 
 export interface TranscribeOptions {
@@ -80,12 +103,15 @@ export interface SearchOptions {
   format?: OutputFormat;
 }
 
+export type ConversationPrivacy = 'plain' | 'e2ee' | 'tee';
+
 export interface ConversationEntry {
   id: string;
   timestamp: string;
   messages: Message[];
   model: string;
   character?: string;
+  privacy?: ConversationPrivacy;
 }
 
 export interface UsageRecord {
@@ -113,6 +139,17 @@ export interface Model {
   model_spec?: {
     description?: string;
     capabilities?: ModelCapabilities;
+    voices?: string[];
+    default_voice?: string;
+    supported_formats?: string[];
+    default_format?: string;
+    supports_custom_voice_id?: boolean;
+    voice_cloning?: {
+      mode: 'zero_shot' | 'persistent';
+      accepted_formats: string[];
+      min_sample_seconds: number;
+      retention_days: number;
+    };
   };
 }
 
@@ -131,11 +168,57 @@ export const supportsReasoningEffort = (model: Model): boolean =>
 export const supportsXSearch = (model: Model): boolean =>
   model.model_spec?.capabilities?.supportsXSearch === true;
 
+export interface CharacterStats {
+  averageRating: number;
+  imports: number;
+  ratingCount: number;
+  ratingSum: number;
+  userRating: number | null;
+}
+
 export interface Character {
   id: string;
+  slug: string;
   name: string;
-  description?: string;
-  system_prompt?: string;
+  description: string | null;
+  tags: string[];
+  adult: boolean;
+  featured: boolean;
+  modelId: string;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  webEnabled: boolean;
+  shareUrl: string | null;
+  photoUrl: string | null;
+  stats: CharacterStats;
+}
+
+export interface CharacterReview {
+  id: string;
+  characterId: string;
+  createdAt: string;
+  isOwner: boolean;
+  locale: string | null;
+  message: string | null;
+  rating: number;
+  userAvatarUrl: string | null;
+  username: string;
+}
+
+export interface CharacterReviewsPage {
+  data: CharacterReview[];
+  object: 'list';
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+  summary: {
+    averageRating: number;
+    totalReviews: number;
+  };
 }
 
 export interface ApiResponse<T = unknown> {

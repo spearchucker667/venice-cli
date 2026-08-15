@@ -23,6 +23,7 @@ import {
 import {
   formatUsage,
   formatError,
+  formatWarning,
   getChalk,
   startSpinner,
   clearSpinner,
@@ -70,6 +71,10 @@ interface E2EEContext {
   signingAddress?: string;
   attestation: TeeVerificationResult;
 }
+
+export const MAX_TOOL_ROUNDS = 10;
+type ChatCompletionFn = typeof chatCompletion;
+type ChatCompletionStreamFn = typeof chatCompletionStream;
 
 async function setupE2EE(
   modelId: string,
@@ -259,7 +264,7 @@ export function registerChatCommand(program: Command): void {
     .description('Chat with an AI model')
     .option('-m, --model <model>', 'Model to use')
     .option('-s, --system <prompt>', 'System prompt')
-    .option('-c, --character <name>', 'Character/persona to use')
+    .option('-c, --character <slug>', 'Character slug from the Venice API catalog (e.g. alan-watts)')
     .option('-t, --tools <tools>', 'Comma-separated list of tools to enable')
     .option('--interactive-tools', 'Require approval for each tool call')
     .option('--continue', 'Continue the last conversation')
@@ -330,15 +335,16 @@ export function registerChatCommand(program: Command): void {
         promptCacheRetention = retention as PromptCacheRetention;
       }
 
-      // Get prompt from args or stdin
+      // Get prompt from args and optionally stdin
       let prompt = promptParts.join(' ');
-      
-      if (!prompt && !process.stdin.isTTY) {
-        // Read from stdin
-        prompt = await readStdin();
+      let pipedInput = '';
+
+      if (!process.stdin.isTTY) {
+        pipedInput = await readStdin();
       }
 
-      if (!prompt) {
+      const userMessage = buildChatUserMessage(prompt, pipedInput);
+      if (!userMessage) {
         console.error(formatError('No prompt provided. Usage: venice chat "Your message"'));
         process.exit(1);
       }
@@ -346,50 +352,54 @@ export function registerChatCommand(program: Command): void {
       const model = options.model || getDefaultModel();
       const format = detectOutputFormat(options.format);
       const shouldStream = options.stream !== false && !isPiped() && format === 'pretty' && !responseFormat;
+      const quietStatus = options.quiet || Boolean(responseFormat) || format === 'json';
 
       let useE2EE = false;
       let useTEE = false;
       let e2eeContext: E2EEContext | undefined;
       let modelInfo: Model | undefined;
+      let catalogFailed = false;
+      let catalog: Model[] = [];
 
       // Fetch model capabilities from API
       try {
-        const models = await listModels({ showSpinner: !options.quiet });
-        modelInfo = models.find((m) => m.id === model);
+        catalog = await listModels({ showSpinner: !quietStatus });
+        modelInfo = catalog.find((m) => m.id === model);
       } catch {
-        // If we can't fetch models and user explicitly requested E2EE, fail
-        if (options.e2ee === true) {
-          console.error(formatError('Failed to fetch model capabilities.'));
+        catalogFailed = true;
+      }
+
+      const privacyDecision = resolveChatPrivacyMode({
+        modelId: model,
+        modelInfo,
+        catalogFailed,
+        e2eeFlag: options.e2ee,
+      });
+
+      if (privacyDecision.error) {
+        console.error(formatError(privacyDecision.error));
+        process.exit(1);
+      }
+
+      useE2EE = privacyDecision.useE2EE;
+      useTEE = privacyDecision.useTEE;
+
+      const lastConv = options.continue ? getLastConversation() : undefined;
+      if (lastConv) {
+        const currentPrivacy = useE2EE ? 'e2ee' : useTEE ? 'tee' : 'plain';
+        const continueError = continueConversationError(lastConv, {
+          model,
+          privacy: currentPrivacy,
+          lastModel: catalog.find((m) => m.id === lastConv.model),
+          catalogAvailable: catalog.length > 0,
+        });
+        if (continueError) {
+          console.error(formatError(continueError));
           process.exit(1);
         }
       }
 
-      // Determine mode based on model capabilities and flags
       if (modelInfo) {
-        const supportsE2EE = isE2EEModel(modelInfo);
-        const supportsTEE = isTEEModel(modelInfo);
-
-        if (options.e2ee === true) {
-          // User explicitly requested E2EE
-          if (!supportsE2EE) {
-            console.error(formatError(`Model "${model}" does not support E2EE encryption.`));
-            process.exit(1);
-          }
-          useE2EE = true;
-        } else if (options.e2ee === false) {
-          // User explicitly disabled E2EE - use TEE-only if supported
-          if (supportsTEE || supportsE2EE) {
-            useTEE = true;
-          }
-        } else {
-          // Auto-detect: use E2EE if supported, otherwise TEE if supported
-          if (supportsE2EE) {
-            useE2EE = true;
-          } else if (supportsTEE) {
-            useTEE = true;
-          }
-        }
-
         if (responseFormat && !supportsResponseSchema(modelInfo)) {
           console.error(formatError(`Model "${model}" does not support structured output (supportsResponseSchema).`));
           process.exit(1);
@@ -408,10 +418,30 @@ export function registerChatCommand(program: Command): void {
         }
       }
 
+      // Send -c/--character to the API as a catalog slug, including names that
+      // used to be local personas (poet, pirate, …). Continue only skips those
+      // names when history still contains the old injected persona prompt.
+      const historyCharacter = options.character
+        ? String(options.character)
+        : restoreCharacterSlug(lastConv);
+      const continuedCharacter = useE2EE ? undefined : historyCharacter;
+      if (options.character && useE2EE) {
+        console.error(formatError(
+          'Characters are applied server-side and cannot be used with E2EE. ' +
+          'Omit -c/--character or use --no-e2ee.'
+        ));
+        process.exit(1);
+      }
+      if (useE2EE && historyCharacter && !options.character && format === 'pretty' && !options.quiet) {
+        console.log(formatWarning(
+          `Saved character "${historyCharacter}" will not be applied; E2EE cannot use server-side personas.`
+        ));
+      }
+
       // TEE-only mode: verify attestation without encryption
       if (useTEE && !useE2EE) {
         try {
-          await verifyTEEAttestation(model, options.teeVerify, format, options.quiet);
+          await verifyTEEAttestation(model, options.teeVerify, format, quietStatus);
         } catch (error) {
           console.error(formatError(error instanceof Error ? error.message : String(error)));
           process.exit(1);
@@ -429,7 +459,7 @@ export function registerChatCommand(program: Command): void {
           console.log(c.magenta('🔐 E2EE model detected - enabling end-to-end encryption\n'));
         }
         try {
-          e2eeContext = await setupE2EE(model, options.teeVerify, format, options.quiet);
+          e2eeContext = await setupE2EE(model, options.teeVerify, format, quietStatus);
         } catch (error) {
           console.error(formatError(error instanceof Error ? error.message : String(error)));
           process.exit(1);
@@ -440,31 +470,23 @@ export function registerChatCommand(program: Command): void {
       const messages: Message[] = [];
 
       // Handle --continue flag
-      if (options.continue) {
-        const lastConv = getLastConversation();
-        if (lastConv) {
-          // Cast messages to proper type
-          for (const msg of lastConv.messages) {
-            messages.push(msg as Message);
-          }
-          if (format === 'pretty') {
-            console.log(c.dim(`Continuing conversation (${lastConv.messages.length} previous messages)\n`));
-          }
+      if (lastConv) {
+        for (const msg of lastConv.messages) {
+          messages.push(msg as Message);
+        }
+        if (format === 'pretty' && !responseFormat) {
+          console.log(c.dim(`Continuing conversation (${lastConv.messages.length} previous messages)\n`));
+          console.log(c.dim('Note: --continue replays local history and is not covered by TEE/E2EE enclave guarantees.\n'));
         }
       }
 
-      // Add system prompt
+      // Add system prompt (can be combined with --character)
       if (options.system) {
         messages.push({ role: 'system', content: options.system });
-      } else if (options.character) {
-        const systemPrompt = getCharacterPrompt(options.character);
-        if (systemPrompt) {
-          messages.push({ role: 'system', content: systemPrompt });
-        }
       }
 
-      // Add user message
-      messages.push({ role: 'user', content: prompt });
+      // Add user message from stdin/args
+      messages.push(userMessage);
 
       // Get tool definitions
       const toolNames = options.tools?.split(',').map((t: string) => t.trim()) || [];
@@ -472,9 +494,12 @@ export function registerChatCommand(program: Command): void {
 
       // Build venice_parameters
       const veniceParams: Record<string, unknown> = {};
+      if (continuedCharacter) {
+        veniceParams.character_slug = continuedCharacter;
+      }
       if (options.xSearch) {
         veniceParams.enable_x_search = true;
-        if (options.webSearch && format === 'pretty') {
+        if (options.webSearch && format === 'pretty' && !responseFormat) {
           console.log(c.yellow('⚠ --x-search replaces Venice web search; --web-search will be ignored.\n'));
         }
       } else if (options.webSearch) {
@@ -492,15 +517,16 @@ export function registerChatCommand(program: Command): void {
       if (options.searchResultsInStream) {
         veniceParams.include_search_results_in_stream = true;
       }
-      // Explicitly disable E2EE when --no-e2ee is specified
-      if (options.e2ee === false) {
+      if (useE2EE) {
+        veniceParams.enable_e2ee = true;
+      } else if (options.e2ee === false) {
         veniceParams.enable_e2ee = false;
       }
 
       const chatExtras: ChatRunExtras = {
         veniceParams,
         e2eeContext,
-        quiet: options.quiet,
+        quiet: quietStatus,
         stripThinking: options.stripThinking,
         responseFormat,
         reasoningEffort,
@@ -515,14 +541,16 @@ export function registerChatCommand(program: Command): void {
           await nonStreamChat(messages, model, tools, options.interactiveTools, format, chatExtras);
         }
 
-        // Save to history (don't save encrypted content)
-        addConversation({
-          id: randomUUID(),
-          timestamp: new Date().toISOString(),
-          messages,
-          model,
-          character: options.character,
-        });
+        if (!useE2EE && !useTEE) {
+          addConversation({
+            id: randomUUID(),
+            timestamp: new Date().toISOString(),
+            messages,
+            model,
+            character: historyCharacter,
+            privacy: 'plain',
+          });
+        }
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);
@@ -637,7 +665,7 @@ function flushThinkingState(
   return output;
 }
 
-interface ChatRunExtras {
+export interface ChatRunExtras {
   veniceParams?: Record<string, unknown>;
   e2eeContext?: E2EEContext;
   quiet?: boolean;
@@ -646,6 +674,8 @@ interface ChatRunExtras {
   reasoningEffort?: ReasoningEffort;
   promptCacheKey?: string;
   promptCacheRetention?: PromptCacheRetention;
+  completion?: ChatCompletionFn;
+  completionStream?: ChatCompletionStreamFn;
 }
 
 function buildRequestOptions(
@@ -701,7 +731,7 @@ function outputStructuredResponse(
   console.log(JSON.stringify(parsed, null, 2));
 }
 
-async function streamChat(
+export async function streamChat(
   messages: Message[],
   model: string,
   tools: ReturnType<typeof getToolDefinitions>,
@@ -713,20 +743,9 @@ async function streamChat(
   const e2eeContext = extras.e2eeContext;
   const quiet = extras.quiet ?? false;
   const stripThinking = extras.stripThinking ?? false;
+  const completionStream = extras.completionStream ?? chatCompletionStream;
 
-  let fullContent = '';
-  let collectedToolCalls: StreamToolCallDelta[] = [];
   let usage: any = null;
-  let thinkingState: ThinkingState = { inThinkingBlock: false, thinkingBuffer: '', tagBuffer: '' };
-
-  // E2EE: Encrypt messages if context provided (do this before starting spinner)
-  const messagesToSend = e2eeContext
-    ? encryptMessagesForE2EE(messages, e2eeContext.modelPublicKey)
-    : messages;
-
-  // Start spinner after encryption is done (skip E2EE-specific spinner in quiet mode)
-  const spinnerText = e2eeContext && !quiet ? 'Waiting for encrypted response...' : 'Thinking...';
-  const spinner = startSpinner(spinnerText);
 
   // E2EE: Build headers
   const additionalHeaders = e2eeContext ? buildE2EEHeaders(e2eeContext) : undefined;
@@ -742,115 +761,128 @@ async function streamChat(
           enable_web_search: undefined,
           enable_x_search: undefined,
           include_venice_system_prompt: false,
+          include_search_results_in_stream: undefined,
+          character_slug: undefined,
         },
       }
     : extras;
+  const allowedTools = new Set((effectiveTools || []).map((tool) => tool.function.name));
 
   try {
     const streamOptions = buildRequestOptions(model, effectiveTools, effectiveExtras, additionalHeaders);
-    for await (const chunk of chatCompletionStream(messagesToSend, streamOptions)) {
-      if (chunk.reasoning_content && !stripThinking) {
-        if (spinner) clearSpinner();
-        const reasoning = format === 'pretty'
-          ? c.dim(chunk.reasoning_content)
-          : chunk.reasoning_content;
-        process.stdout.write(reasoning);
-      }
+    let toolRounds = 0;
 
-      if (chunk.content) {
-        if (spinner) clearSpinner();
+    while (true) {
+      let roundContent = '';
+      let finishReason: string | undefined;
+      const collectedToolCalls: StreamToolCallDelta[] = [];
+      let thinkingState: ThinkingState = {
+        inThinkingBlock: false,
+        thinkingBuffer: '',
+        tagBuffer: '',
+      };
+      const messagesToSend = e2eeContext
+        ? encryptMessagesForE2EE(messages, e2eeContext.modelPublicKey)
+        : messages;
+      const spinnerText = e2eeContext && !quiet ? 'Waiting for encrypted response...' : 'Thinking...';
+      const spinner = startSpinner(spinnerText);
 
-        // E2EE: Decrypt content if encrypted
-        let displayContent = chunk.content;
-        if (e2eeContext && isHexEncrypted(chunk.content)) {
-          try {
-            displayContent = decryptChunk(chunk.content, e2eeContext.privateKey);
-          } catch (decryptError) {
-            console.error(c.red('\n[E2EE Decryption Error]'));
-            throw decryptError;
+      for await (const chunk of completionStream(messagesToSend, streamOptions)) {
+        if (chunk.reasoning_content && !stripThinking) {
+          if (spinner) clearSpinner();
+          process.stdout.write(
+            format === 'pretty' ? c.dim(chunk.reasoning_content) : chunk.reasoning_content
+          );
+        }
+        if (chunk.content) {
+          if (spinner) clearSpinner();
+
+          // E2EE: Decrypt content if encrypted
+          let displayContent = chunk.content;
+          if (e2eeContext && isHexEncrypted(chunk.content)) {
+            try {
+              displayContent = decryptChunk(chunk.content, e2eeContext.privateKey);
+            } catch (decryptError) {
+              console.error(c.red('\n[E2EE Decryption Error]'));
+              throw decryptError;
+            }
           }
+
+          const { output, state: newState } = processThinkingContent(
+            displayContent,
+            thinkingState,
+            { strip: stripThinking, format },
+            c
+          );
+          thinkingState = newState;
+
+          if (output) {
+            process.stdout.write(output);
+          }
+          roundContent += displayContent;
         }
 
-        // Process thinking blocks (format or strip)
-        const { output, state: newState } = processThinkingContent(
-          displayContent,
-          thinkingState,
-          { strip: stripThinking, format },
-          c
-        );
-        thinkingState = newState;
-
-        if (output) {
-          process.stdout.write(output);
+        if (chunk.tool_calls) {
+          collectedToolCalls.push(...(chunk.tool_calls as StreamToolCallDelta[]));
         }
-        fullContent += displayContent;
+        if (chunk.finish_reason) {
+          finishReason = chunk.finish_reason;
+        }
+        if (chunk.usage) {
+          usage = chunk.usage;
+        }
+        if (chunk.done) {
+          break;
+        }
+      }
+      clearSpinner();
+
+      const remaining = flushThinkingState(thinkingState, { strip: stripThinking, format }, c);
+      if (remaining) {
+        process.stdout.write(remaining);
       }
 
-      if (chunk.tool_calls) {
-        collectedToolCalls.push(...(chunk.tool_calls as StreamToolCallDelta[]));
-      }
-
-      if (chunk.usage) {
-        usage = chunk.usage;
-      }
-
-      if (chunk.done) {
+      const hasToolCalls = collectedToolCalls.length > 0;
+      const requestsToolExecution =
+        finishReason === 'tool_calls' || hasToolCalls;
+      if (!requestsToolExecution || e2eeContext) {
         break;
       }
-    }
+      if (!hasToolCalls) {
+        throw new Error('Tool-call response did not include any tool calls');
+      }
+      if (toolRounds >= MAX_TOOL_ROUNDS) {
+        throw new Error(`Tool calling exceeded the limit of ${MAX_TOOL_ROUNDS} rounds`);
+      }
+      toolRounds++;
 
-    // Flush any remaining buffered content (handles unclosed <think> tags)
-    const remaining = flushThinkingState(thinkingState, { strip: stripThinking, format }, c);
-    if (remaining) {
-      process.stdout.write(remaining);
-    }
-
-    // Handle tool calls (not supported with E2EE)
-    if (collectedToolCalls.length > 0 && !e2eeContext) {
-      console.log('\n');
       const toolCalls = reconstructStreamToolCalls(collectedToolCalls);
+      messages.push({
+        role: 'assistant',
+        content: roundContent,
+        tool_calls: toolCalls,
+      });
 
+      console.log('\n');
       for (const toolCall of toolCalls) {
         if (!toolCall.function.name) {
           throw new Error(`Incomplete tool call received for id "${toolCall.id}"`);
         }
 
-        const args = parseToolCallArguments(toolCall);
-        const result = await executeTool(toolCall.function.name, args, { interactive: interactiveTools });
-
+        const result = await executeChatTool(
+          toolCall,
+          allowedTools,
+          interactiveTools
+        );
         console.log(c.dim(`\n[Tool: ${toolCall.function.name}]`));
         console.log(result);
-
-        // Add tool result and get follow-up
-        messages.push({
-          role: 'assistant',
-          content: fullContent,
-          tool_calls: [toolCall],
-        });
         messages.push({
           role: 'tool',
           content: result,
           tool_call_id: toolCall.id,
         });
-
-        // Get follow-up response
-        console.log('\n');
-        const followUpOptions = buildRequestOptions(model, effectiveTools, {
-          ...effectiveExtras,
-          responseFormat: undefined,
-        });
-        for await (const chunk of chatCompletionStream(messages, followUpOptions)) {
-          if (chunk.reasoning_content && !stripThinking) {
-            process.stdout.write(format === 'pretty' ? c.dim(chunk.reasoning_content) : chunk.reasoning_content);
-          }
-          if (chunk.content) {
-            process.stdout.write(chunk.content);
-          }
-          if (chunk.usage) {
-            usage = chunk.usage;
-          }
-        }
       }
+      console.log('\n');
     }
 
     console.log('\n');
@@ -976,7 +1008,23 @@ function parseToolCallArguments(toolCall: ToolCall): Record<string, unknown> {
   }
 }
 
-async function nonStreamChat(
+async function executeChatTool(
+  toolCall: ToolCall,
+  allowedTools: ReadonlySet<string>,
+  interactive: boolean
+): Promise<string> {
+  if (!allowedTools.has(toolCall.function.name)) {
+    return `Tool not enabled: ${toolCall.function.name}`;
+  }
+
+  const args = parseToolCallArguments(toolCall);
+  return executeTool(toolCall.function.name, args, {
+    interactive,
+    allowedTools,
+  });
+}
+
+export async function nonStreamChat(
   messages: Message[],
   model: string,
   tools: ReturnType<typeof getToolDefinitions>,
@@ -990,46 +1038,50 @@ async function nonStreamChat(
   }
 
   const chatOptions = buildRequestOptions(model, tools, extras);
-  const response = await chatCompletion(messages, chatOptions);
+  const allowedTools = new Set(tools.map((tool) => tool.function.name));
+  const completion = extras.completion ?? chatCompletion;
 
-  // Handle tool calls
-  if (response.tool_calls?.length) {
+  let toolRounds = 0;
+  while (true) {
+    const response = await completion(messages, chatOptions);
+    const hasToolCalls = Boolean(response.tool_calls?.length);
+
+    if (response.finish_reason !== 'tool_calls' && !hasToolCalls) {
+      if (extras.responseFormat) {
+        outputStructuredResponse(response.content, extras.responseFormat, format);
+      } else {
+        outputChatText(response.content, response.reasoning_content, format, extras);
+      }
+      if (response.usage && format === 'pretty') {
+        console.log(formatUsage(response.usage));
+      }
+      return;
+    }
+    if (!hasToolCalls || !response.tool_calls) {
+      throw new Error('Tool-call response did not include any tool calls');
+    }
+    if (toolRounds >= MAX_TOOL_ROUNDS) {
+      throw new Error(`Tool calling exceeded the limit of ${MAX_TOOL_ROUNDS} rounds`);
+    }
+    toolRounds++;
+
+    messages.push({
+      role: 'assistant',
+      content: response.content,
+      tool_calls: response.tool_calls,
+    });
+
     for (const toolCall of response.tool_calls) {
-      const args = parseToolCallArguments(toolCall);
-      const result = await executeTool(toolCall.function.name, args, { interactive: interactiveTools });
-
-      messages.push({
-        role: 'assistant',
-        content: response.content,
-        tool_calls: [toolCall],
-      });
+      const result = await executeChatTool(
+        toolCall,
+        allowedTools,
+        interactiveTools
+      );
       messages.push({
         role: 'tool',
         content: result,
         tool_call_id: toolCall.id,
       });
-    }
-
-    // Get follow-up
-    const followUp = await chatCompletion(messages, buildRequestOptions(model, tools, {
-      ...extras,
-      responseFormat: undefined,
-    }));
-    outputChatText(followUp.content, followUp.reasoning_content, format, extras);
-    
-    if (followUp.usage && format === 'pretty') {
-      console.log(formatUsage(followUp.usage));
-    }
-  } else if (extras.responseFormat) {
-    outputStructuredResponse(response.content, extras.responseFormat, format);
-    if (response.usage && format === 'pretty') {
-      console.log(formatUsage(response.usage));
-    }
-  } else {
-    outputChatText(response.content, response.reasoning_content, format, extras);
-    
-    if (response.usage && format === 'pretty') {
-      console.log(formatUsage(response.usage));
     }
   }
 }
@@ -1071,29 +1123,191 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8').trim();
 }
 
-// Character prompts
-const CHARACTER_PROMPTS: Record<string, string> = {
+export function buildChatUserMessage(prompt: string, pipedInput?: string): Message | null {
+  if (pipedInput && prompt) {
+    return { role: 'user', content: `${pipedInput}\n\n${prompt}` };
+  }
+  if (pipedInput) {
+    return { role: 'user', content: pipedInput };
+  }
+  if (prompt) {
+    return { role: 'user', content: prompt };
+  }
+
+  return null;
+}
+
+const LEGACY_LOCAL_CHARACTER_PROMPTS: Record<string, string> = {
   pirate: 'You are a pirate captain. Respond in pirate speak with nautical terms, "arr"s, and maritime metaphors. Be adventurous and bold.',
-  
   wizard: 'You are a wise wizard. Speak in mystical terms, reference ancient knowledge, and occasionally make cryptic prophecies. Use archaic language.',
-  
   scientist: 'You are a brilliant scientist. Explain things with precision, reference data and studies, and maintain intellectual rigor. Be curious and analytical.',
-  
   poet: 'You are a romantic poet. Express yourself with beautiful language, metaphors, and emotional depth. Find beauty in everything.',
-  
   coder: 'You are a senior software engineer. Be practical, reference best practices, and provide code examples when relevant. Value clean, maintainable solutions.',
-  
   teacher: 'You are a patient teacher. Explain concepts clearly, use examples, and check for understanding. Encourage learning and curiosity.',
-  
   comedian: 'You are a stand-up comedian. Find humor in everything, make jokes, use wordplay, and keep things light. But still be helpful!',
-  
   philosopher: 'You are a deep philosopher. Question assumptions, explore ideas from multiple angles, and ponder the nature of existence. Be thoughtful and profound.',
 };
 
-function getCharacterPrompt(character: string): string | undefined {
-  return CHARACTER_PROMPTS[character.toLowerCase()];
+export function isLegacyLocalCharacter(character?: string): boolean {
+  return Boolean(character && character.toLowerCase() in LEGACY_LOCAL_CHARACTER_PROMPTS);
 }
 
-export function getAvailableCharacters(): string[] {
-  return Object.keys(CHARACTER_PROMPTS);
+function hasLegacyLocalPersonaPrompt(
+  character: string,
+  messages?: Array<{ role: string; content?: string }>
+): boolean {
+  const prompt = LEGACY_LOCAL_CHARACTER_PROMPTS[character.toLowerCase()];
+  if (!prompt) return false;
+  return Boolean(messages?.some((message) => message.role === 'system' && message.content === prompt));
+}
+
+export function restoreCharacterSlug(lastConv?: {
+  character?: string;
+  messages?: Array<{ role: string; content?: string }>;
+}): string | undefined {
+  if (!lastConv?.character) return undefined;
+  // Old local personas stored the name plus an injected system prompt. Skip
+  // those so we do not send a leftover slug. A catalog character combined with
+  // --system still restores, because that system text is not the old prompt.
+  if (hasLegacyLocalPersonaPrompt(lastConv.character, lastConv.messages)) {
+    return undefined;
+  }
+  return lastConv.character;
+}
+
+export function modelIdImpliesPrivateMode(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  return id.includes('e2ee') || id.startsWith('tee-') || id.includes('-tee');
+}
+
+export function modelImpliesPrivateHistory(modelId: string): boolean {
+  return modelIdImpliesPrivateMode(modelId);
+}
+
+export function resolveChatPrivacyMode(input: {
+  modelId: string;
+  modelInfo?: Model;
+  catalogFailed: boolean;
+  e2eeFlag?: boolean;
+}): { useE2EE: boolean; useTEE: boolean; error?: string } {
+  if (input.catalogFailed) {
+    if (input.e2eeFlag === true || modelIdImpliesPrivateMode(input.modelId)) {
+      return {
+        useE2EE: false,
+        useTEE: false,
+        error:
+          'Could not fetch model capabilities; refusing to send this request in the clear. ' +
+          'Retry when /models is reachable, or use a non-E2EE/TEE model.',
+      };
+    }
+    return { useE2EE: false, useTEE: false };
+  }
+
+  if (!input.modelInfo) {
+    if (input.e2eeFlag === true || modelIdImpliesPrivateMode(input.modelId)) {
+      return {
+        useE2EE: false,
+        useTEE: false,
+        error:
+          `Could not confirm capabilities for "${input.modelId}"; refusing to send this request in the clear.`,
+      };
+    }
+    return { useE2EE: false, useTEE: false };
+  }
+
+  const supportsE2EE = isE2EEModel(input.modelInfo);
+  const supportsTEE = isTEEModel(input.modelInfo);
+
+  if (
+    modelIdImpliesPrivateMode(input.modelId) &&
+    !supportsE2EE &&
+    !supportsTEE
+  ) {
+    return {
+      useE2EE: false,
+      useTEE: false,
+      error:
+        `Could not confirm private-mode capabilities for "${input.modelId}"; ` +
+        'refusing to send this request in the clear.',
+    };
+  }
+
+  if (input.e2eeFlag === true) {
+    if (!supportsE2EE) {
+      return {
+        useE2EE: false,
+        useTEE: false,
+        error: `Model "${input.modelId}" does not support E2EE encryption.`,
+      };
+    }
+    return { useE2EE: true, useTEE: false };
+  }
+
+  if (input.e2eeFlag === false) {
+    return { useE2EE: false, useTEE: supportsTEE || supportsE2EE };
+  }
+
+  if (supportsE2EE) {
+    return { useE2EE: true, useTEE: false };
+  }
+  if (supportsTEE) {
+    return { useE2EE: false, useTEE: true };
+  }
+  return { useE2EE: false, useTEE: false };
+}
+
+export function continueConversationError(
+  lastConv: { model: string; privacy?: string },
+  current: {
+    model: string;
+    privacy: 'plain' | 'e2ee' | 'tee';
+    lastModel?: Model;
+    catalogAvailable?: boolean;
+  }
+): string | undefined {
+  const lastPrivate = lastConv.privacy !== undefined
+    ? lastConv.privacy === 'e2ee' || lastConv.privacy === 'tee'
+    : modelImpliesPrivateHistory(lastConv.model) ||
+      (current.lastModel ? isE2EEModel(current.lastModel) || isTEEModel(current.lastModel) : false);
+  const currentPrivate =
+    current.privacy === 'e2ee' ||
+    current.privacy === 'tee';
+
+  if (
+    lastConv.privacy === undefined &&
+    !modelImpliesPrivateHistory(lastConv.model) &&
+    (current.catalogAvailable === false || !current.lastModel)
+  ) {
+    return (
+      'Cannot continue this conversation because model capabilities could not be confirmed. ' +
+      'Retry when /models is reachable, or start a new chat.'
+    );
+  }
+
+  if (lastPrivate !== currentPrivate) {
+    return (
+      'Cannot continue a conversation across plaintext and E2EE/TEE sessions. ' +
+      'Start a new chat or match the previous privacy mode.'
+    );
+  }
+
+  if (lastPrivate && lastConv.model !== current.model) {
+    return (
+      `Cannot continue a private conversation with a different model ` +
+      `(was ${lastConv.model}, now ${current.model}).`
+    );
+  }
+
+  if (
+    (lastConv.privacy === 'e2ee' || lastConv.privacy === 'tee') &&
+    (current.privacy === 'e2ee' || current.privacy === 'tee') &&
+    lastConv.privacy !== current.privacy
+  ) {
+    return (
+      `Cannot continue a ${lastConv.privacy} conversation with a ${current.privacy} session. ` +
+      'Start a new chat or match the previous privacy mode.'
+    );
+  }
+
+  return undefined;
 }

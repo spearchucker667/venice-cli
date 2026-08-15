@@ -488,8 +488,21 @@ export function listAvailableTools(): string[] {
 export async function executeTool(
   name: string,
   args: unknown,
-  options: { interactive?: boolean } = {}
+  options: {
+    interactive?: boolean;
+    allowedTools?: ReadonlySet<string> | readonly string[];
+  } = {}
 ): Promise<string> {
+  const allowedTools = options.allowedTools;
+  if (allowedTools) {
+    const isAllowed = Array.isArray(allowedTools)
+      ? allowedTools.includes(name)
+      : (allowedTools as ReadonlySet<string>).has(name);
+    if (!isAllowed) {
+      return `Tool not enabled: ${name}`;
+    }
+  }
+
   const executor = toolExecutors[name];
   if (!executor) {
     return `Unknown tool: ${name}`;
