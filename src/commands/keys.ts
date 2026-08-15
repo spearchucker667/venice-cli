@@ -1,7 +1,22 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  openSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { basename, dirname, resolve } from 'node:path';
 import { Command } from 'commander';
 import {
+  ApiKeyMetadata,
   ConsumptionLimits,
   assertApiKeyId,
   createApiKey,
@@ -32,7 +47,7 @@ export function registerKeysCommand(program: Command): void {
     .action(async (options) => {
       const apiKeys = await listApiKeys();
       if (detectOutputFormat(options.format) === 'json') {
-        console.log(JSON.stringify(apiKeys, null, 2));
+        console.log(JSON.stringify(apiKeys.map(toSafeApiKeyMetadata), null, 2));
         return;
       }
 
@@ -61,8 +76,9 @@ export function registerKeysCommand(program: Command): void {
 
   keys
     .command('create')
-    .description('Create an API key; the secret is displayed only once')
+    .description('Create an API key and save its secret to a restrictive file')
     .requiredOption('-n, --name <name>', 'Key name/description (max 64 characters)')
+    .requiredOption('-o, --output <file>', 'New file in which to save the API key secret')
     .option('-t, --type <type>', 'Key type (INFERENCE|ADMIN)', 'INFERENCE')
     .option('--expires <date>', 'Expiration date (YYYY-MM-DD or ISO 8601 UTC)')
     .option('--usd-limit <amount>', 'USD consumption limit')
@@ -86,25 +102,35 @@ export function registerKeysCommand(program: Command): void {
       }
       if (options.expires !== undefined) validateExpiration(options.expires);
 
-      const created = await createApiKey({
-        apiKeyType,
-        description,
-        ...(options.expires ? { expiresAt: options.expires } : {}),
-        ...(Object.keys(consumptionLimit).length > 0
-          ? { consumptionLimit, limitPeriod }
-          : {}),
-      });
+      const secretFile = prepareSecretFile(String(options.output));
+      let created: Awaited<ReturnType<typeof createApiKey>>;
+      try {
+        created = await createApiKey({
+          apiKeyType,
+          description,
+          ...(options.expires ? { expiresAt: options.expires } : {}),
+          ...(Object.keys(consumptionLimit).length > 0
+            ? { consumptionLimit, limitPeriod }
+            : {}),
+        });
+        secretFile.commit(created.apiKey);
+      } catch (error) {
+        secretFile.cleanup();
+        throw error;
+      }
 
       if (detectOutputFormat(options.format) === 'json') {
-        console.log(JSON.stringify(created, null, 2));
+        console.log(JSON.stringify({
+          ...toSafeApiKeyMetadata(created),
+          secretFile: secretFile.path,
+        }, null, 2));
         return;
       }
 
-      const c = getChalk();
       console.log(formatSuccess(`Created ${created.apiKeyType} API key "${created.description ?? description}"`));
       console.log(`ID: ${created.id}`);
-      console.log(`API key: ${c.bold(created.apiKey)}`);
-      console.error(formatWarning('Store this key securely now. Venice will not show it again.'));
+      console.log(`Secret saved to: ${secretFile.path}`);
+      console.error(formatWarning('The API key secret is never printed and Venice will not show it again.'));
     });
 
   keys
@@ -207,4 +233,77 @@ function validateExpiration(value: string): void {
   if ((!dateOnly.test(value) && !utcDateTime.test(value)) || Number.isNaN(Date.parse(value))) {
     throw new Error('expires must be YYYY-MM-DD or an ISO 8601 UTC timestamp');
   }
+}
+
+function toSafeApiKeyMetadata(key: ApiKeyMetadata): ApiKeyMetadata {
+  return {
+    apiKeyType: key.apiKeyType,
+    consumptionLimits: key.consumptionLimits,
+    limitPeriod: key.limitPeriod,
+    createdAt: key.createdAt,
+    ...(key.description === undefined ? {} : { description: key.description }),
+    expiresAt: key.expiresAt,
+    id: key.id,
+    last6Chars: key.last6Chars,
+    lastUsedAt: key.lastUsedAt,
+    ...(key.usage === undefined ? {} : { usage: key.usage }),
+    ...(key.currentPeriodUsage === undefined
+      ? {}
+      : { currentPeriodUsage: key.currentPeriodUsage }),
+  };
+}
+
+function prepareSecretFile(output: string): {
+  path: string;
+  commit: (secret: string) => void;
+  cleanup: () => void;
+} {
+  const destination = resolve(output);
+  const parent = dirname(destination);
+  const parentStat = lstatSync(parent);
+  if (parentStat.isSymbolicLink() || !parentStat.isDirectory() || realpathSync(parent) !== parent) {
+    throw new Error('API key output directory must be a real directory without symlinks');
+  }
+  try {
+    lstatSync(destination);
+    throw new Error(`Refusing to overwrite API key output: ${destination}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  const temporary = resolve(parent, `.${basename(destination)}-${process.pid}-${randomUUID()}.tmp`);
+  const descriptor = openSync(temporary, 'wx', 0o600);
+  let open = true;
+  let committed = false;
+
+  return {
+    path: destination,
+    commit(secret: string) {
+      try {
+        writeFileSync(descriptor, `${secret}\n`, { encoding: 'utf8' });
+        fsyncSync(descriptor);
+        closeSync(descriptor);
+        open = false;
+        chmodSync(temporary, 0o600);
+        linkSync(temporary, destination);
+        unlinkSync(temporary);
+        committed = true;
+      } catch (error) {
+        if (open) {
+          closeSync(descriptor);
+          open = false;
+        }
+        rmSync(temporary, { force: true });
+        throw error;
+      }
+    },
+    cleanup() {
+      if (committed) return;
+      if (open) {
+        closeSync(descriptor);
+        open = false;
+      }
+      rmSync(temporary, { force: true });
+    },
+  };
 }

@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { randomUUID } from 'crypto';
 import type { VeniceConfig } from '../types/index.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.venice');
@@ -15,18 +16,27 @@ const HISTORY_FILE = path.join(CONFIG_DIR, 'history.json');
 const USAGE_FILE = path.join(CONFIG_DIR, 'usage.json');
 
 export function ensureConfigDir(): void {
-  if (!fs.existsSync(CONFIG_DIR)) {
+  if (fs.existsSync(CONFIG_DIR)) {
+    const stat = fs.lstatSync(CONFIG_DIR);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Config path is not a directory: ${CONFIG_DIR}`);
+    }
+  } else {
     fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
+  fs.chmodSync(CONFIG_DIR, 0o700);
 }
 
 export function loadConfig(): VeniceConfig {
   ensureConfigDir();
+  if (!fs.existsSync(CONFIG_FILE)) {
+    return {};
+  }
+
+  assertRegularConfigFile();
   try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
-      return JSON.parse(content);
-    }
+    const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
+    return JSON.parse(content);
   } catch {
     // Return empty config on error
   }
@@ -35,7 +45,40 @@ export function loadConfig(): VeniceConfig {
 
 export function saveConfig(config: VeniceConfig): void {
   ensureConfigDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+
+  if (fs.existsSync(CONFIG_FILE)) {
+    assertRegularConfigFile();
+  }
+
+  const temporaryFile = path.join(
+    CONFIG_DIR,
+    `.config-${process.pid}-${randomUUID()}.tmp`
+  );
+  let fileDescriptor: number | undefined;
+
+  try {
+    fileDescriptor = fs.openSync(temporaryFile, 'wx', 0o600);
+    fs.fchmodSync(fileDescriptor, 0o600);
+    fs.writeFileSync(fileDescriptor, JSON.stringify(config, null, 2));
+    fs.fsyncSync(fileDescriptor);
+    fs.closeSync(fileDescriptor);
+    fileDescriptor = undefined;
+    fs.renameSync(temporaryFile, CONFIG_FILE);
+    fs.chmodSync(CONFIG_FILE, 0o600);
+  } catch (error) {
+    if (fileDescriptor !== undefined) {
+      fs.closeSync(fileDescriptor);
+    }
+    fs.rmSync(temporaryFile, { force: true });
+    throw error;
+  }
+}
+
+function assertRegularConfigFile(): void {
+  const stat = fs.lstatSync(CONFIG_FILE);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error(`Config path is not a regular file: ${CONFIG_FILE}`);
+  }
 }
 
 export function getConfigValue(key: keyof VeniceConfig): unknown {
@@ -77,7 +120,7 @@ export function requireApiKey(): string {
     throw new Error(
       'No API key found.\n\n' +
       'Set your API key using one of these methods:\n' +
-      '  1. venice config set api_key <your-key>\n' +
+      '  1. venice config set api_key\n' +
       '  2. export VENICE_API_KEY=<your-key>\n\n' +
       'Get your API key at: https://venice.ai/settings/api'
     );
@@ -126,6 +169,7 @@ export interface ConversationEntry {
   messages: Array<{ role: string; content: string }>;
   model: string;
   character?: string;
+  privacy?: 'plain' | 'e2ee' | 'tee';
 }
 
 export function loadHistory(): ConversationEntry[] {

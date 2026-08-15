@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -125,13 +125,26 @@ test('keys create defaults to a bounded inference credential', async () => {
       });
     });
   }, async (baseUrl, homeDir) => {
+    const secretFile = join(homeDir, 'ci.key');
     const result = await runCli(
-      ['keys', 'create', '--name', 'ci', '--usd-limit', '5', '--limit-period', 'month', '--format', 'json'],
+      [
+        'keys', 'create',
+        '--name', 'ci',
+        '--usd-limit', '5',
+        '--limit-period', 'month',
+        '--output', secretFile,
+        '--format', 'json',
+      ],
       homeDir,
       baseUrl
     );
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(JSON.parse(result.stdout).apiKey, 'venice-secret-once');
+    assert.equal(JSON.parse(result.stdout).apiKey, undefined);
+    assert.equal(JSON.parse(result.stdout).secretFile, secretFile);
+    assert.doesNotMatch(result.stdout, /venice-secret-once/);
+    assert.doesNotMatch(result.stderr, /venice-secret-once/);
+    assert.equal(readFileSync(secretFile, 'utf8'), 'venice-secret-once\n');
+    assert.equal(statSync(secretFile).mode & 0o777, 0o600);
   });
 
   assert.deepEqual(JSON.parse(requestBody), {
