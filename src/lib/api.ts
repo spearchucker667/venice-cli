@@ -129,6 +129,13 @@ type ApiRequestOptions = {
     }
 );
 
+class BinaryResponseValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BinaryResponseValidationError';
+  }
+}
+
 export async function apiRequest<T>(
   endpoint: string,
   options: ApiRequestOptions = {}
@@ -147,13 +154,17 @@ export async function apiRequest<T>(
 
   const binaryOptions = options.responseType === 'arrayBuffer' ? options : undefined;
   if (binaryOptions && stream) {
-    throw new Error('Binary responses cannot be returned as an unvalidated stream.');
+    throw new BinaryResponseValidationError(
+      'Binary responses cannot be returned as an unvalidated stream.'
+    );
   }
   if (
     binaryOptions &&
     (!Number.isSafeInteger(binaryOptions.maxResponseBytes) || binaryOptions.maxResponseBytes <= 0)
   ) {
-    throw new Error('Binary responses require a positive, finite byte limit.');
+    throw new BinaryResponseValidationError(
+      'Binary responses require a positive, finite byte limit.'
+    );
   }
 
   let spinner = showSpinner && !stream ? startSpinner(spinnerText) : null;
@@ -205,18 +216,20 @@ export async function apiRequest<T>(
           binaryOptions.responseLabel
         );
         if (bytes.length === 0) {
-          throw new Error(`${binaryOptions.responseLabel} response was empty.`);
+          throw new BinaryResponseValidationError(
+            `${binaryOptions.responseLabel} response was empty.`
+          );
         }
 
         const contentType = response.headers.get('content-type');
         if (binaryOptions.expectedContentType === 'image' && !isImageContentType(contentType)) {
-          throw new Error(
+          throw new BinaryResponseValidationError(
             `${binaryOptions.responseLabel} did not return an image Content-Type ` +
             `(received: ${contentType || 'missing'}).`
           );
         }
         if (binaryOptions.expectedContentType === 'image' && !looksLikeImageBytes(bytes)) {
-          throw new Error(
+          throw new BinaryResponseValidationError(
             `${binaryOptions.responseLabel} did not contain a supported PNG, JPEG, or WebP image.`
           );
         }
@@ -244,6 +257,11 @@ export async function apiRequest<T>(
           `Request timed out after ${timeoutMs / 1000} seconds.\n` +
           'The server may be overloaded. Please try again later.'
         );
+      }
+
+      if (error instanceof BinaryResponseValidationError) {
+        if (spinner) stopSpinner(false);
+        throw error;
       }
 
       if (error instanceof VeniceApiError) {
@@ -670,8 +688,8 @@ async function readResponseBodyWithLimit(
   if (contentLengthHeader) {
     const contentLength = Number(contentLengthHeader);
     if (Number.isFinite(contentLength) && contentLength >= 0 && contentLength > maxBytes) {
-      await response.body?.cancel();
-      throw new Error(
+      await response.body?.cancel().catch(() => undefined);
+      throw new BinaryResponseValidationError(
         `${label} is too large (${formatBytes(contentLength)}). ` +
         `Maximum allowed size is ${formatBytes(maxBytes)}.`
       );
@@ -693,8 +711,8 @@ async function readResponseBodyWithLimit(
 
       totalBytes += value.byteLength;
       if (totalBytes > maxBytes) {
-        await reader.cancel();
-        throw new Error(
+        await reader.cancel().catch(() => undefined);
+        throw new BinaryResponseValidationError(
           `${label} exceeded the limit of ${formatBytes(maxBytes)}.`
         );
       }

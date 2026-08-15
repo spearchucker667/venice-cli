@@ -112,7 +112,6 @@ const binaryImageOptions = {
   maxResponseBytes: 16,
   responseLabel: 'Test image',
   expectedContentType: 'image' as const,
-  retries: 0,
   showSpinner: false,
   authenticated: false,
 };
@@ -120,70 +119,140 @@ const binaryImageOptions = {
 test('bounded image responses reject oversized declared and streamed bodies', async () => {
   const originalFetch = globalThis.fetch;
   let declaredBodyCancelled = false;
-  const responses = [
-    new Response(new ReadableStream({
-      pull(controller) {
-        controller.enqueue(PNG_BYTES);
-      },
-      cancel() {
-        declaredBodyCancelled = true;
-      },
-    }), {
-      headers: {
-        'Content-Type': 'image/png',
-        'Content-Length': '17',
-      },
-    }),
-    new Response(new ReadableStream({
-      start(controller) {
-        controller.enqueue(PNG_BYTES);
-        controller.enqueue(Buffer.alloc(8));
-        controller.close();
-      },
-    }), {
-      headers: { 'Content-Type': 'image/png' },
-    }),
+  const cases = [
+    {
+      response: () => new Response(new ReadableStream({
+        pull(controller) {
+          controller.enqueue(PNG_BYTES);
+        },
+        cancel() {
+          declaredBodyCancelled = true;
+        },
+      }), {
+        headers: {
+          'Content-Type': 'image/png',
+          'Content-Length': '17',
+        },
+      }),
+      expected: /too large.*17 B.*16 B/,
+    },
+    {
+      response: () => new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(PNG_BYTES);
+          controller.enqueue(Buffer.alloc(8));
+          controller.close();
+        },
+      }), {
+        headers: { 'Content-Type': 'image/png' },
+      }),
+      expected: /exceeded the limit of 16 B/,
+    },
   ];
-  globalThis.fetch = async () => responses.shift()!;
 
   try {
-    await assert.rejects(
-      apiRequest<ArrayBuffer>('/test-image', binaryImageOptions),
-      /too large.*17 B.*16 B/
-    );
-    assert.equal(declaredBodyCancelled, true);
+    for (const testCase of cases) {
+      let requestCount = 0;
+      let onlineCheckCount = 0;
+      globalThis.fetch = async (input) => {
+        if (String(input) === 'https://api.venice.ai/api/v1/models') {
+          onlineCheckCount++;
+          throw new Error('Unexpected online check');
+        }
+        requestCount++;
+        return testCase.response();
+      };
 
-    await assert.rejects(
-      apiRequest<ArrayBuffer>('/test-image', binaryImageOptions),
-      /exceeded the limit of 16 B/
-    );
+      await assert.rejects(
+        apiRequest<ArrayBuffer>('/test-image', binaryImageOptions),
+        testCase.expected
+      );
+      assert.equal(requestCount, 1);
+      assert.equal(onlineCheckCount, 0);
+    }
+    assert.equal(declaredBodyCancelled, true);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test('bounded image responses reject empty, invalid content-type, and non-image bodies', async () => {
+test('bounded image response validation failures are not retried', async () => {
   const originalFetch = globalThis.fetch;
-  const responses = [
-    new Response(null, { headers: { 'Content-Type': 'image/png' } }),
-    new Response(PNG_BYTES, { headers: { 'Content-Type': 'application/octet-stream' } }),
-    new Response(Buffer.from('not an image'), { headers: { 'Content-Type': 'image/png' } }),
+  const cases: Array<{
+    response: () => Response;
+    expected: RegExp;
+  }> = [
+    {
+      response: () => new Response(null, { headers: { 'Content-Type': 'image/png' } }),
+      expected: /response was empty/,
+    },
+    {
+      response: () => new Response(PNG_BYTES, {
+        headers: { 'Content-Type': 'application/octet-stream' },
+      }),
+      expected: /did not return an image Content-Type.*application\/octet-stream/,
+    },
+    {
+      response: () => new Response(PNG_BYTES),
+      expected: /did not return an image Content-Type.*missing/,
+    },
+    {
+      response: () => new Response(Buffer.from('not an image'), {
+        headers: { 'Content-Type': 'image/png' },
+      }),
+      expected: /did not contain a supported PNG, JPEG, or WebP image/,
+    },
   ];
-  globalThis.fetch = async () => responses.shift()!;
+
+  try {
+    for (const testCase of cases) {
+      let requestCount = 0;
+      let onlineCheckCount = 0;
+      globalThis.fetch = async (input) => {
+        if (String(input) === 'https://api.venice.ai/api/v1/models') {
+          onlineCheckCount++;
+          throw new Error('Unexpected online check');
+        }
+        requestCount++;
+        return testCase.response();
+      };
+
+      await assert.rejects(
+        apiRequest<ArrayBuffer>('/test-image', binaryImageOptions),
+        testCase.expected
+      );
+      assert.equal(requestCount, 1);
+      assert.equal(onlineCheckCount, 0);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('invalid binary response configuration fails before requesting', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount++;
+    throw new Error('Unexpected request');
+  };
 
   try {
     await assert.rejects(
-      apiRequest<ArrayBuffer>('/test-image', binaryImageOptions),
-      /response was empty/
+      apiRequest<ArrayBuffer>('/test-image', {
+        ...binaryImageOptions,
+        maxResponseBytes: 0,
+      } as unknown as Parameters<typeof apiRequest<ArrayBuffer>>[1]),
+      /positive, finite byte limit/
     );
     await assert.rejects(
-      apiRequest<ArrayBuffer>('/test-image', binaryImageOptions),
-      /did not return an image Content-Type/
+      apiRequest<ArrayBuffer>('/test-image', {
+        ...binaryImageOptions,
+        stream: true,
+      } as unknown as Parameters<typeof apiRequest<ArrayBuffer>>[1]),
+      /cannot be returned as an unvalidated stream/
     );
-    await assert.rejects(
-      apiRequest<ArrayBuffer>('/test-image', binaryImageOptions),
-      /did not contain a supported PNG, JPEG, or WebP image/
-    );
+    assert.equal(requestCount, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
