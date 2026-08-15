@@ -276,18 +276,28 @@ export async function apiRequest<T>(
 
     const controller = new AbortController();
     let timedOut = false;
-    let cleanedUp = false;
+    let timeoutActive = true;
+    let externalAbortListenerActive = signal !== undefined;
     const onExternalAbort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', onExternalAbort, { once: true });
     const timeoutId = setTimeout(() => {
+      timeoutActive = false;
       timedOut = true;
       controller.abort();
     }, timeoutMs);
-    const cleanup = () => {
-      if (cleanedUp) return;
-      cleanedUp = true;
+    const clearRequestTimeout = () => {
+      if (!timeoutActive) return;
+      timeoutActive = false;
       clearTimeout(timeoutId);
+    };
+    const cleanupExternalAbortListener = () => {
+      if (!externalAbortListenerActive) return;
+      externalAbortListenerActive = false;
       signal?.removeEventListener('abort', onExternalAbort);
+    };
+    const cleanup = () => {
+      clearRequestTimeout();
+      cleanupExternalAbortListener();
     };
     const abortError = (): Error => {
       if (signal?.aborted) {
@@ -329,7 +339,8 @@ export async function apiRequest<T>(
           stopSpinner(true);
           spinner = null;
         }
-        return wrapStreamingResponse(response, cleanup, (error) => {
+        clearRequestTimeout();
+        return wrapStreamingResponse(response, cleanupExternalAbortListener, (error) => {
           if (
             signal?.aborted ||
             timedOut ||

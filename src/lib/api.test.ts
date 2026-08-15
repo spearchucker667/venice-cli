@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  apiRequest,
   chatCompletion,
   chatCompletionStream,
   completeVideo,
@@ -24,6 +25,34 @@ import {
   RequestCancelledError,
 } from './api.js';
 import type { Character, CharacterReviewsPage } from '../types/index.js';
+
+function trackAbortListeners(signal: AbortSignal): {
+  active: () => number;
+  restore: () => void;
+} {
+  const listeners = new Set<Parameters<AbortSignal['addEventListener']>[1]>();
+  const originalAdd = signal.addEventListener.bind(signal);
+  const originalRemove = signal.removeEventListener.bind(signal);
+
+  signal.addEventListener = ((...args: Parameters<AbortSignal['addEventListener']>) => {
+    const [type, listener] = args;
+    if (type === 'abort') listeners.add(listener);
+    originalAdd(...args);
+  }) as typeof signal.addEventListener;
+  signal.removeEventListener = ((...args: Parameters<AbortSignal['removeEventListener']>) => {
+    const [type, listener] = args;
+    if (type === 'abort') listeners.delete(listener);
+    originalRemove(...args);
+  }) as typeof signal.removeEventListener;
+
+  return {
+    active: () => listeners.size,
+    restore: () => {
+      signal.addEventListener = originalAdd;
+      signal.removeEventListener = originalRemove;
+    },
+  };
+}
 
 function stalledResponse(signal?: AbortSignal): Response {
   return new Response(new ReadableStream({
@@ -66,6 +95,7 @@ test('chat cancellation remains active while a streaming body is consumed', asyn
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.VENICE_API_KEY;
   const controller = new AbortController();
+  const listenerTracker = trackAbortListeners(controller.signal);
   process.env.VENICE_API_KEY = 'test-key';
   globalThis.fetch = (async (_input, init) =>
     stalledResponse(init?.signal ?? undefined)) as typeof fetch;
@@ -78,7 +108,90 @@ test('chat cancellation remains active while a streaming body is consumed', asyn
     const nextChunk = stream.next();
     setTimeout(() => controller.abort(), 10);
     await assert.rejects(nextChunk, RequestCancelledError);
+    assert.equal(listenerTracker.active(), 0);
   } finally {
+    listenerTracker.restore();
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('stream request timeout ends after headers while cancellation listener lasts through body', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  const listenerTracker = trackAbortListeners(controller.signal);
+  process.env.VENICE_API_KEY = 'test-key';
+
+  globalThis.fetch = (async (_input, init) => {
+    const requestSignal = init?.signal ?? undefined;
+    return new Response(new ReadableStream({
+      start(streamController) {
+        const delayedChunk = setTimeout(() => {
+          streamController.enqueue(new TextEncoder().encode('data: healthy\n\n'));
+          streamController.close();
+        }, 40);
+        requestSignal?.addEventListener('abort', () => {
+          clearTimeout(delayedChunk);
+          streamController.error(new DOMException('Aborted', 'AbortError'));
+        }, { once: true });
+      },
+    }));
+  }) as typeof fetch;
+
+  try {
+    const response = await apiRequest<Response>('/stream-timeout-test', {
+      stream: true,
+      showSpinner: false,
+      retries: 0,
+      timeoutMs: 10,
+      signal: controller.signal,
+    });
+    assert.equal(listenerTracker.active(), 1);
+    assert.equal(await response.text(), 'data: healthy\n\n');
+    assert.equal(listenerTracker.active(), 0);
+  } finally {
+    listenerTracker.restore();
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('cancelling a streaming response removes its external abort listener', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  const listenerTracker = trackAbortListeners(controller.signal);
+  let sourceCancelled = false;
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async () => new Response(new ReadableStream({
+    cancel() {
+      sourceCancelled = true;
+    },
+  }))) as typeof fetch;
+
+  try {
+    const response = await apiRequest<Response>('/stream-cancel-test', {
+      stream: true,
+      showSpinner: false,
+      retries: 0,
+      timeoutMs: 10,
+      signal: controller.signal,
+    });
+    assert.equal(listenerTracker.active(), 1);
+    await response.body?.cancel();
+    assert.equal(sourceCancelled, true);
+    assert.equal(listenerTracker.active(), 0);
+  } finally {
+    listenerTracker.restore();
     globalThis.fetch = originalFetch;
     if (originalApiKey === undefined) {
       delete process.env.VENICE_API_KEY;
