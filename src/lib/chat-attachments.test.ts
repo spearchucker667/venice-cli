@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,8 +9,10 @@ import {
   assertLocalAttachmentFiles,
   buildUserMessageContent,
   hasChatAttachments,
+  MAX_CHAT_ATTACHMENT_BYTES,
   parseChatAttachments,
 } from './chat-attachments.js';
+import { MAX_CHAT_IMAGE_BYTES } from './media.js';
 import { messageContentToText } from '../types/index.js';
 import type { Model } from '../types/index.js';
 
@@ -47,6 +49,70 @@ test('assertLocalAttachmentFiles rejects missing local files before any API call
     }),
     /Image not found/
   );
+});
+
+test('attachment preflight rejects per-file and aggregate limits before encoding', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'venice-attach-limits-'));
+  try {
+    const oversizedImage = join(dir, 'oversized.png');
+    writeFileSync(oversizedImage, '');
+    truncateSync(oversizedImage, MAX_CHAT_IMAGE_BYTES + 1);
+    assert.throws(
+      () => assertLocalAttachmentFiles({
+        images: [oversizedImage],
+        files: [],
+        audio: [],
+        videos: [],
+      }),
+      /too large/i
+    );
+
+    const videoPaths = [0, 1, 2].map((index) => join(dir, `${index}.mp4`));
+    for (const videoPath of videoPaths) {
+      writeFileSync(videoPath, '');
+      truncateSync(videoPath, Math.floor(MAX_CHAT_ATTACHMENT_BYTES / 3) + 1);
+    }
+    assert.throws(
+      () => assertLocalAttachmentFiles({
+        images: [],
+        files: [],
+        audio: [],
+        videos: videoPaths,
+      }),
+      /aggregate|combined size/i
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('attachment preflight rejects unsupported and mismatched MIME types', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'venice-attach-mime-'));
+  try {
+    const executable = join(dir, 'payload.exe');
+    writeFileSync(executable, 'not an attachment');
+    assert.throws(
+      () => assertLocalAttachmentFiles({
+        images: [],
+        files: [executable],
+        audio: [],
+        videos: [],
+      }),
+      /unsupported.*MIME type/i
+    );
+
+    assert.throws(
+      () => assertLocalAttachmentFiles({
+        images: ['data:text/plain;base64,aGVsbG8='],
+        files: [],
+        audio: [],
+        videos: [],
+      }),
+      /unsupported image MIME type/i
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('assertAttachmentCapabilities requires advertised vision/audio/video support', () => {
