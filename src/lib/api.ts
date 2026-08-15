@@ -103,20 +103,35 @@ async function checkOnline(): Promise<boolean> {
   }
 }
 
+type ApiRequestOptions = {
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  body?: unknown;
+  retries?: number;
+  showSpinner?: boolean;
+  spinnerText?: string;
+  timeoutMs?: number;
+  additionalHeaders?: Record<string, string>;
+  authenticated?: boolean;
+} & (
+  | {
+      responseType?: 'json';
+      stream?: boolean;
+      maxResponseBytes?: never;
+      responseLabel?: never;
+      expectedContentType?: never;
+    }
+  | {
+      responseType: 'arrayBuffer';
+      stream?: false;
+      maxResponseBytes: number;
+      responseLabel: string;
+      expectedContentType: 'image';
+    }
+);
+
 export async function apiRequest<T>(
   endpoint: string,
-  options: {
-    method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
-    body?: unknown;
-    stream?: boolean;
-    retries?: number;
-    showSpinner?: boolean;
-    spinnerText?: string;
-    timeoutMs?: number;
-    additionalHeaders?: Record<string, string>;
-    responseType?: 'json' | 'arrayBuffer';
-    authenticated?: boolean;
-  } = {}
+  options: ApiRequestOptions = {}
 ): Promise<T> {
   const {
     method = 'GET',
@@ -127,9 +142,19 @@ export async function apiRequest<T>(
     spinnerText = 'Processing...',
     timeoutMs = DEFAULT_TIMEOUT_MS,
     additionalHeaders = {},
-    responseType = 'json',
     authenticated = true,
   } = options;
+
+  const binaryOptions = options.responseType === 'arrayBuffer' ? options : undefined;
+  if (binaryOptions && stream) {
+    throw new Error('Binary responses cannot be returned as an unvalidated stream.');
+  }
+  if (
+    binaryOptions &&
+    (!Number.isSafeInteger(binaryOptions.maxResponseBytes) || binaryOptions.maxResponseBytes <= 0)
+  ) {
+    throw new Error('Binary responses require a positive, finite byte limit.');
+  }
 
   let spinner = showSpinner && !stream ? startSpinner(spinnerText) : null;
   let lastError: VeniceApiError | null = null;
@@ -146,24 +171,68 @@ export async function apiRequest<T>(
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-
       if (!response.ok) {
-        const errorBody = await response.text();
+        let errorBody: string;
+        if (binaryOptions) {
+          const errorBytes = await readResponseBodyWithLimit(
+            response,
+            binaryOptions.maxResponseBytes,
+            `${binaryOptions.responseLabel} API error response`
+          );
+          errorBody = errorBytes.toString('utf-8');
+        } else {
+          // Preserve the existing JSON/stream behavior: only binary response
+          // bodies retain the request timeout while they are consumed.
+          clearTimeout(timeoutId);
+          errorBody = await response.text();
+        }
         throw VeniceApiError.fromResponse(response.status, errorBody);
       }
 
-      if (spinner) {
-        stopSpinner(true);
-        spinner = null;
-      }
-
       if (stream) {
+        clearTimeout(timeoutId);
+        if (spinner) {
+          stopSpinner(true);
+          spinner = null;
+        }
         return response as unknown as T;
       }
 
-      if (responseType === 'arrayBuffer') {
-        return await response.arrayBuffer() as T;
+      if (binaryOptions) {
+        const bytes = await readResponseBodyWithLimit(
+          response,
+          binaryOptions.maxResponseBytes,
+          binaryOptions.responseLabel
+        );
+        if (bytes.length === 0) {
+          throw new Error(`${binaryOptions.responseLabel} response was empty.`);
+        }
+
+        const contentType = response.headers.get('content-type');
+        if (binaryOptions.expectedContentType === 'image' && !isImageContentType(contentType)) {
+          throw new Error(
+            `${binaryOptions.responseLabel} did not return an image Content-Type ` +
+            `(received: ${contentType || 'missing'}).`
+          );
+        }
+        if (binaryOptions.expectedContentType === 'image' && !looksLikeImageBytes(bytes)) {
+          throw new Error(
+            `${binaryOptions.responseLabel} did not contain a supported PNG, JPEG, or WebP image.`
+          );
+        }
+
+        clearTimeout(timeoutId);
+        if (spinner) {
+          stopSpinner(true);
+          spinner = null;
+        }
+        return Uint8Array.from(bytes).buffer as T;
+      }
+
+      clearTimeout(timeoutId);
+      if (spinner) {
+        stopSpinner(true);
+        spinner = null;
       }
       return await response.json() as T;
     } catch (error) {
@@ -504,6 +573,9 @@ export async function editImage(
     method: 'POST',
     body,
     responseType: 'arrayBuffer',
+    maxResponseBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    responseLabel: 'Edited image',
+    expectedContentType: 'image',
     spinnerText: 'Editing image...',
   });
 
@@ -534,6 +606,9 @@ export async function multiEditImage(
     method: 'POST',
     body,
     responseType: 'arrayBuffer',
+    maxResponseBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    responseLabel: 'Edited image',
+    expectedContentType: 'image',
     spinnerText: 'Editing image layers...',
   });
 
@@ -547,6 +622,9 @@ export async function removeImageBackground(imagePath: string): Promise<ArrayBuf
     method: 'POST',
     body: { image: await readImageAsBase64(imagePath) },
     responseType: 'arrayBuffer',
+    maxResponseBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    responseLabel: 'Background removal image',
+    expectedContentType: 'image',
     spinnerText: 'Removing background...',
   });
 

@@ -242,6 +242,56 @@ test('upscale JSON returns base64 without files while pretty output writes a fil
   }
 });
 
+test('image edit JSON skips file writes and pretty output creates nested directories', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const tempDir = mkdtempSync(join(tmpdir(), 'venice-edit-cli-test-'));
+  const inputPath = join(tempDir, 'input.png');
+  const ignoredOutputPath = join(tempDir, 'ignored', 'result.png');
+  const nestedOutputPath = join(tempDir, 'nested', 'images', 'result.png');
+
+  writeFileSync(inputPath, PNG_BYTES);
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = async () => new Response(PNG_BYTES, {
+    headers: { 'Content-Type': 'image/png' },
+  });
+
+  try {
+    const jsonOutput = await runImageCommand([
+      'image-edit',
+      inputPath,
+      'Improve',
+      'it',
+      '--format',
+      'json',
+      '--output',
+      ignoredOutputPath,
+    ]);
+    assert.deepEqual(JSON.parse(jsonOutput.join('\n')), {
+      image: { b64_json: PNG_BYTES.toString('base64') },
+    });
+    assert.equal(existsSync(ignoredOutputPath), false);
+
+    await runImageCommand([
+      'image-edit',
+      inputPath,
+      'Improve',
+      'it',
+      '--output',
+      nestedOutputPath,
+    ]);
+    assert.equal(readFileSync(nestedOutputPath).equals(PNG_BYTES), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('image-styles honors its output format option', async () => {
   const originalFetch = globalThis.fetch;
   const originalLog = console.log;

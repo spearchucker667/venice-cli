@@ -393,6 +393,9 @@ function writeImageResult(
     return;
   }
 
-  fs.writeFileSync(outputPath, imageData);
+  writeBufferToFile(imageData, outputPath, {
+    maxBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    label,
+  });
   console.log(formatSuccess(`Saved ${label} to ${outputPath}`));
 }
