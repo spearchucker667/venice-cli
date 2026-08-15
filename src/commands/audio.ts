@@ -18,6 +18,7 @@ import {
   getChalk,
   detectOutputFormat,
 } from '../lib/output.js';
+import { MAX_AUDIO_DOWNLOAD_BYTES, writeBufferToFile } from '../lib/media.js';
 
 export function registerAudioCommands(program: Command): void {
   // Text to speech
@@ -71,7 +72,10 @@ export function registerAudioCommands(program: Command): void {
             : `${outputPath}.${audioFormat}`;
         }
 
-        fs.writeFileSync(outputPath, Buffer.from(result.audio));
+        writeBufferToFile(Buffer.from(result.audio), outputPath, {
+          maxBytes: MAX_AUDIO_DOWNLOAD_BYTES,
+          label: 'Text-to-speech audio',
+        });
         console.log(formatSuccess(`Saved audio to ${outputPath}`));
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));

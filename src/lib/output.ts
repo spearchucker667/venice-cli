@@ -120,6 +120,17 @@ function formatObject(obj: Record<string, unknown>, c: ReturnType<typeof getChal
   return lines.join('\n');
 }
 
+const CSI_OR_OSC =
+  /\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[PX^_][^\u001b]*(?:\u001b\\)?)/g;
+const OTHER_CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u2028\u2029]/g;
+
+export function sanitizeTerminalText(value: string): string {
+  return value
+    .replace(CSI_OR_OSC, '')
+    .replace(OTHER_CONTROLS, '')
+    .replace(/\r/g, '');
+}
+
 // Error formatting
 export function formatError(error: Error | string): string {
   const c = getChalk();
