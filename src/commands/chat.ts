@@ -946,8 +946,7 @@ export function continueConversationError(
       (current.lastModel ? isE2EEModel(current.lastModel) || isTEEModel(current.lastModel) : false);
   const currentPrivate =
     current.privacy === 'e2ee' ||
-    current.privacy === 'tee' ||
-    modelImpliesPrivateHistory(current.model);
+    current.privacy === 'tee';
 
   if (
     !lastConv.privacy &&

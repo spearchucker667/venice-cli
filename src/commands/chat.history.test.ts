@@ -41,6 +41,31 @@ test('continueConversationError allows matching plain sessions', () => {
   );
 });
 
+test('continueConversationError treats current plain privacy as authoritative', () => {
+  assert.equal(
+    continueConversationError(
+      { model: 'kimi-k2-5', privacy: 'plain' },
+      { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'plain' }
+    ),
+    undefined
+  );
+  assert.equal(
+    continueConversationError(
+      { model: 'qwen3-5-122b-a10b', privacy: 'plain' },
+      {
+        model: 'qwen3-5-122b-a10b',
+        privacy: 'plain',
+        lastModel: {
+          id: 'qwen3-5-122b-a10b',
+          type: 'text',
+          model_spec: { capabilities: { supportsTeeAttestation: true } },
+        },
+      }
+    ),
+    undefined
+  );
+});
+
 test('continueConversationError rejects untagged private-model history into plaintext', () => {
   assert.match(
     continueConversationError(
