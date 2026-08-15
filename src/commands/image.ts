@@ -111,21 +111,23 @@ export function registerImageCommand(program: Command): void {
           model: options.model,
           scale,
         });
-        const outputPath = options.output || `upscaled_${Date.now()}.png`;
 
+        if (format === 'json') {
+          console.log(JSON.stringify({
+            images: [{
+              b64_json: result.bytes.toString('base64'),
+              content_type: result.contentType,
+              bytes: result.bytes.length,
+            }],
+          }, null, 2));
+          return;
+        }
+
+        const outputPath = options.output || `upscaled_${Date.now()}.png`;
         writeBufferToFile(result.bytes, outputPath, {
           maxBytes: MAX_IMAGE_DOWNLOAD_BYTES,
           label: 'Upscaled image',
         });
-
-        if (format === 'json') {
-          console.log(JSON.stringify({
-            output: outputPath,
-            bytes: result.bytes.length,
-            content_type: result.contentType,
-          }, null, 2));
-          return;
-        }
 
         console.log(formatSuccess(`Saved upscaled image to ${outputPath}`));
         if (!options.output) {
