@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getCharacter, getCharacterReviews, listCharacters } from './api.js';
+import {
+  completeVideo,
+  getCharacter,
+  getCharacterReviews,
+  listCharacters,
+  listModels,
+  queueVideoGeneration,
+  queueVideoUpscale,
+  quoteVideoGeneration,
+  transcribeVideo,
+  videoUrlFromStatus,
+} from './api.js';
 import type { Character, CharacterReviewsPage } from '../types/index.js';
 
 const sampleCharacter: Character = {
@@ -130,6 +141,71 @@ test('character API helpers send documented requests and surface errors', async 
     } else {
       process.env.VENICE_API_KEY = originalApiKey;
     }
+  }
+});
+
+test('video API helpers send documented requests and support live discovery', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  process.env.VENICE_API_KEY = 'test-key';
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const body = init?.body && typeof init.body === 'string'
+      ? JSON.parse(init.body) as Record<string, unknown>
+      : {};
+    requests.push({ url, body });
+
+    if (url.includes('/video/quote')) return jsonResponse({ quote: 0.12 });
+    if (url.includes('/video/complete')) return jsonResponse({ success: true });
+    if (url.includes('/video/transcriptions')) {
+      return jsonResponse({ transcript: 'hello from the clip', lang: 'en' });
+    }
+    if (url.includes('/video/queue')) {
+      return jsonResponse({ queue_id: 'q-1', model: body.model });
+    }
+    if (url.includes('/models?type=video')) {
+      return jsonResponse({ data: [{ id: 'veo3-fast-text-to-video', type: 'video' }] });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    assert.equal(videoUrlFromStatus({ status: 'completed', url: 'https://video' }), 'https://video');
+    assert.equal((await quoteVideoGeneration({
+      model: 'veo3-fast-text-to-video',
+      duration: '5s',
+      aspectRatio: '16:9',
+    })).quote, 0.12);
+    assert.equal((await completeVideo('q-1', 'veo3-fast-text-to-video')).success, true);
+    assert.equal((await transcribeVideo('https://example.com/clip.mp4')).lang, 'en');
+    assert.equal((await queueVideoGeneration('sunset')).queue_id, 'q-1');
+    assert.equal((await queueVideoUpscale('https://example.com/clip.mp4', {
+      upscaleFactor: 2,
+    })).model, 'topaz-video-upscale');
+    assert.equal((await listModels({ type: 'video', showSpinner: false }))[0].type, 'video');
+
+    assert.deepEqual(requests[0].body, {
+      model: 'veo3-fast-text-to-video',
+      duration: '5s',
+      aspect_ratio: '16:9',
+    });
+    assert.deepEqual(requests[3].body, {
+      model: 'wan-2.6-text-to-video',
+      prompt: 'sunset',
+      duration: '5s',
+    });
+    assert.deepEqual(requests[4].body, {
+      model: 'topaz-video-upscale',
+      video_url: 'https://example.com/clip.mp4',
+      upscale_factor: 2,
+    });
+    assert.match(requests[5].url, /\/models\?type=video$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
   }
 });
 

@@ -1041,9 +1041,25 @@ function mergeModel(merged: Map<string, Model>, model: Model, requestedType?: st
 
 // List models
 export async function listModels(
-  options: { showSpinner?: boolean } = {}
+  options: { showSpinner?: boolean; type?: string } = {}
 ): Promise<Model[]> {
-  const { showSpinner: showSpinnerOption = true } = options;
+  const { showSpinner: showSpinnerOption = true, type } = options;
+
+  if (type) {
+    const response = await apiRequest<{ data: Model[] }>(
+      `/models?type=${encodeURIComponent(type)}`,
+      {
+        method: 'GET',
+        spinnerText: 'Fetching models...',
+        showSpinner: showSpinnerOption,
+      }
+    );
+    return (response.data || []).map((model) =>
+      !model.type || model.type.toLowerCase() === 'text'
+        ? { ...model, type }
+        : model
+    );
+  }
 
   if (modelsCache && Date.now() - modelsCache.fetchedAt < MODELS_CACHE_TTL_MS) {
     return [...modelsCache.models];
@@ -1162,6 +1178,7 @@ export type VideoStatusResult = {
   average_execution_time?: number;
   execution_duration?: number;
   video_url?: string;
+  url?: string;
   download_url?: string;
   error?: string;
   model?: string;
@@ -1182,11 +1199,14 @@ export function classifyVideoRetrieveContentType(
   return 'unknown';
 }
 
+export function videoUrlFromStatus(status: VideoStatusResult): string | undefined {
+  return status.video_url || status.url || status.download_url;
+}
+
 async function retrieveVideoResponse(
   queueId: string,
   model: string,
   options: {
-    deleteOnCompletion?: boolean;
     spinnerText?: string;
     statusOnly?: boolean;
     outputPath?: string;
@@ -1194,10 +1214,13 @@ async function retrieveVideoResponse(
   } = {}
 ): Promise<VideoRetrieveResult> {
   const spinner = startSpinner(options.spinnerText || 'Checking video status...');
-  const body: Record<string, unknown> = { queue_id: queueId, model };
-  if (options.deleteOnCompletion !== undefined) {
-    body.delete_media_on_completion = options.deleteOnCompletion;
-  }
+  // Retrieval must never delete the remote media. Callers can explicitly
+  // complete the job only after the response is safely persisted locally.
+  const body: Record<string, unknown> = {
+    queue_id: queueId,
+    model,
+    delete_media_on_completion: false,
+  };
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
@@ -1414,6 +1437,75 @@ export async function queueVideoGeneration(
   return response;
 }
 
+export async function queueVideoUpscale(
+  videoUrl: string,
+  options: {
+    model?: string;
+    upscaleFactor?: number;
+  } = {}
+): Promise<{ queue_id: string; model: string }> {
+  const model = options.model || 'topaz-video-upscale';
+  const response = await apiRequest<{ queue_id: string; model: string }>('/video/queue', {
+    method: 'POST',
+    body: {
+      model,
+      video_url: videoUrl,
+      upscale_factor: options.upscaleFactor ?? 2,
+    },
+    spinnerText: 'Queueing video upscale...',
+  });
+
+  trackUsage({ command: 'video', model });
+  return response;
+}
+
+export async function quoteVideoGeneration(options: {
+  model: string;
+  duration: string;
+  aspectRatio?: string;
+  resolution?: string;
+  upscaleFactor?: number;
+  audio?: boolean;
+  videoUrl?: string;
+}): Promise<{ quote: number }> {
+  const body: Record<string, unknown> = {
+    model: options.model,
+    duration: options.duration,
+  };
+  if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+  if (options.resolution) body.resolution = options.resolution;
+  if (options.upscaleFactor !== undefined) body.upscale_factor = options.upscaleFactor;
+  if (options.audio !== undefined) body.audio = options.audio;
+  if (options.videoUrl) body.video_url = options.videoUrl;
+
+  return apiRequest('/video/quote', {
+    method: 'POST',
+    body,
+    spinnerText: 'Fetching video quote...',
+  });
+}
+
+export async function completeVideo(
+  queueId: string,
+  model: string
+): Promise<{ success: boolean }> {
+  return apiRequest('/video/complete', {
+    method: 'POST',
+    body: { queue_id: queueId, model },
+    spinnerText: 'Cleaning up video...',
+  });
+}
+
+export async function transcribeVideo(
+  url: string
+): Promise<{ transcript: string; lang?: string }> {
+  return apiRequest('/video/transcriptions', {
+    method: 'POST',
+    body: { url, response_format: 'json' },
+    spinnerText: 'Transcribing video...',
+  });
+}
+
 // Video generation - check status / retrieve result
 export async function getVideoStatus(
   queueId: string,
@@ -1436,13 +1528,11 @@ export async function retrieveVideo(
   queueId: string,
   model: string,
   options: {
-    deleteOnCompletion?: boolean;
     outputPath?: string;
     maxBytes?: number;
   } = {}
 ): Promise<VideoRetrieveResult> {
   return retrieveVideoResponse(queueId, model, {
-    deleteOnCompletion: options.deleteOnCompletion ?? false,
     spinnerText: 'Retrieving video...',
     outputPath: options.outputPath,
     maxBytes: options.maxBytes,

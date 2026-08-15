@@ -13,6 +13,7 @@ export const MAX_VIDEO_DOWNLOAD_BYTES = 1024 * MB;
 export const MAX_UPSCALE_IMAGE_BYTES = 25 * MB;
 export const MAX_TRANSCRIPTION_AUDIO_BYTES = 200 * MB;
 export const MAX_VIDEO_REFERENCE_IMAGE_BYTES = 20 * MB;
+export const MAX_VIDEO_UPSCALE_BYTES = 200 * MB;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 120000;
 const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 120000;
 
@@ -114,6 +115,17 @@ export function mimeTypeFromPath(filePath: string, fallback = 'application/octet
   return mimeByExtension[ext] || fallback;
 }
 
+export async function fileToDataUrl(
+  filePath: string,
+  maxBytes: number,
+  label: string
+): Promise<string> {
+  assertFileSizeWithinLimit(filePath, maxBytes, label);
+  const data = await fs.promises.readFile(filePath);
+  const mimeType = mimeTypeFromPath(filePath, 'video/mp4');
+  return `data:${mimeType};base64,${data.toString('base64')}`;
+}
+
 function parseContentLength(value: string | null): number | null {
   if (!value) return null;
 
@@ -179,6 +191,9 @@ export async function writeResponseToFile(
   }
 
   const contentLength = parseContentLength(response.headers.get('content-length'));
+  if (contentLength === 0) {
+    throw new Error('Download response was empty.');
+  }
   if (contentLength !== null && contentLength > options.maxBytes) {
     throw new Error(
       `Refusing to download ${formatBytes(contentLength)}. ` +
@@ -220,6 +235,9 @@ export async function writeResponseToFile(
       fs.createWriteStream(tempPath)
     );
 
+    if (bytesWritten === 0) {
+      throw new Error('Download response was empty.');
+    }
     fs.renameSync(tempPath, outputPath);
     return { bytesWritten, contentType };
   } catch (error) {

@@ -47,7 +47,7 @@ _venice_completion() {
     local commands="chat search image image-edit image-multi-edit image-bg-remove image-styles tts transcribe models embeddings upscale history usage config characters voices video music completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
-    local video_cmds="generate status retrieve models"
+    local video_cmds="generate quote status retrieve complete transcribe upscale models"
     local music_cmds="generate quote status retrieve complete models"
     local formats="pretty json markdown raw"
     local models="kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25"
@@ -159,11 +159,23 @@ _venice_completion() {
                 generate|gen)
                     COMPREPLY=( \$(compgen -W "-m --model -d --duration -a --aspect-ratio -i --image -f --format" -- "\${cur}") )
                     ;;
+                quote)
+                    COMPREPLY=( \$(compgen -W "-m --model -d --duration -a --aspect-ratio -r --resolution --factor --audio --no-audio --video-url -f --format" -- "\${cur}") )
+                    ;;
                 status)
-                    COMPREPLY=( \$(compgen -W "-w --wait -f --format" -- "\${cur}") )
+                    COMPREPLY=( \$(compgen -W "-m --model -w --wait -t --timeout -f --format" -- "\${cur}") )
                     ;;
                 retrieve|download)
-                    COMPREPLY=( \$(compgen -W "-o --output -f --format" -- "\${cur}") )
+                    COMPREPLY=( \$(compgen -W "-m --model -o --output --complete --delete -f --format" -- "\${cur}") )
+                    ;;
+                complete)
+                    COMPREPLY=( \$(compgen -W "-m --model -f --format" -- "\${cur}") )
+                    ;;
+                transcribe)
+                    COMPREPLY=( \$(compgen -W "-f --format" -- "\${cur}") )
+                    ;;
+                upscale)
+                    COMPREPLY=( \$(compgen -W "-m --model --factor -o --output --no-wait --complete -f --format" -- "\${cur}") )
                     ;;
                 *)
                     COMPREPLY=( \$(compgen -W "\${video_cmds}" -- "\${cur}") )
@@ -429,8 +441,12 @@ _venice() {
                 video)
                     local -a video_cmds=(
                         'generate:Queue video generation'
+                        'quote:Estimate video generation price'
                         'status:Check generation status'
                         'retrieve:Download completed video'
+                        'complete:Delete retrieved video from storage'
+                        'transcribe:Transcribe speech from a video URL'
+                        'upscale:Upscale a video'
                         'models:List video models'
                     )
                     _describe -t video_cmds 'video commands' video_cmds
@@ -582,8 +598,12 @@ complete -c venice -n "__fish_seen_subcommand_from transcribe" -r
 
 # Video subcommands
 complete -c venice -n "__fish_seen_subcommand_from video" -a generate -d "Queue video generation"
+complete -c venice -n "__fish_seen_subcommand_from video" -a quote -d "Estimate video price"
 complete -c venice -n "__fish_seen_subcommand_from video" -a status -d "Check status"
 complete -c venice -n "__fish_seen_subcommand_from video" -a retrieve -d "Download video"
+complete -c venice -n "__fish_seen_subcommand_from video" -a complete -d "Delete retrieved video"
+complete -c venice -n "__fish_seen_subcommand_from video" -a transcribe -d "Transcribe a video URL"
+complete -c venice -n "__fish_seen_subcommand_from video" -a upscale -d "Upscale a video"
 complete -c venice -n "__fish_seen_subcommand_from video" -a models -d "List video models"
 
 # Video generate options
@@ -591,6 +611,13 @@ complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcom
 complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from generate" -s d -l duration -d "Duration"
 complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from generate" -s a -l aspect-ratio -d "Aspect ratio" -xa "16:9 9:16 1:1"
 complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from generate" -s i -l image -d "Reference image" -r
+complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from quote" -s r -l resolution -d "Resolution"
+complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from status" -s w -l wait -d "Wait for completion"
+complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from status" -s t -l timeout -d "Wait timeout in seconds"
+complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from retrieve upscale" -s o -l output -d "Output file" -r
+complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from retrieve upscale" -l complete -d "Delete media after download"
+complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from upscale quote" -l factor -d "Upscale factor" -xa "1 2 4"
+complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from upscale" -l no-wait -d "Queue without waiting"
 
 # Characters
 complete -c venice -n "__fish_seen_subcommand_from characters" -a show -d "Show character details"
