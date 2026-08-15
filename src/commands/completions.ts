@@ -363,7 +363,7 @@ _venice() {
 _venice`;
 }
 
-function generateFishCompletion(): string {
+export function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
 # Main commands
@@ -381,9 +381,9 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a tts -d "Con
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a transcribe -d "Transcribe audio"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a video -d "AI video generation"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a models -d "List models"
-complete -c venice -n "test (commandline -opc)[2] = models" -l privacy -d "Privacy-preserving models only"
-complete -c venice -n "test (commandline -opc)[2] = models" -l tee -d "TEE-attestable models only"
-complete -c venice -n "test (commandline -opc)[2] = models" -l e2ee -d "E2EE-capable models only"
+complete -c venice -n "__fish_seen_subcommand_from models; and not __fish_seen_subcommand_from video" -l privacy -d "Privacy-preserving models only"
+complete -c venice -n "__fish_seen_subcommand_from models; and not __fish_seen_subcommand_from video" -l tee -d "TEE-attestable models only"
+complete -c venice -n "__fish_seen_subcommand_from models; and not __fish_seen_subcommand_from video" -l e2ee -d "E2EE-capable models only"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a embeddings -d "Generate embeddings"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a history -d "View history"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a usage -d "Show usage stats"
