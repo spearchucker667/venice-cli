@@ -54,6 +54,10 @@ interface E2EEContext {
   attestation: TeeVerificationResult;
 }
 
+export const MAX_TOOL_ROUNDS = 10;
+type ChatCompletionFn = typeof chatCompletion;
+type ChatCompletionStreamFn = typeof chatCompletionStream;
+
 async function setupE2EE(
   modelId: string,
   showDetails: boolean,
@@ -543,7 +547,7 @@ function flushThinkingState(
   return output;
 }
 
-async function streamChat(
+export async function streamChat(
   messages: Message[],
   model: string,
   tools: ReturnType<typeof getToolDefinitions>,
@@ -552,23 +556,12 @@ async function streamChat(
   veniceParams?: Record<string, unknown>,
   e2eeContext?: E2EEContext,
   quiet = false,
-  stripThinking = false
+  stripThinking = false,
+  completionStream: ChatCompletionStreamFn = chatCompletionStream
 ): Promise<void> {
   const c = getChalk();
 
-  let fullContent = '';
-  let collectedToolCalls: StreamToolCallDelta[] = [];
   let usage: any = null;
-  let thinkingState: ThinkingState = { inThinkingBlock: false, thinkingBuffer: '', tagBuffer: '' };
-
-  // E2EE: Encrypt messages if context provided (do this before starting spinner)
-  const messagesToSend = e2eeContext
-    ? encryptMessagesForE2EE(messages, e2eeContext.modelPublicKey)
-    : messages;
-
-  // Start spinner after encryption is done (skip E2EE-specific spinner in quiet mode)
-  const spinnerText = e2eeContext && !quiet ? 'Waiting for encrypted response...' : 'Thinking...';
-  const spinner = startSpinner(spinnerText);
 
   // E2EE: Build headers
   const additionalHeaders = e2eeContext ? buildE2EEHeaders(e2eeContext) : undefined;
@@ -579,6 +572,7 @@ async function streamChat(
   const effectiveVeniceParams = e2eeContext
     ? { ...veniceParams, enable_web_search: undefined, include_venice_system_prompt: false }
     : veniceParams;
+  const allowedTools = new Set((effectiveTools || []).map((tool) => tool.function.name));
 
   try {
     const streamOptions: {
@@ -594,94 +588,113 @@ async function streamChat(
     if (effectiveVeniceParams && Object.keys(effectiveVeniceParams).length > 0) {
       streamOptions.venice_parameters = effectiveVeniceParams;
     }
-    for await (const chunk of chatCompletionStream(messagesToSend, streamOptions)) {
-      if (chunk.content) {
-        if (spinner) clearSpinner();
+    let toolRounds = 0;
 
-        // E2EE: Decrypt content if encrypted
-        let displayContent = chunk.content;
-        if (e2eeContext && isHexEncrypted(chunk.content)) {
-          try {
-            displayContent = decryptChunk(chunk.content, e2eeContext.privateKey);
-          } catch (decryptError) {
-            console.error(c.red('\n[E2EE Decryption Error]'));
-            throw decryptError;
+    while (true) {
+      let roundContent = '';
+      let finishReason: string | undefined;
+      const collectedToolCalls: StreamToolCallDelta[] = [];
+      let thinkingState: ThinkingState = {
+        inThinkingBlock: false,
+        thinkingBuffer: '',
+        tagBuffer: '',
+      };
+      const messagesToSend = e2eeContext
+        ? encryptMessagesForE2EE(messages, e2eeContext.modelPublicKey)
+        : messages;
+      const spinnerText = e2eeContext && !quiet ? 'Waiting for encrypted response...' : 'Thinking...';
+      const spinner = startSpinner(spinnerText);
+
+      for await (const chunk of completionStream(messagesToSend, streamOptions)) {
+        if (chunk.content) {
+          if (spinner) clearSpinner();
+
+          // E2EE: Decrypt content if encrypted
+          let displayContent = chunk.content;
+          if (e2eeContext && isHexEncrypted(chunk.content)) {
+            try {
+              displayContent = decryptChunk(chunk.content, e2eeContext.privateKey);
+            } catch (decryptError) {
+              console.error(c.red('\n[E2EE Decryption Error]'));
+              throw decryptError;
+            }
           }
+
+          const { output, state: newState } = processThinkingContent(
+            displayContent,
+            thinkingState,
+            { strip: stripThinking, format },
+            c
+          );
+          thinkingState = newState;
+
+          if (output) {
+            process.stdout.write(output);
+          }
+          roundContent += displayContent;
         }
 
-        // Process thinking blocks (format or strip)
-        const { output, state: newState } = processThinkingContent(
-          displayContent,
-          thinkingState,
-          { strip: stripThinking, format },
-          c
-        );
-        thinkingState = newState;
-
-        if (output) {
-          process.stdout.write(output);
+        if (chunk.tool_calls) {
+          collectedToolCalls.push(...(chunk.tool_calls as StreamToolCallDelta[]));
         }
-        fullContent += displayContent;
+        if (chunk.finish_reason) {
+          finishReason = chunk.finish_reason;
+        }
+        if (chunk.usage) {
+          usage = chunk.usage;
+        }
+        if (chunk.done) {
+          break;
+        }
+      }
+      clearSpinner();
+
+      const remaining = flushThinkingState(thinkingState, { strip: stripThinking, format }, c);
+      if (remaining) {
+        process.stdout.write(remaining);
       }
 
-      if (chunk.tool_calls) {
-        collectedToolCalls.push(...(chunk.tool_calls as StreamToolCallDelta[]));
-      }
-
-      if (chunk.usage) {
-        usage = chunk.usage;
-      }
-
-      if (chunk.done) {
+      const hasToolCalls = collectedToolCalls.length > 0;
+      const requestsToolExecution =
+        finishReason === 'tool_calls' || hasToolCalls;
+      if (!requestsToolExecution || e2eeContext) {
         break;
       }
-    }
+      if (!hasToolCalls) {
+        throw new Error('Tool-call response did not include any tool calls');
+      }
+      if (toolRounds >= MAX_TOOL_ROUNDS) {
+        throw new Error(`Tool calling exceeded the limit of ${MAX_TOOL_ROUNDS} rounds`);
+      }
+      toolRounds++;
 
-    // Flush any remaining buffered content (handles unclosed <think> tags)
-    const remaining = flushThinkingState(thinkingState, { strip: stripThinking, format }, c);
-    if (remaining) {
-      process.stdout.write(remaining);
-    }
-
-    // Handle tool calls (not supported with E2EE)
-    if (collectedToolCalls.length > 0 && !e2eeContext) {
-      console.log('\n');
       const toolCalls = reconstructStreamToolCalls(collectedToolCalls);
+      messages.push({
+        role: 'assistant',
+        content: roundContent,
+        tool_calls: toolCalls,
+      });
 
+      console.log('\n');
       for (const toolCall of toolCalls) {
         if (!toolCall.function.name) {
           throw new Error(`Incomplete tool call received for id "${toolCall.id}"`);
         }
 
-        const args = parseToolCallArguments(toolCall);
-        const result = await executeTool(toolCall.function.name, args, { interactive: interactiveTools });
-
+        const result = await executeChatTool(
+          toolCall,
+          allowedTools,
+          interactiveTools
+        );
         console.log(c.dim(`\n[Tool: ${toolCall.function.name}]`));
         console.log(result);
-
-        // Add tool result and get follow-up
-        messages.push({
-          role: 'assistant',
-          content: fullContent,
-          tool_calls: [toolCall],
-        });
         messages.push({
           role: 'tool',
           content: result,
           tool_call_id: toolCall.id,
         });
-
-        // Get follow-up response
-        console.log('\n');
-        for await (const chunk of chatCompletionStream(messages, { model })) {
-          if (chunk.content) {
-            process.stdout.write(chunk.content);
-          }
-          if (chunk.usage) {
-            usage = chunk.usage;
-          }
-        }
       }
+      console.log('\n');
     }
 
     console.log('\n');
@@ -807,7 +820,23 @@ function parseToolCallArguments(toolCall: ToolCall): Record<string, unknown> {
   }
 }
 
-async function nonStreamChat(
+async function executeChatTool(
+  toolCall: ToolCall,
+  allowedTools: ReadonlySet<string>,
+  interactive: boolean
+): Promise<string> {
+  if (!allowedTools.has(toolCall.function.name)) {
+    return `Tool not enabled: ${toolCall.function.name}`;
+  }
+
+  const args = parseToolCallArguments(toolCall);
+  return executeTool(toolCall.function.name, args, {
+    interactive,
+    allowedTools,
+  });
+}
+
+export async function nonStreamChat(
   messages: Message[],
   model: string,
   tools: ReturnType<typeof getToolDefinitions>,
@@ -815,7 +844,8 @@ async function nonStreamChat(
   format: OutputFormat,
   veniceParams?: Record<string, unknown>,
   e2eeContext?: E2EEContext,
-  _quiet = false
+  _quiet = false,
+  completion: ChatCompletionFn = chatCompletion
 ): Promise<void> {
   // E2EE requires streaming for response decryption
   if (e2eeContext) {
@@ -823,41 +853,48 @@ async function nonStreamChat(
   }
 
   const chatOptions: { model: string; tools?: typeof tools; venice_parameters?: Record<string, unknown> } = { model, tools };
+  const allowedTools = new Set(tools.map((tool) => tool.function.name));
   if (veniceParams && Object.keys(veniceParams).length > 0) {
     chatOptions.venice_parameters = veniceParams;
   }
-  const response = await chatCompletion(messages, chatOptions);
 
-  // Handle tool calls
-  if (response.tool_calls?.length) {
+  let toolRounds = 0;
+  while (true) {
+    const response = await completion(messages, chatOptions);
+    const hasToolCalls = Boolean(response.tool_calls?.length);
+
+    if (response.finish_reason !== 'tool_calls' && !hasToolCalls) {
+      outputResponse(response.content, format);
+      if (response.usage && format === 'pretty') {
+        console.log(formatUsage(response.usage));
+      }
+      return;
+    }
+    if (!hasToolCalls || !response.tool_calls) {
+      throw new Error('Tool-call response did not include any tool calls');
+    }
+    if (toolRounds >= MAX_TOOL_ROUNDS) {
+      throw new Error(`Tool calling exceeded the limit of ${MAX_TOOL_ROUNDS} rounds`);
+    }
+    toolRounds++;
+
+    messages.push({
+      role: 'assistant',
+      content: response.content,
+      tool_calls: response.tool_calls,
+    });
+
     for (const toolCall of response.tool_calls) {
-      const args = JSON.parse(toolCall.function.arguments || '{}');
-      const result = await executeTool(toolCall.function.name, args, { interactive: interactiveTools });
-
-      messages.push({
-        role: 'assistant',
-        content: response.content,
-        tool_calls: [toolCall],
-      });
+      const result = await executeChatTool(
+        toolCall,
+        allowedTools,
+        interactiveTools
+      );
       messages.push({
         role: 'tool',
         content: result,
         tool_call_id: toolCall.id,
       });
-    }
-
-    // Get follow-up
-    const followUp = await chatCompletion(messages, { model });
-    outputResponse(followUp.content, format);
-    
-    if (followUp.usage && format === 'pretty') {
-      console.log(formatUsage(followUp.usage));
-    }
-  } else {
-    outputResponse(response.content, format);
-    
-    if (response.usage && format === 'pretty') {
-      console.log(formatUsage(response.usage));
     }
   }
 }

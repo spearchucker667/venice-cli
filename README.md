@@ -497,6 +497,10 @@ venice chat -t datetime "What day is it today?"
 venice chat --interactive-tools -t calculator "Calculate 15% tip on $85"
 ```
 
+Only tools named by `--tools` are permitted to execute. The model may make
+sequential tool calls for up to 10 rounds; the command stops with an error if
+that limit is exceeded.
+
 ## Output Formats
 
 | Format | Description | Use Case |
