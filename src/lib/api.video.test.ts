@@ -257,6 +257,30 @@ test('video status parses JSON mislabeled as video or octet-stream', async () =>
   }
 });
 
+test('video status waits through an all-whitespace chunk before JSON', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('        '));
+      controller.enqueue(Buffer.from('{"status":"PROCESSING"}'));
+      controller.close();
+    },
+  }), {
+    headers: { 'Content-Type': 'application/octet-stream' },
+  })) as typeof fetch;
+
+  try {
+    const status = await getVideoStatus('q1', 'test-model');
+    assert.equal(status.status, 'PROCESSING');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+  }
+});
+
 test('video retrieve retries transient HTTP failures before streaming to disk', async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.VENICE_API_KEY;

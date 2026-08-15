@@ -922,7 +922,7 @@ async function inspectVideoRetrieveResponse(
         const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
         if (firstNonWhitespace === 0x7b) {
           readingJson = true;
-        } else {
+        } else if (firstNonWhitespace !== undefined) {
           throw unexpectedVideoRetrieveType(response);
         }
       }
