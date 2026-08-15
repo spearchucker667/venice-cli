@@ -1,88 +1,160 @@
 /**
- * Characters Command - List available chat characters/personas
+ * Characters Command - List and inspect Venice API characters
  */
 
 import { Command } from 'commander';
-import { getAvailableCharacters } from './chat.js';
-import { getChalk, detectOutputFormat } from '../lib/output.js';
-
-// Character details
-const CHARACTER_DETAILS: Record<string, { name: string; description: string; sample: string }> = {
-  pirate: {
-    name: 'Pirate Captain',
-    description: 'A swashbuckling sea captain who speaks in nautical terms',
-    sample: 'Arrr, matey! What brings ye to these digital waters?',
-  },
-  wizard: {
-    name: 'Wise Wizard',
-    description: 'A mystical sage with ancient knowledge',
-    sample: 'Greetings, seeker of wisdom. The stars foretold your coming...',
-  },
-  scientist: {
-    name: 'Brilliant Scientist',
-    description: 'A precise, analytical mind focused on data and evidence',
-    sample: 'Based on current evidence, I can provide several hypotheses...',
-  },
-  poet: {
-    name: 'Romantic Poet',
-    description: 'An artistic soul who finds beauty in everything',
-    sample: 'Like moonlight dancing on still waters, your question stirs my soul...',
-  },
-  coder: {
-    name: 'Senior Engineer',
-    description: 'A practical developer focused on clean, maintainable code',
-    sample: "Let's break this down into manageable components...",
-  },
-  teacher: {
-    name: 'Patient Teacher',
-    description: 'An educator who explains concepts clearly',
-    sample: "Great question! Let me explain this step by step...",
-  },
-  comedian: {
-    name: 'Stand-up Comedian',
-    description: 'Finds humor in everything while still being helpful',
-    sample: "Why did the AI cross the road? To process the other side! But seriously...",
-  },
-  philosopher: {
-    name: 'Deep Philosopher',
-    description: 'Questions assumptions and explores ideas deeply',
-    sample: 'But what is the true nature of your question? Let us examine...',
-  },
-};
+import { getCharacter, getCharacterReviews, listCharacters } from '../lib/api.js';
+import { formatError, getChalk, detectOutputFormat, sanitizeTerminalText } from '../lib/output.js';
+import type { Character, CharacterReviewsPage } from '../types/index.js';
 
 export function registerCharactersCommand(program: Command): void {
-  program
+  const characters = program
     .command('characters')
-    .description('List available chat characters/personas')
+    .description('List characters from the Venice API catalog')
+    .option('-s, --search <query>', 'Search by name, description, or tags')
+    .option('--limit <n>', 'Number of characters to return (max 100)', '50')
+    .option('--offset <n>', 'Number of characters to skip', '0')
     .option('-f, --format <format>', 'Output format (pretty|json)')
-    .action((options) => {
+    .action(async (options) => {
       const format = detectOutputFormat(options.format);
       const c = getChalk();
-      const characters = getAvailableCharacters();
 
-      if (format === 'json') {
-        const data = characters.map(id => ({
-          id,
-          ...CHARACTER_DETAILS[id],
-        }));
-        console.log(JSON.stringify(data, null, 2));
-        return;
-      }
+      try {
+        const results = await listCharacters({
+          search: options.search,
+          limit: parseInt(options.limit, 10),
+          offset: parseInt(options.offset, 10),
+        });
 
-      console.log(c.bold('\n🎭 Available Characters\n'));
-      console.log(c.dim('Use these personas to customize how the AI responds.\n'));
-
-      for (const id of characters) {
-        const details = CHARACTER_DETAILS[id] || { name: id, description: '', sample: '' };
-        
-        console.log(`${c.cyan(c.bold(id))} — ${details.name}`);
-        console.log(`  ${c.dim(details.description)}`);
-        if (details.sample) {
-          console.log(`  ${c.italic(`"${details.sample}"`)}`);
+        if (format === 'json') {
+          console.log(JSON.stringify(results, null, 2));
+          return;
         }
-        console.log('');
-      }
 
-      console.log(c.dim('Usage: venice chat --character pirate "Tell me about AI"'));
+        if (results.length === 0) {
+          console.log(c.yellow('No characters found matching your criteria.'));
+          return;
+        }
+
+        console.log(c.bold(`\n🎭 Characters (${results.length})\n`));
+        console.log(c.dim('Use a slug with: venice chat -c <slug> "Your message"\n'));
+
+        for (const character of results) {
+          printCharacterSummary(character);
+        }
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
     });
+
+  characters
+    .command('show <slug>')
+    .description('Show details for a character slug')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (slug: string, options) => {
+      const format = detectOutputFormat(options.format);
+      const c = getChalk();
+
+      try {
+        const character = await getCharacter(slug);
+        const reviews = await fetchReviewsOptional(slug);
+
+        if (format === 'json') {
+          console.log(JSON.stringify({ ...character, reviews }, null, 2));
+          return;
+        }
+
+        printCharacterDetails(character);
+
+        if (reviews && reviews.data.length > 0) {
+          console.log(c.bold('Reviews'));
+          console.log(c.dim('─'.repeat(50)));
+          console.log(
+            c.dim(
+              `Average ${reviews.summary.averageRating} · ${reviews.summary.totalReviews} review${reviews.summary.totalReviews === 1 ? '' : 's'}`
+            )
+          );
+          console.log('');
+
+          for (const review of reviews.data) {
+            const rating = Number.isFinite(review.rating)
+              ? Math.min(5, Math.max(0, Math.round(review.rating)))
+              : 0;
+            const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
+            console.log(`  ${c.yellow(stars)}  ${c.cyan(sanitizeTerminalText(review.username))}`);
+            if (review.message) {
+              console.log(`    ${sanitizeTerminalText(review.message)}`);
+            }
+            console.log('');
+          }
+        }
+
+        console.log(c.dim(`Usage: venice chat -c ${sanitizeTerminalText(character.slug)} "Your message"`));
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+}
+
+async function fetchReviewsOptional(slug: string): Promise<CharacterReviewsPage | undefined> {
+  try {
+    return await getCharacterReviews(slug);
+  } catch {
+    return undefined;
+  }
+}
+
+function printCharacterSummary(character: Character): void {
+  const c = getChalk();
+  const featured = character.featured ? ` ${c.yellow('★')}` : '';
+  const slug = sanitizeTerminalText(character.slug);
+  const name = sanitizeTerminalText(character.name);
+  console.log(`${c.cyan(c.bold(slug))} — ${name}${featured}`);
+  if (character.description) {
+    console.log(`  ${c.dim(truncate(sanitizeTerminalText(character.description), 140))}`);
+  }
+  if (character.tags?.length) {
+    console.log(`  ${c.dim(character.tags.slice(0, 6).map(sanitizeTerminalText).join(', '))}`);
+  }
+  console.log('');
+}
+
+function printCharacterDetails(character: Character): void {
+  const c = getChalk();
+  const slug = sanitizeTerminalText(character.slug);
+  const name = sanitizeTerminalText(character.name);
+
+  console.log('');
+  console.log(`${c.cyan(c.bold(slug))} — ${c.bold(name)}`);
+  console.log('');
+
+  if (character.description) {
+    console.log(sanitizeTerminalText(character.description));
+    console.log('');
+  }
+
+  if (character.tags?.length) {
+    console.log(`${c.dim('Tags:')} ${character.tags.map(sanitizeTerminalText).join(', ')}`);
+  }
+  if (character.modelId) {
+    console.log(`${c.dim('Model:')} ${sanitizeTerminalText(character.modelId)}`);
+  }
+  if (character.stats) {
+    console.log(
+      `${c.dim('Rating:')} ${character.stats.averageRating} (${character.stats.ratingCount} ratings)`
+    );
+  }
+  console.log(`${c.dim('Featured:')} ${character.featured ? 'yes' : 'no'}`);
+  console.log(`${c.dim('Adult:')} ${character.adult ? 'yes' : 'no'}`);
+  if (character.shareUrl) {
+    console.log(`${c.dim('Share:')} ${sanitizeTerminalText(character.shareUrl)}`);
+  }
+  console.log('');
+}
+
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1) + '…';
 }
