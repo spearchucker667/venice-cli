@@ -8,6 +8,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  buildChatUserMessage,
   MAX_TOOL_ROUNDS,
   nonStreamChat,
   streamChat,
@@ -105,6 +106,7 @@ test('chat preserves options and enforces the allowlist across tool rounds', asy
             VENICE_API_KEY: 'test-key',
             VENICE_API_BASE_URL: `http://127.0.0.1:${address.port}/api/v1`,
           },
+          stdio: ['ignore', 'pipe', 'pipe'],
         }
       );
       let stdout = '';
@@ -291,4 +293,24 @@ test('streaming chat stops after the maximum tool rounds', async () => {
     new RegExp(`limit of ${MAX_TOOL_ROUNDS} rounds`)
   );
   assert.equal(completionCalls, MAX_TOOL_ROUNDS + 1);
+});
+
+test('buildChatUserMessage uses prompt when only args are provided', () => {
+  const message = buildChatUserMessage('find the root cause');
+  assert.deepEqual(message, { role: 'user', content: 'find the root cause' });
+});
+
+test('buildChatUserMessage uses stdin when prompt is empty', () => {
+  const message = buildChatUserMessage('', 'error line 1\nerror line 2');
+  assert.deepEqual(message, { role: 'user', content: 'error line 1\nerror line 2' });
+});
+
+test('buildChatUserMessage merges stdin and prompt into one message', () => {
+  const message = buildChatUserMessage('find the root cause', 'stack trace...');
+  assert.deepEqual(message, { role: 'user', content: 'stack trace...\n\nfind the root cause' });
+});
+
+test('buildChatUserMessage returns null when both inputs are empty', () => {
+  const message = buildChatUserMessage('', '');
+  assert.equal(message, null);
 });

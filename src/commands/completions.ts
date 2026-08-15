@@ -44,14 +44,16 @@ _venice_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="chat search image tts transcribe models embeddings upscale history usage config characters voices video completions"
+    local commands="chat search image tts transcribe models embeddings upscale history usage config characters voices video music completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
     local video_cmds="generate status retrieve models"
+    local music_cmds="generate quote status retrieve complete models"
     local formats="pretty json markdown raw"
     local models="kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25"
     local image_models="flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro"
     local video_models="wan-2.6-text-to-video wan-2.6-image-to-video veo3-fast-text-to-video sora2-text-to-video kling-v3-pro-text-to-video"
+    local music_models="elevenlabs-music elevenlabs-sound-effects-v2"
     local asr_models="nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3"
     local voices="af_sky af_bella af_nicole am_adam am_michael bf_emma bf_isabella bm_george bm_lewis"
     local characters="pirate wizard scientist poet coder teacher comedian philosopher"
@@ -74,8 +76,12 @@ _venice_completion() {
             COMPREPLY=( \$(compgen -W "\${video_cmds}" -- "\${cur}") )
             return 0
             ;;
+        music)
+            COMPREPLY=( \$(compgen -W "\${music_cmds}" -- "\${cur}") )
+            return 0
+            ;;
         -m|--model)
-            COMPREPLY=( \$(compgen -W "\${models} \${image_models}" -- "\${cur}") )
+            COMPREPLY=( \$(compgen -W "\${models} \${image_models} \${video_models} \${music_models}" -- "\${cur}") )
             return 0
             ;;
         -v|--voice)
@@ -94,6 +100,14 @@ _venice_completion() {
             COMPREPLY=( \$(compgen -W "\${formats}" -- "\${cur}") )
             return 0
             ;;
+        --resolution)
+            COMPREPLY=( \$(compgen -W "1K 2K 4K" -- "\${cur}") )
+            return 0
+            ;;
+        --quality)
+            COMPREPLY=( \$(compgen -W "low medium high" -- "\${cur}") )
+            return 0
+            ;;
         completions)
             COMPREPLY=( \$(compgen -W "bash zsh fish" -- "\${cur}") )
             return 0
@@ -110,7 +124,7 @@ _venice_completion() {
             return 0
             ;;
         image)
-            COMPREPLY=( \$(compgen -W "-m --model -o --output -w --width -h --height -n --count -f --format" -- "\${cur}") )
+            COMPREPLY=( \$(compgen -W "-m --model -o --output -w --width -h --height -a --aspect-ratio --resolution --quality --style --style-reference --negative --seed --cfg-scale --steps --lora-strength --hide-watermark --no-hide-watermark --safe-mode --no-safe-mode --embed-exif-metadata --no-embed-exif-metadata -n --count -f --format" -- "\${cur}") )
             return 0
             ;;
         tts|speak)
@@ -134,6 +148,29 @@ _venice_completion() {
                     ;;
                 *)
                     COMPREPLY=( \$(compgen -W "\${video_cmds}" -- "\${cur}") )
+                    ;;
+            esac
+            return 0
+            ;;
+        music)
+            case "\${words[2]}" in
+                generate|gen)
+                    COMPREPLY=( \$(compgen -W "-m --model -l --lyrics -d --duration -i --instrumental -f --format" -- "\${cur}") )
+                    ;;
+                quote)
+                    COMPREPLY=( \$(compgen -W "-m --model -d --duration --character-count -f --format" -- "\${cur}") )
+                    ;;
+                status)
+                    COMPREPLY=( \$(compgen -W "-m --model -w --wait -f --format" -- "\${cur}") )
+                    ;;
+                retrieve|download)
+                    COMPREPLY=( \$(compgen -W "-m --model -o --output --keep -f --format" -- "\${cur}") )
+                    ;;
+                complete)
+                    COMPREPLY=( \$(compgen -W "-m --model -f --format" -- "\${cur}") )
+                    ;;
+                *)
+                    COMPREPLY=( \$(compgen -W "\${music_cmds}" -- "\${cur}") )
                     ;;
             esac
             return 0
@@ -176,6 +213,7 @@ _venice() {
         'tts:Convert text to speech'
         'transcribe:Transcribe audio to text'
         'video:AI video generation'
+        'music:Generate music and sound effects'
         'models:List available models'
         'embeddings:Generate text embeddings'
         'history:View conversation history'
@@ -293,6 +331,22 @@ _venice() {
                         '-o[Output file]:file:_files' \\
                         '-w[Width]:pixels:' \\
                         '-h[Height]:pixels:' \\
+                        '-a[Aspect ratio]:ratio:(1:1 3:2 2:3 4:3 3:4 16:9 9:16 21:9)' \\
+                        '--resolution[Resolution tier]:tier:(1K 2K 4K)' \\
+                        '--quality[Output quality]:quality:(low medium high)' \\
+                        '--style[Style preset]:style:' \\
+                        '*--style-reference[Style reference URL/base64]:reference:' \\
+                        '--negative[Negative prompt]:prompt:' \\
+                        '--seed[Random seed]:integer:' \\
+                        '--cfg-scale[CFG scale]:number:' \\
+                        '--steps[Inference steps]:integer:' \\
+                        '--lora-strength[LoRA strength]:integer:' \\
+                        '--hide-watermark[Hide Venice watermark]' \\
+                        '--no-hide-watermark[Keep Venice watermark]' \\
+                        '--safe-mode[Enable adult-content blurring]' \\
+                        '--no-safe-mode[Disable adult-content blurring]' \\
+                        '--embed-exif-metadata[Embed generation metadata]' \\
+                        '--no-embed-exif-metadata[Do not embed generation metadata]' \\
                         '-n[Number of images]:count:' \\
                         '-f[Output format]:format:((pretty json))' \\
                         '*:prompt:'
@@ -323,9 +377,20 @@ _venice() {
                     )
                     _describe -t video_cmds 'video commands' video_cmds
                     ;;
+                music)
+                    local -a music_cmds=(
+                        'generate:Queue audio generation'
+                        'quote:Estimate generation cost'
+                        'status:Check generation status'
+                        'retrieve:Download completed audio'
+                        'complete:Clean up stored audio'
+                        'models:List music models'
+                    )
+                    _describe -t music_cmds 'music commands' music_cmds
+                    ;;
                 models)
                     _arguments \\
-                        '-t[Filter by type]:type:(text image audio embedding code)' \\
+                        '-t[Filter by type]:type:(all text image tts asr music embedding video upscale inpaint)' \\
                         '-s[Search query]:query:' \\
                         '--privacy[Privacy models only]' \\
                         '-f[Output format]:format:((pretty json))'
@@ -365,7 +430,7 @@ function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
 # Main commands
-set -l commands chat search image upscale tts transcribe video models embeddings history usage config characters voices completions
+set -l commands chat search image upscale tts transcribe video music models embeddings history usage config characters voices completions
 
 # Disable file completions by default
 complete -c venice -f
@@ -378,6 +443,7 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a upscale -d 
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a tts -d "Convert text to speech"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a transcribe -d "Transcribe audio"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a video -d "AI video generation"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a music -d "Generate music and sound effects"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a models -d "List models"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a embeddings -d "Generate embeddings"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a history -d "View history"
@@ -391,6 +457,7 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions
 set -l models kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25
 set -l image_models flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro
 set -l video_models wan-2.6-text-to-video wan-2.6-image-to-video veo3-fast-text-to-video sora2-text-to-video kling-v3-pro-text-to-video
+set -l music_models elevenlabs-music elevenlabs-sound-effects-v2
 set -l asr_models nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3
 set -l voices af_sky af_bella af_nicole am_adam am_michael bf_emma bm_george
 set -l characters pirate wizard scientist poet coder teacher comedian philosopher
@@ -412,6 +479,22 @@ complete -c venice -n "__fish_seen_subcommand_from image" -s m -l model -d "Mode
 complete -c venice -n "__fish_seen_subcommand_from image" -s o -l output -d "Output file" -r
 complete -c venice -n "__fish_seen_subcommand_from image" -s w -l width -d "Width"
 complete -c venice -n "__fish_seen_subcommand_from image" -s h -l height -d "Height"
+complete -c venice -n "__fish_seen_subcommand_from image" -s a -l aspect-ratio -d "Aspect ratio" -xa "1:1 3:2 2:3 4:3 3:4 16:9 9:16 21:9"
+complete -c venice -n "__fish_seen_subcommand_from image" -l resolution -d "Resolution tier" -xa "1K 2K 4K"
+complete -c venice -n "__fish_seen_subcommand_from image" -l quality -d "Output quality" -xa "low medium high"
+complete -c venice -n "__fish_seen_subcommand_from image" -l style -d "Style preset"
+complete -c venice -n "__fish_seen_subcommand_from image" -l style-reference -d "Style reference URL/base64"
+complete -c venice -n "__fish_seen_subcommand_from image" -l negative -d "Negative prompt"
+complete -c venice -n "__fish_seen_subcommand_from image" -l seed -d "Random seed"
+complete -c venice -n "__fish_seen_subcommand_from image" -l cfg-scale -d "CFG scale"
+complete -c venice -n "__fish_seen_subcommand_from image" -l steps -d "Inference steps"
+complete -c venice -n "__fish_seen_subcommand_from image" -l lora-strength -d "LoRA strength"
+complete -c venice -n "__fish_seen_subcommand_from image" -l hide-watermark -d "Hide Venice watermark"
+complete -c venice -n "__fish_seen_subcommand_from image" -l no-hide-watermark -d "Keep Venice watermark"
+complete -c venice -n "__fish_seen_subcommand_from image" -l safe-mode -d "Enable adult-content blurring"
+complete -c venice -n "__fish_seen_subcommand_from image" -l no-safe-mode -d "Disable adult-content blurring"
+complete -c venice -n "__fish_seen_subcommand_from image" -l embed-exif-metadata -d "Embed generation metadata"
+complete -c venice -n "__fish_seen_subcommand_from image" -l no-embed-exif-metadata -d "Do not embed generation metadata"
 
 # TTS options
 complete -c venice -n "__fish_seen_subcommand_from tts" -s v -l voice -d "Voice" -xa "$voices"
@@ -433,6 +516,21 @@ complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcom
 complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from generate" -s d -l duration -d "Duration"
 complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from generate" -s a -l aspect-ratio -d "Aspect ratio" -xa "16:9 9:16 1:1"
 complete -c venice -n "__fish_seen_subcommand_from video; and __fish_seen_subcommand_from generate" -s i -l image -d "Reference image" -r
+
+# Music subcommands
+complete -c venice -n "__fish_seen_subcommand_from music" -a generate -d "Queue audio generation"
+complete -c venice -n "__fish_seen_subcommand_from music" -a quote -d "Estimate generation cost"
+complete -c venice -n "__fish_seen_subcommand_from music" -a status -d "Check status"
+complete -c venice -n "__fish_seen_subcommand_from music" -a retrieve -d "Download audio"
+complete -c venice -n "__fish_seen_subcommand_from music" -a complete -d "Clean up stored audio"
+complete -c venice -n "__fish_seen_subcommand_from music" -a models -d "List music models"
+
+# Music options
+complete -c venice -n "__fish_seen_subcommand_from music" -s m -l model -d "Model" -xa "$music_models"
+complete -c venice -n "__fish_seen_subcommand_from music; and __fish_seen_subcommand_from generate" -s l -l lyrics -d "Lyrics file" -r
+complete -c venice -n "__fish_seen_subcommand_from music; and __fish_seen_subcommand_from generate quote" -s d -l duration -d "Duration in seconds"
+complete -c venice -n "__fish_seen_subcommand_from music; and __fish_seen_subcommand_from status" -s w -l wait -d "Wait for completion"
+complete -c venice -n "__fish_seen_subcommand_from music; and __fish_seen_subcommand_from retrieve" -s o -l output -d "Output file" -r
 
 # Config subcommands
 complete -c venice -n "__fish_seen_subcommand_from config" -a show -d "Show config"
