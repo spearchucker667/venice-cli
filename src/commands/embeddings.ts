@@ -14,7 +14,7 @@ import {
 
 export function registerEmbeddingsCommand(program: Command): void {
   program
-    .command('embeddings <text...>')
+    .command('embeddings [text...]')
     .alias('embed')
     .description('Generate text embeddings')
     .option('-m, --model <model>', 'Model to use', 'text-embedding-ada-002')
