@@ -949,9 +949,8 @@ export function continueConversationError(
     current.privacy === 'tee';
 
   if (
-    !lastConv.privacy &&
+    lastConv.privacy === undefined &&
     !modelImpliesPrivateHistory(lastConv.model) &&
-    lastConv.model !== current.model &&
     (current.catalogAvailable === false || !current.lastModel)
   ) {
     return (

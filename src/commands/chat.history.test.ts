@@ -118,6 +118,41 @@ test('continueConversationError refuses untagged model switches when the catalog
   );
 });
 
+test('continueConversationError refuses same-model untagged history when the catalog is unavailable', () => {
+  assert.match(
+    continueConversationError(
+      { model: 'qwen3-5-122b-a10b' },
+      { model: 'qwen3-5-122b-a10b', privacy: 'plain', catalogAvailable: false }
+    ) || '',
+    /model capabilities could not be confirmed/
+  );
+});
+
+test('continueConversationError refuses same-model untagged history when the prior model is absent', () => {
+  assert.match(
+    continueConversationError(
+      { model: 'qwen3-5-122b-a10b' },
+      { model: 'qwen3-5-122b-a10b', privacy: 'plain', catalogAvailable: true }
+    ) || '',
+    /model capabilities could not be confirmed/
+  );
+});
+
+test('continueConversationError allows same-model untagged history confirmed plain by the catalog', () => {
+  assert.equal(
+    continueConversationError(
+      { model: 'qwen3-5-122b-a10b' },
+      {
+        model: 'qwen3-5-122b-a10b',
+        privacy: 'plain',
+        catalogAvailable: true,
+        lastModel: { id: 'qwen3-5-122b-a10b', type: 'text' },
+      }
+    ),
+    undefined
+  );
+});
+
 test('continueConversationError uses catalog capabilities when the model id is not obviously private', () => {
   assert.match(
     continueConversationError(
