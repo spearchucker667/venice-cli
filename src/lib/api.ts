@@ -12,8 +12,10 @@ import type { Message, ToolDefinition, Model, Character } from '../types/index.j
 import {
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
+  MAX_VIDEO_DOWNLOAD_BYTES,
   assertFileSizeWithinLimit,
   mimeTypeFromPath,
+  streamResponseToFile,
 } from './media.js';
 
 // TODO: Remove VENICE_API_BASE_URL override before release - only for local dev testing
@@ -756,7 +758,7 @@ export type VideoStatusResult = {
 
 export type VideoRetrieveResult =
   | { kind: 'status'; status: VideoStatusResult }
-  | { kind: 'video'; bytes: Buffer; contentType: string };
+  | { kind: 'video'; bytesWritten: number; contentType: string };
 
 export function classifyVideoRetrieveContentType(
   contentType: string | null | undefined
@@ -775,87 +777,112 @@ async function retrieveVideoResponse(
     deleteOnCompletion?: boolean;
     spinnerText?: string;
     statusOnly?: boolean;
+    outputPath?: string;
+    maxBytes?: number;
   } = {}
 ): Promise<VideoRetrieveResult> {
   const spinner = startSpinner(options.spinnerText || 'Checking video status...');
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-
-  try {
-    const body: Record<string, unknown> = { queue_id: queueId, model };
-    if (options.deleteOnCompletion !== undefined) {
-      body.delete_media_on_completion = options.deleteOnCompletion;
-    }
-
-    const response = await fetch(`${VENICE_API}/video/retrieve`, {
-      method: 'POST',
-      headers: getHeaders(),
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw VeniceApiError.fromResponse(response.status, errorBody);
-    }
-
-    const classified = classifyVideoRetrieveContentType(response.headers.get('content-type'));
-    if (classified === 'json') {
-      const status = await response.json() as VideoStatusResult;
-      if (spinner) stopSpinner(true);
-      return { kind: 'status', status };
-    }
-
-    if (classified === 'video' && options.statusOnly) {
-      await response.body?.cancel();
-      if (spinner) stopSpinner(true);
-      return { kind: 'status', status: { status: 'completed' } };
-    }
-
-    if (classified === 'unknown') {
-      if (options.statusOnly) {
-        const status = await readVideoStatusFromUnknownResponse(response);
-        if (spinner) stopSpinner(true);
-        return { kind: 'status', status };
-      }
-
-      const peek = Buffer.from(await response.arrayBuffer());
-      if (peek.length > 0 && peek[0] === 0x7b) {
-        const status = JSON.parse(peek.toString('utf-8')) as VideoStatusResult;
-        if (spinner) stopSpinner(true);
-        return { kind: 'status', status };
-      }
-      if (isMp4Buffer(peek)) {
-        if (spinner) stopSpinner(true);
-        return { kind: 'video', bytes: peek, contentType: 'video/mp4' };
-      }
-      throw new Error(
-        `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}".`
-      );
-    }
-
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (spinner) stopSpinner(true);
-    return {
-      kind: 'video',
-      bytes,
-      contentType: response.headers.get('content-type') || 'video/mp4',
-    };
-  } catch (error) {
-    clearTimeout(timeoutId);
-    if (spinner) stopSpinner(false);
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('Video retrieve request timed out. Please try again later.');
-    }
-    throw error;
+  const body: Record<string, unknown> = { queue_id: queueId, model };
+  if (options.deleteOnCompletion !== undefined) {
+    body.delete_media_on_completion = options.deleteOnCompletion;
   }
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    let fileWriteStarted = false;
+    let successfulBodyConsumptionStarted = false;
+
+    try {
+      const response = await fetch(`${VENICE_API}/video/retrieve`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw VeniceApiError.fromResponse(response.status, errorBody);
+      }
+
+      successfulBodyConsumptionStarted = true;
+      const inspected = await inspectVideoRetrieveResponse(response);
+      if (inspected.kind === 'status') {
+        if (spinner) stopSpinner(true);
+        return inspected;
+      }
+
+      if (options.statusOnly) {
+        await inspected.reader.cancel();
+        inspected.reader.releaseLock();
+        if (spinner) stopSpinner(true);
+        return { kind: 'status', status: { status: 'completed' } };
+      }
+
+      if (!options.outputPath) {
+        await inspected.reader.cancel();
+        inspected.reader.releaseLock();
+        throw new Error('An output path is required to save the retrieved video.');
+      }
+
+      fileWriteStarted = true;
+      const saved = await streamResponseToFile(
+        response,
+        inspected.reader,
+        inspected.initialChunks,
+        options.outputPath,
+        {
+          maxBytes: options.maxBytes ?? MAX_VIDEO_DOWNLOAD_BYTES,
+          label: 'Video',
+        }
+      );
+      if (spinner) stopSpinner(true);
+      return { kind: 'video', ...saved };
+    } catch (error) {
+      const retryable =
+        !fileWriteStarted &&
+        !successfulBodyConsumptionStarted &&
+        attempt < MAX_RETRIES &&
+        !(error instanceof Error && error.name === 'AbortError') &&
+        (
+          !(error instanceof VeniceApiError) ||
+          error.isRetryable() ||
+          error.isRateLimited()
+        );
+
+      if (retryable) {
+        await sleep(RETRY_DELAY_MS * (attempt + 1) * (
+          error instanceof VeniceApiError && error.isRateLimited() ? 2 : 1
+        ));
+        continue;
+      }
+
+      if (spinner) stopSpinner(false);
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('Video retrieve request timed out. Please try again later.');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  if (spinner) stopSpinner(false);
+  throw new Error('Video retrieve request failed after retries.');
 }
 
-async function readVideoStatusFromUnknownResponse(
+type InspectedVideoResponse =
+  | { kind: 'status'; status: VideoStatusResult }
+  | {
+      kind: 'video';
+      reader: ReadableStreamDefaultReader<Uint8Array>;
+      initialChunks: Buffer[];
+    };
+
+async function inspectVideoRetrieveResponse(
   response: Response
-): Promise<VideoStatusResult> {
+): Promise<InspectedVideoResponse> {
   const reader = response.body?.getReader();
   if (!reader) {
     throw new Error('Video retrieve response had no body.');
@@ -863,7 +890,7 @@ async function readVideoStatusFromUnknownResponse(
 
   const chunks: Buffer[] = [];
   let totalBytes = 0;
-  let isJson = false;
+  let readingJson = false;
 
   try {
     while (true) {
@@ -874,20 +901,17 @@ async function readVideoStatusFromUnknownResponse(
       chunks.push(chunk);
       totalBytes += chunk.length;
       const buffered = Buffer.concat(chunks, totalBytes);
+      const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
 
-      if (!isJson) {
-        const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
-        isJson = firstNonWhitespace === 0x7b;
+      if (!readingJson && firstNonWhitespace === 0x7b) {
+        readingJson = true;
+      }
 
-        if (!isJson && buffered.length >= 8) {
-          if (isMp4Buffer(buffered)) {
-            await reader.cancel();
-            return { status: 'completed' };
-          }
-          throw new Error(
-            `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}".`
-          );
+      if (!readingJson && buffered.length >= 8) {
+        if (!isMp4Buffer(buffered)) {
+          throw unexpectedVideoRetrieveType(response);
         }
+        return { kind: 'video', reader, initialChunks: chunks };
       }
 
       if (totalBytes > MAX_VIDEO_STATUS_BYTES) {
@@ -896,18 +920,27 @@ async function readVideoStatusFromUnknownResponse(
     }
 
     const buffered = Buffer.concat(chunks, totalBytes);
+    if (readingJson) {
+      const status = JSON.parse(buffered.toString('utf-8')) as VideoStatusResult;
+      reader.releaseLock();
+      return { kind: 'status', status };
+    }
     if (isMp4Buffer(buffered)) {
-      return { status: 'completed' };
+      return { kind: 'video', reader, initialChunks: chunks };
     }
-    if (isJson) {
-      return JSON.parse(buffered.toString('utf-8')) as VideoStatusResult;
-    }
-    throw new Error(
-      `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}".`
-    );
-  } finally {
+    throw unexpectedVideoRetrieveType(response);
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
     reader.releaseLock();
+    throw error;
   }
+}
+
+function unexpectedVideoRetrieveType(response: Response): Error {
+  return new Error(
+    `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}": ` +
+    'response is neither JSON nor a valid MP4.'
+  );
 }
 
 function isMp4Buffer(bytes: Buffer): boolean {
@@ -974,11 +1007,17 @@ export async function getVideoStatus(
 export async function retrieveVideo(
   queueId: string,
   model: string,
-  options: { deleteOnCompletion?: boolean } = {}
+  options: {
+    deleteOnCompletion?: boolean;
+    outputPath?: string;
+    maxBytes?: number;
+  } = {}
 ): Promise<VideoRetrieveResult> {
   return retrieveVideoResponse(queueId, model, {
     deleteOnCompletion: options.deleteOnCompletion ?? false,
     spinnerText: 'Retrieving video...',
+    outputPath: options.outputPath,
+    maxBytes: options.maxBytes,
   });
 }
 

@@ -45,8 +45,15 @@ test('video retrieve keeps JSON stdout valid while downloading a status URL', as
   const homeDir = mkdtempSync(join(tmpdir(), 'venice-video-test-'));
   const videoBytes = Buffer.from('xxxxftypisom');
   let origin = '';
+  let retrieveRequests = 0;
   const server = createServer((request, response) => {
     if (request.url === '/api/v1/video/retrieve') {
+      retrieveRequests++;
+      if (retrieveRequests === 3) {
+        response.writeHead(200, { 'Content-Type': 'video/mp4' });
+        response.end(videoBytes);
+        return;
+      }
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({
         status: 'COMPLETED',
@@ -110,6 +117,23 @@ test('video retrieve keeps JSON stdout valid while downloading a status URL', as
     assert.equal(prettyResult.status, 0, prettyResult.stderr);
     assert.match(prettyResult.stdout, /Downloading video\.\.\./);
     assert.match(prettyResult.stdout, /Video saved to/);
+
+    const statusResult = await runCli([
+      'video',
+      'status',
+      'q3',
+      '--model',
+      'test-video-model',
+      '--format',
+      'pretty',
+    ], homeDir, `${origin}/api/v1`);
+
+    assert.equal(statusResult.status, 0, statusResult.stderr);
+    assert.match(statusResult.stdout, /Status: completed/i);
+    assert.match(
+      statusResult.stdout,
+      /venice video retrieve q3 -m test-video-model/
+    );
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

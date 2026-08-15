@@ -197,3 +197,79 @@ export async function downloadToFile(
     clearTimeout(timeoutId);
   }
 }
+
+export async function streamResponseToFile(
+  response: Response,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  initialChunks: Buffer[],
+  outputPath: string,
+  options: {
+    maxBytes: number;
+    label: string;
+  }
+): Promise<{ bytesWritten: number; contentType: string }> {
+  let tempPath: string | null = null;
+  let bytesWritten = 0;
+
+  try {
+    const contentLength = parseContentLength(response.headers.get('content-length'));
+    if (contentLength !== null && contentLength > options.maxBytes) {
+      throw new Error(
+        `Refusing to download ${formatBytes(contentLength)}. ` +
+        `Maximum allowed size is ${formatBytes(options.maxBytes)}.`
+      );
+    }
+
+    const outputDir = path.dirname(outputPath);
+    fs.mkdirSync(outputDir, { recursive: true });
+    tempPath = path.join(
+      outputDir,
+      `.${path.basename(outputPath)}.${Date.now()}.${Math.random().toString(16).slice(2)}.part`
+    );
+
+    const source = Readable.from((async function* () {
+      for (const chunk of initialChunks) {
+        yield chunk;
+      }
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        yield Buffer.from(value);
+      }
+    })());
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        bytesWritten += chunk.length;
+        if (bytesWritten > options.maxBytes) {
+          callback(
+            new Error(
+              `${options.label} download exceeded limit of ${formatBytes(options.maxBytes)}. ` +
+              'The response may be unexpectedly large.'
+            )
+          );
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+
+    await pipeline(source, limiter, fs.createWriteStream(tempPath));
+    if (bytesWritten === 0) {
+      throw new Error(`${options.label} response was empty.`);
+    }
+    fs.renameSync(tempPath, outputPath);
+    tempPath = null;
+    return {
+      bytesWritten,
+      contentType: response.headers.get('content-type') || 'video/mp4',
+    };
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    if (tempPath && fs.existsSync(tempPath)) {
+      fs.rmSync(tempPath, { force: true });
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}

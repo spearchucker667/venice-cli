@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   classifyVideoRetrieveContentType,
@@ -72,25 +75,21 @@ test('video status cancels a completed MP4 body without buffering it', async () 
   const mp4 = Buffer.from('xxxxftypisom');
   let fetchCount = 0;
   let statusBodyCancelled = false;
-  let statusBodyBuffered = false;
 
   process.env.VENICE_API_KEY = 'test-key';
   globalThis.fetch = (async () => {
     fetchCount++;
     if (fetchCount === 1) {
-      return {
-        ok: true,
-        headers: new Headers({ 'Content-Type': 'video/mp4' }),
-        body: {
-          cancel: async () => {
-            statusBodyCancelled = true;
-          },
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(mp4);
         },
-        arrayBuffer: async () => {
-          statusBodyBuffered = true;
-          return mp4;
+        cancel() {
+          statusBodyCancelled = true;
         },
-      } as unknown as Response;
+      }), {
+        headers: { 'Content-Type': 'video/mp4' },
+      });
     }
 
     return new Response(mp4, {
@@ -99,16 +98,19 @@ test('video status cancels a completed MP4 body without buffering it', async () 
   }) as typeof fetch;
 
   try {
+    const outputDir = mkdtempSync(join(tmpdir(), 'venice-api-video-'));
+    const outputPath = join(outputDir, 'video.mp4');
     const status = await getVideoStatus('q1', 'kling-v3-pro-image-to-video');
     assert.equal(status.status, 'completed');
     assert.equal(statusBodyCancelled, true);
-    assert.equal(statusBodyBuffered, false);
 
-    const retrieved = await retrieveVideo('q1', 'kling-v3-pro-image-to-video');
+    const retrieved = await retrieveVideo('q1', 'kling-v3-pro-image-to-video', { outputPath });
     assert.equal(retrieved.kind, 'video');
     if (retrieved.kind === 'video') {
-      assert.equal(retrieved.bytes.equals(mp4), true);
+      assert.equal(retrieved.bytesWritten, mp4.length);
+      assert.equal(readFileSync(outputPath).equals(mp4), true);
     }
+    rmSync(outputDir, { recursive: true, force: true });
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiKey === undefined) {
@@ -116,6 +118,119 @@ test('video status cancels a completed MP4 body without buffering it', async () 
     } else {
       process.env.VENICE_API_KEY = originalApiKey;
     }
+  }
+});
+
+test('video status parses JSON mislabeled as video or octet-stream', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const contentTypes = ['video/mp4', 'application/octet-stream'];
+  let responseIndex = 0;
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('  {"status":"FAILED","error":"generation failed"}'));
+      controller.close();
+    },
+  }), {
+    headers: { 'Content-Type': contentTypes[responseIndex++] },
+  })) as typeof fetch;
+
+  try {
+    for (const queueId of ['q1', 'q2']) {
+      const status = await getVideoStatus(queueId, 'test-model');
+      assert.equal(status.status, 'FAILED');
+      assert.equal(status.error, 'generation failed');
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+  }
+});
+
+test('video retrieve retries transient HTTP failures before streaming to disk', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const outputDir = mkdtempSync(join(tmpdir(), 'venice-api-video-'));
+  const outputPath = join(outputDir, 'video.mp4');
+  const mp4 = Buffer.from('xxxxftypisom-streamed');
+  let attempts = 0;
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async () => {
+    attempts++;
+    if (attempts === 1) {
+      return new Response('temporarily unavailable', { status: 503 });
+    }
+    return new Response(mp4, { headers: { 'Content-Type': 'application/octet-stream' } });
+  }) as typeof fetch;
+
+  try {
+    const result = await retrieveVideo('q1', 'test-model', { outputPath });
+    assert.equal(result.kind, 'video');
+    assert.equal(attempts, 2);
+    assert.equal(readFileSync(outputPath).equals(mp4), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(outputDir, { recursive: true, force: true });
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+  }
+});
+
+test('video retrieve enforces streaming size limits and cleans temporary files', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const outputDir = mkdtempSync(join(tmpdir(), 'venice-api-video-'));
+  const outputPath = join(outputDir, 'video.mp4');
+  writeFileSync(outputPath, 'existing');
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('xxxxftyp'));
+      controller.enqueue(Buffer.alloc(32, 1));
+      controller.close();
+    },
+  }), {
+    headers: { 'Content-Type': 'video/mp4' },
+  })) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      retrieveVideo('q1', 'test-model', { outputPath, maxBytes: 16 }),
+      /exceeded limit/
+    );
+    assert.equal(readFileSync(outputPath, 'utf8'), 'existing');
+    assert.deepEqual(readdirSync(outputDir), ['video.mp4']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(outputDir, { recursive: true, force: true });
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+  }
+});
+
+test('video retrieve rejects invalid bodies even when classified as video', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const outputDir = mkdtempSync(join(tmpdir(), 'venice-api-video-'));
+  const outputPath = join(outputDir, 'video.mp4');
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async () => new Response('not an mp4 payload', {
+    headers: { 'Content-Type': 'video/mp4' },
+  })) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      retrieveVideo('q1', 'test-model', { outputPath }),
+      /neither JSON nor a valid MP4/
+    );
+    assert.equal(readdirSync(outputDir).length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(outputDir, { recursive: true, force: true });
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
   }
 });
 

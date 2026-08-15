@@ -8,7 +8,6 @@ import * as path from 'path';
 import { queueVideoGeneration, getVideoStatus, retrieveVideo } from '../lib/api.js';
 import {
   downloadToFile,
-  writeBufferToFile,
   assertFileSizeWithinLimit,
   mimeTypeFromPath,
   MAX_VIDEO_DOWNLOAD_BYTES,
@@ -143,6 +142,8 @@ export function registerVideoCommands(program: Command): void {
 
         if (result.video_url) {
           console.log(`\n${c.dim('Video URL:')} ${c.cyan(result.video_url)}`);
+        }
+        if (statusLabel === 'completed') {
           console.log(`\n${c.dim('Download with:')} venice video retrieve ${queueId} -m ${options.model}`);
         }
 
@@ -187,7 +188,10 @@ export function registerVideoCommands(program: Command): void {
       const c = getChalk();
 
       try {
-        const result = await retrieveVideo(queueId, options.model);
+        const result = await retrieveVideo(queueId, options.model, {
+          outputPath: options.output,
+          maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
+        });
 
         if (result.kind === 'status') {
           const status = result.status;
@@ -212,11 +216,6 @@ export function registerVideoCommands(program: Command): void {
             maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
             expectedContentTypePrefixes: ['video/'],
           });
-        } else {
-          writeBufferToFile(result.bytes, options.output, {
-            maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
-            label: 'Video',
-          });
         }
 
         if (format === 'json') {
@@ -225,7 +224,7 @@ export function registerVideoCommands(program: Command): void {
             output: options.output,
             model: options.model,
             ...(result.kind === 'video'
-              ? { bytes: result.bytes.length, content_type: result.contentType }
+              ? { bytes: result.bytesWritten, content_type: result.contentType }
               : {}),
           }, null, 2));
           return;
