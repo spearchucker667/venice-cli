@@ -44,7 +44,7 @@ _venice_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="chat search scrape parse image image-edit image-multi-edit image-bg-remove image-styles tts transcribe models embeddings upscale history usage billing keys config characters voices voice video music completions"
+    local commands="chat search scrape parse image image-edit image-multi-edit image-bg-remove image-styles tts transcribe models embeddings upscale history usage billing keys config characters voices voice video music rpc completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
     local video_cmds="generate quote status retrieve complete transcribe upscale models"
@@ -77,6 +77,10 @@ _venice_completion() {
             ;;
         video)
             COMPREPLY=( \$(compgen -W "\${video_cmds}" -- "\${cur}") )
+            return 0
+            ;;
+        rpc)
+            COMPREPLY=( \$(compgen -W "networks" -- "\${cur}") )
             return 0
             ;;
         billing)
@@ -249,6 +253,10 @@ _venice_completion() {
             COMPREPLY=( \$(compgen -W "-d --days --today --month -f --format" -- "\${cur}") )
             return 0
             ;;
+        rpc)
+            COMPREPLY=( \$(compgen -W "networks --batch -f --format" -- "\${cur}") )
+            return 0
+            ;;
         billing)
             COMPREPLY=( \$(compgen -W "\${billing_cmds} -d --days -c --currency -l --lookback -f --format" -- "\${cur}") )
             return 0
@@ -295,6 +303,7 @@ _venice() {
         'config:Manage configuration'
         'characters:List characters from the Venice API catalog'
         'voices:List available TTS voices'
+        'rpc:Proxy JSON-RPC requests to blockchain nodes'
         'voice:Create and manage cloned voices'
         'completions:Generate shell completions'
     )
@@ -558,6 +567,15 @@ _venice() {
                     )
                     _describe -t history_cmds 'history commands' history_cmds
                     ;;
+                rpc)
+                    _arguments \\
+                        '--batch[JSON array of JSON-RPC requests]:file:_files' \\
+                        '-f[Output format]:format:((\$formats))' \\
+                        '--format[Output format]:format:((\$formats))' \\
+                        '1:network:(networks ethereum-mainnet base-mainnet solana-mainnet)' \\
+                        '2:method:' \\
+                        '*:params:'
+                    ;;
                 billing)
                     local -a billing_cmds=(
                         'balance:Show current account balances'
@@ -590,7 +608,7 @@ function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
 # Main commands
-set -l commands chat search scrape parse image image-edit image-multi-edit image-bg-remove image-styles upscale tts transcribe video music models embeddings history usage billing keys config characters voices voice completions
+set -l commands chat search scrape parse image image-edit image-multi-edit image-bg-remove image-styles upscale tts transcribe video music models embeddings history usage billing keys config characters voices voice rpc completions
 
 # Disable file completions by default
 complete -c venice -f
@@ -621,6 +639,7 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a characters 
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voices -d "List voices"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voice -d "Create and manage cloned voices"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions -d "Shell completions"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a rpc -d "Crypto JSON-RPC"
 
 # Models
 set -l models kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25
@@ -775,5 +794,10 @@ complete -c venice -n "__fish_seen_subcommand_from keys" -a rate-limits -d "Show
 complete -c venice -n "__fish_seen_subcommand_from keys; and __fish_seen_subcommand_from create" -s o -l output -d "Restrictive API key secret file" -r
 
 # Completions
-complete -c venice -n "__fish_seen_subcommand_from completions" -a "bash zsh fish" -d "Shell"`;
+complete -c venice -n "__fish_seen_subcommand_from completions" -a "bash zsh fish" -d "Shell"
+
+# RPC
+complete -c venice -n "__fish_seen_subcommand_from rpc" -a networks -d "List supported networks"
+complete -c venice -n "__fish_seen_subcommand_from rpc" -l batch -d "JSON-RPC batch file" -r
+complete -c venice -n "__fish_seen_subcommand_from rpc" -s f -l format -d "Format" -xa "$formats"`;
 }

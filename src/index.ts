@@ -25,6 +25,7 @@ import { registerCompletionsCommand } from './commands/completions.js';
 import { registerVideoCommands } from './commands/video.js';
 import { registerMusicCommands } from './commands/music.js';
 import { registerTeeCommand } from './commands/tee.js';
+import { registerRpcCommand } from './commands/rpc.js';
 import { registerBillingCommand } from './commands/billing.js';
 import { registerKeysCommand } from './commands/keys.js';
 import { registerAugmentCommands } from './commands/augment.js';
@@ -73,6 +74,7 @@ async function main() {
   registerVideoCommands(program);
   registerMusicCommands(program);
   registerTeeCommand(program);
+  registerRpcCommand(program);
   registerBillingCommand(program);
   registerKeysCommand(program);
   registerAugmentCommands(program);

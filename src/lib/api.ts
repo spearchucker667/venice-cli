@@ -125,6 +125,7 @@ type ApiRequestOptions = {
   timeoutMs?: number;
   additionalHeaders?: Record<string, string>;
   authenticated?: boolean;
+  onHeaders?: (headers: Headers) => void;
 } & (
   | {
       responseType?: 'json';
@@ -162,6 +163,7 @@ export async function apiRequest<T>(
     spinnerText = 'Processing...',
     timeoutMs = DEFAULT_TIMEOUT_MS,
     additionalHeaders = {},
+    onHeaders,
     authenticated = true,
   } = options;
 
@@ -212,6 +214,8 @@ export async function apiRequest<T>(
         }
         throw VeniceApiError.fromResponse(response.status, errorBody);
       }
+
+      onHeaders?.(response.headers);
 
       if (stream) {
         clearTimeout(timeoutId);
@@ -2067,4 +2071,71 @@ export async function fetchTeeSignature(
     spinnerText: 'Fetching TEE signature...',
     retries: 1,
   });
+}
+
+export type JsonRpcRequest = {
+  jsonrpc: '2.0';
+  method: string;
+  params?: unknown;
+  id: number | string;
+};
+
+export type JsonRpcErrorObject = {
+  code: number;
+  message: string;
+  data?: unknown;
+};
+
+export type JsonRpcResponse = {
+  jsonrpc?: string;
+  id?: number | string;
+  result?: unknown;
+  error?: JsonRpcErrorObject;
+};
+
+export type CryptoRpcResult = {
+  body: JsonRpcResponse | JsonRpcResponse[];
+  credits?: string;
+  costUsd?: string;
+  requestId?: string;
+};
+
+export async function listCryptoNetworks(): Promise<string[]> {
+  const response = await apiRequest<{ networks?: string[] }>('/crypto/rpc/networks', {
+    method: 'GET',
+    authenticated: false,
+    spinnerText: 'Fetching RPC networks...',
+  });
+  return response.networks ?? [];
+}
+
+export async function cryptoRpc(
+  network: string,
+  body: JsonRpcRequest | JsonRpcRequest[]
+): Promise<CryptoRpcResult> {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(network)) {
+    throw new Error(
+      'Invalid RPC network slug. Use "venice rpc networks" to list supported networks.'
+    );
+  }
+
+  let credits: string | undefined;
+  let costUsd: string | undefined;
+  let requestId: string | undefined;
+
+  const data = await apiRequest<JsonRpcResponse | JsonRpcResponse[]>(
+    `/crypto/rpc/${encodeURIComponent(network)}`,
+    {
+      method: 'POST',
+      body,
+      spinnerText: 'Sending RPC request...',
+      onHeaders: (headers) => {
+        credits = headers.get('x-venice-rpc-credits') ?? undefined;
+        costUsd = headers.get('x-venice-rpc-cost-usd') ?? undefined;
+        requestId = headers.get('x-request-id') ?? undefined;
+      },
+    }
+  );
+
+  return { body: data, credits, costUsd, requestId };
 }
