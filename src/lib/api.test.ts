@@ -23,6 +23,7 @@ import {
   transcribeVideo,
   videoUrlFromStatus,
   RequestCancelledError,
+  VeniceApiError,
 } from './api.js';
 import type { Character, CharacterReviewsPage } from '../types/index.js';
 
@@ -162,6 +163,94 @@ test('stream request timeout ends after headers while cancellation listener last
     } else {
       process.env.VENICE_API_KEY = originalApiKey;
     }
+  }
+});
+
+test('JSON request timeout ends after headers while a healthy body is consumed', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) => delayedResponse(
+    JSON.stringify({ status: 'healthy' }),
+    40,
+    init?.signal ?? undefined
+  )) as typeof fetch;
+
+  try {
+    const startedAt = Date.now();
+    const result = await apiRequest<{ status: string }>('/delayed-json-test', {
+      showSpinner: false,
+      retries: 0,
+      timeoutMs: 10,
+    });
+    assert.deepEqual(result, { status: 'healthy' });
+    assert.ok(Date.now() - startedAt >= 30);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv('VENICE_API_KEY', originalApiKey);
+  }
+});
+
+test('JSON request timeout ends after headers while an HTTP error body is consumed', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) => delayedResponse(
+    JSON.stringify({ error: { message: 'Delayed rejection', code: 'delayed_error' } }),
+    40,
+    init?.signal ?? undefined,
+    400
+  )) as typeof fetch;
+
+  try {
+    const startedAt = Date.now();
+    await assert.rejects(
+      apiRequest('/delayed-error-test', {
+        showSpinner: false,
+        retries: 0,
+        timeoutMs: 10,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof VeniceApiError);
+        assert.equal(error.message, 'Delayed rejection');
+        assert.equal(error.statusCode, 400);
+        assert.equal(error.code, 'delayed_error');
+        return true;
+      }
+    );
+    assert.ok(Date.now() - startedAt >= 30);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv('VENICE_API_KEY', originalApiKey);
+  }
+});
+
+test('external abort remains active during JSON body consumption and cleans up', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  const listenerTracker = trackAbortListeners(controller.signal);
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) => delayedResponse(
+    JSON.stringify({ status: 'too late' }),
+    100,
+    init?.signal ?? undefined
+  )) as typeof fetch;
+
+  try {
+    const request = apiRequest('/cancel-delayed-json-test', {
+      showSpinner: false,
+      retries: 0,
+      timeoutMs: 5,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 20);
+    await assert.rejects(request, RequestCancelledError);
+    assert.equal(listenerTracker.active(), 0);
+  } finally {
+    listenerTracker.restore();
+    globalThis.fetch = originalFetch;
+    restoreEnv('VENICE_API_KEY', originalApiKey);
   }
 });
 
@@ -482,6 +571,29 @@ test('video API helpers send documented requests and support live discovery', as
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function delayedResponse(
+  body: string,
+  delayMs: number,
+  signal?: AbortSignal,
+  status = 200
+): Response {
+  return new Response(new ReadableStream({
+    start(controller) {
+      const delayedChunk = setTimeout(() => {
+        controller.enqueue(new TextEncoder().encode(body));
+        controller.close();
+      }, delayMs);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(delayedChunk);
+        controller.error(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    },
+  }), {
+    status,
     headers: { 'Content-Type': 'application/json' },
   });
 }

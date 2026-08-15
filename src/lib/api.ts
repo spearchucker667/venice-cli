@@ -327,6 +327,7 @@ export async function apiRequest<T>(
           );
           errorBody = errorBytes.toString('utf-8');
         } else {
+          clearRequestTimeout();
           errorBody = await response.text();
         }
         throw VeniceApiError.fromResponse(response.status, errorBody);
@@ -389,6 +390,7 @@ export async function apiRequest<T>(
         stopSpinner(true);
         spinner = null;
       }
+      clearRequestTimeout();
       const result = await response.json() as T;
       cleanup();
       return result;

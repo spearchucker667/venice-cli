@@ -840,9 +840,6 @@ export interface ChatRunExtras {
 }
 
 function appendAssistantMessage(messages: Message[], content: string): void {
-  if (!content) {
-    return;
-  }
   const last = messages[messages.length - 1];
   if (last?.role === 'assistant' && last.content === content && !last.tool_calls) {
     return;

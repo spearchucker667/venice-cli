@@ -635,6 +635,67 @@ test('--strip-thinking excludes hidden content from the next streaming REPL turn
   );
 });
 
+test('streaming empty replies preserve assistant role before the next turn', async () => {
+  const messages: Message[] = [{ role: 'user', content: 'first prompt' }];
+  await streamChat(messages, 'test-model', [], false, 'raw', {
+    quiet: true,
+    completionStream: async function* () {
+      yield { finish_reason: 'stop', done: false };
+      yield { done: true };
+    },
+  });
+
+  assert.deepEqual(messages.at(-1), { role: 'assistant', content: '' });
+  messages.push({ role: 'user', content: 'second prompt' });
+
+  let nextTurnMessages: Message[] | undefined;
+  await streamChat(messages, 'test-model', [], false, 'raw', {
+    quiet: true,
+    completionStream: async function* (roundMessages) {
+      nextTurnMessages = structuredClone(roundMessages);
+      yield { finish_reason: 'stop', done: false };
+      yield { done: true };
+    },
+  });
+
+  assert.deepEqual(nextTurnMessages?.map((message) => message.role), [
+    'user',
+    'assistant',
+    'user',
+  ]);
+});
+
+test('non-streaming fully stripped replies preserve an empty assistant turn', async () => {
+  const messages: Message[] = [{ role: 'user', content: 'first prompt' }];
+  await nonStreamChat(messages, 'test-model', [], false, 'raw', {
+    quiet: true,
+    stripThinking: true,
+    completion: async () => ({
+      content: '<think>hidden reasoning</think>',
+      finish_reason: 'stop',
+    }),
+  });
+
+  assert.deepEqual(messages.at(-1), { role: 'assistant', content: '' });
+  messages.push({ role: 'user', content: 'second prompt' });
+
+  let nextTurnMessages: Message[] | undefined;
+  await nonStreamChat(messages, 'test-model', [], false, 'raw', {
+    quiet: true,
+    completion: async (roundMessages) => {
+      nextTurnMessages = structuredClone(roundMessages);
+      return { content: '', finish_reason: 'stop' };
+    },
+  });
+
+  assert.deepEqual(nextTurnMessages?.map((message) => message.role), [
+    'user',
+    'assistant',
+    'user',
+  ]);
+  assert.equal(nextTurnMessages?.[1].content, '');
+});
+
 test('--strip-thinking preserves an unclosed thinking tag in assistant context', async () => {
   const messages: Message[] = [{ role: 'user', content: 'prompt' }];
   await streamChat(messages, 'test-model', [], false, 'raw', {
