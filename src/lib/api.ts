@@ -913,17 +913,18 @@ async function inspectVideoRetrieveResponse(
       chunks.push(chunk);
       totalBytes += chunk.length;
       const buffered = Buffer.concat(chunks, totalBytes);
-      const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
-
-      if (!readingJson && firstNonWhitespace === 0x7b) {
-        readingJson = true;
-      }
 
       if (!readingJson && buffered.length >= 8) {
-        if (!isMp4Buffer(buffered)) {
+        if (isMp4Buffer(buffered)) {
+          return { kind: 'video', reader, initialChunks: chunks };
+        }
+
+        const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
+        if (firstNonWhitespace === 0x7b) {
+          readingJson = true;
+        } else {
           throw unexpectedVideoRetrieveType(response);
         }
-        return { kind: 'video', reader, initialChunks: chunks };
       }
 
       if (totalBytes > MAX_VIDEO_STATUS_BYTES) {
@@ -934,7 +935,8 @@ async function inspectVideoRetrieveResponse(
     }
 
     const buffered = Buffer.concat(chunks, totalBytes);
-    if (readingJson) {
+    const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
+    if (readingJson || firstNonWhitespace === 0x7b) {
       const status = JSON.parse(buffered.toString('utf-8')) as VideoStatusResult;
       reader.releaseLock();
       return { kind: 'status', status };

@@ -197,6 +197,38 @@ test('video status cancels a completed MP4 body without buffering it', async () 
   }
 });
 
+test('video status and retrieve recognize MP4 when its box size ends in JSON magic', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const outputDir = mkdtempSync(join(tmpdir(), 'venice-api-video-'));
+  const outputPath = join(outputDir, 'video.mp4');
+  const mp4 = Buffer.alloc(0x7b);
+  mp4.writeUInt32BE(mp4.length, 0);
+  mp4.write('ftyp', 4, 'ascii');
+  mp4.write('isom', 8, 'ascii');
+  mp4.writeUInt32BE(0, 12);
+  mp4.write('isom', 16, 'ascii');
+
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async () => new Response(mp4, {
+    headers: { 'Content-Type': 'application/octet-stream' },
+  })) as typeof fetch;
+
+  try {
+    const status = await getVideoStatus('q1', 'test-model');
+    assert.equal(status.status, 'completed');
+
+    const retrieved = await retrieveVideo('q1', 'test-model', { outputPath });
+    assert.equal(retrieved.kind, 'video');
+    assert.equal(readFileSync(outputPath).equals(mp4), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(outputDir, { recursive: true, force: true });
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+  }
+});
+
 test('video status parses JSON mislabeled as video or octet-stream', async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.VENICE_API_KEY;
