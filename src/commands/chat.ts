@@ -54,6 +54,7 @@ import {
 } from '../types/index.js';
 import {
   parseStructuredContent,
+  normalizeResponseFormat,
   resolveResponseFormat,
   validateAgainstSchema,
   type PromptCacheRetention,
@@ -384,6 +385,19 @@ export function registerChatCommand(program: Command): void {
       useE2EE = privacyDecision.useE2EE;
       useTEE = privacyDecision.useTEE;
 
+      const capabilityError = requestedCapabilityError({
+        model,
+        modelInfo,
+        catalogFailed,
+        responseFormatRequested: Boolean(responseFormat),
+        reasoningEffortRequested: reasoningEffort !== undefined,
+        xSearchRequested: options.xSearch === true,
+      });
+      if (capabilityError) {
+        console.error(formatError(capabilityError));
+        process.exit(1);
+      }
+
       const lastConv = options.continue ? getLastConversation() : undefined;
       if (lastConv) {
         const currentPrivacy = useE2EE ? 'e2ee' : useTEE ? 'tee' : 'plain';
@@ -395,25 +409,6 @@ export function registerChatCommand(program: Command): void {
         });
         if (continueError) {
           console.error(formatError(continueError));
-          process.exit(1);
-        }
-      }
-
-      if (modelInfo) {
-        if (responseFormat && !supportsResponseSchema(modelInfo)) {
-          console.error(formatError(`Model "${model}" does not support structured output (supportsResponseSchema).`));
-          process.exit(1);
-        }
-
-        if (reasoningEffort && !supportsReasoningEffort(modelInfo)) {
-          console.error(formatError(`Model "${model}" does not support --reasoning-effort (supportsReasoningEffort).`));
-          process.exit(1);
-        }
-
-        if (options.xSearch && !supportsXSearch(modelInfo)) {
-          console.error(formatError(
-            `Model "${model}" does not support --x-search (supportsXSearch). Use a Grok model that advertises X search.`
-          ));
           process.exit(1);
         }
       }
@@ -450,6 +445,19 @@ export function registerChatCommand(program: Command): void {
 
       if (useE2EE && responseFormat) {
         console.error(formatError('Structured output (--json / --json-schema) is not supported with E2EE. E2EE requires streaming.'));
+        process.exit(1);
+      }
+      if (
+        useE2EE &&
+        (
+          options.promptCacheKey !== undefined ||
+          promptCacheRetention !== undefined ||
+          reasoningEffort !== undefined
+        )
+      ) {
+        console.error(formatError(
+          'Prompt caching (--prompt-cache-key / --prompt-cache-retention) and --reasoning-effort are not supported with E2EE.'
+        ));
         process.exit(1);
       }
 
@@ -696,7 +704,7 @@ function buildRequestOptions(
     request.additionalHeaders = additionalHeaders;
   }
   if (extras.responseFormat) {
-    request.response_format = extras.responseFormat;
+    request.response_format = normalizeResponseFormat(extras.responseFormat, 'response format');
   }
   if (extras.reasoningEffort) {
     request.reasoning_effort = extras.reasoningEffort;
@@ -764,6 +772,9 @@ export async function streamChat(
           include_search_results_in_stream: undefined,
           character_slug: undefined,
         },
+        reasoningEffort: undefined,
+        promptCacheKey: undefined,
+        promptCacheRetention: undefined,
       }
     : extras;
   const allowedTools = new Set((effectiveTools || []).map((tool) => tool.function.name));
@@ -788,7 +799,7 @@ export async function streamChat(
       const spinner = startSpinner(spinnerText);
 
       for await (const chunk of completionStream(messagesToSend, streamOptions)) {
-        if (chunk.reasoning_content && !stripThinking) {
+        if (chunk.reasoning_content && !stripThinking && !e2eeContext) {
           if (spinner) clearSpinner();
           process.stdout.write(
             format === 'pretty' ? c.dim(chunk.reasoning_content) : chunk.reasoning_content
@@ -1182,6 +1193,46 @@ export function modelIdImpliesPrivateMode(modelId: string): boolean {
 
 export function modelImpliesPrivateHistory(modelId: string): boolean {
   return modelIdImpliesPrivateMode(modelId);
+}
+
+export function requestedCapabilityError(input: {
+  model: string;
+  modelInfo?: Model;
+  catalogFailed: boolean;
+  responseFormatRequested: boolean;
+  reasoningEffortRequested: boolean;
+  xSearchRequested: boolean;
+}): string | undefined {
+  const requested = input.responseFormatRequested ||
+    input.reasoningEffortRequested ||
+    input.xSearchRequested;
+  if (!requested) return undefined;
+
+  if (input.catalogFailed) {
+    return (
+      'Could not fetch the model catalog, so the requested capability cannot be verified. ' +
+      'Structured output, --reasoning-effort, and --x-search require an explicitly advertised model capability.'
+    );
+  }
+  if (!input.modelInfo) {
+    return (
+      `Model "${input.model}" is absent from the model catalog. ` +
+      'Refusing to use structured output, --reasoning-effort, or --x-search without an explicitly advertised capability.'
+    );
+  }
+  if (input.responseFormatRequested && !supportsResponseSchema(input.modelInfo)) {
+    return `Model "${input.model}" does not support structured output (supportsResponseSchema).`;
+  }
+  if (input.reasoningEffortRequested && !supportsReasoningEffort(input.modelInfo)) {
+    return `Model "${input.model}" does not support --reasoning-effort (supportsReasoningEffort).`;
+  }
+  if (input.xSearchRequested && !supportsXSearch(input.modelInfo)) {
+    return (
+      `Model "${input.model}" does not support --x-search (supportsXSearch). ` +
+      'Use a model that explicitly advertises X search.'
+    );
+  }
+  return undefined;
 }
 
 export function resolveChatPrivacyMode(input: {

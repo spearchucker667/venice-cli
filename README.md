@@ -154,6 +154,17 @@ venice chat -m e2ee-qwen3-5-122b-a10b -q "This is encrypted but looks like norma
 | `-q, --quiet` | Hide E2EE/TEE status messages (show only response) |
 | `-f, --format <format>` | Output format (pretty\|json\|markdown\|raw) |
 
+Schema files are limited to 1 MiB and are compiled locally with strict JSON
+Schema validation before a completion request is sent. Draft 7, 2019-09, and
+2020-12 schemas are supported, including local `$ref` references and standard
+formats. Invalid schemas and unsupported keywords are rejected.
+
+Structured output, reasoning effort, and X search are fail-closed features:
+the selected model must be present in the model catalog and explicitly
+advertise the corresponding capability. They are unavailable when the catalog
+cannot be fetched. E2EE does not support structured output, reasoning effort,
+or prompt-cache key/retention options.
+
 ### Web Search
 
 ```bash

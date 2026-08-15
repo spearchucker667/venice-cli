@@ -11,9 +11,11 @@ import {
   buildChatUserMessage,
   MAX_TOOL_ROUNDS,
   nonStreamChat,
+  requestedCapabilityError,
   streamChat,
 } from './chat.js';
 import { getToolDefinitions } from '../lib/tools.js';
+import { encryptMessage, generateEphemeralKeyPair } from '../lib/e2ee.js';
 import type { Message } from '../types/index.js';
 
 const cliPath = fileURLToPath(new URL('../index.js', import.meta.url));
@@ -259,6 +261,43 @@ test('chat --reasoning-effort rejects unknown values', () => {
   }
 });
 
+test('capability-gated options fail closed without an advertised model capability', () => {
+  const requested = {
+    model: 'test-model',
+    responseFormatRequested: true,
+    reasoningEffortRequested: false,
+    xSearchRequested: false,
+  };
+  assert.match(
+    requestedCapabilityError({ ...requested, catalogFailed: true }) || '',
+    /could not fetch.*catalog/i
+  );
+  assert.match(
+    requestedCapabilityError({ ...requested, catalogFailed: false }) || '',
+    /absent from the model catalog/i
+  );
+  assert.match(
+    requestedCapabilityError({
+      ...requested,
+      catalogFailed: false,
+      modelInfo: { id: 'test-model', type: 'text' },
+    }) || '',
+    /does not support structured output/i
+  );
+  assert.equal(
+    requestedCapabilityError({
+      ...requested,
+      catalogFailed: false,
+      modelInfo: {
+        id: 'test-model',
+        type: 'text',
+        model_spec: { capabilities: { supportsResponseSchema: true } },
+      },
+    }),
+    undefined
+  );
+});
+
 test('chat rejects --no-thinking with a non-none reasoning effort', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-conflict-'));
 
@@ -270,6 +309,85 @@ test('chat rejects --no-thinking with a non-none reasoning effort', () => {
     assert.notEqual(result.status, 0);
     assert.match(`${result.stderr}\n${result.stdout}`, /Cannot combine --no-thinking/i);
   } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('chat rejects prompt caching and reasoning with E2EE before completion', async () => {
+  let completionRequests = 0;
+  const requestUrls: string[] = [];
+  const server = createServer((request, response) => {
+    requestUrls.push(`${request.method} ${request.url}`);
+    if (request.method === 'GET' && request.url?.startsWith('/api/v1/models')) {
+      const requestedType = new URL(request.url, 'http://localhost').searchParams.get('type');
+      response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify({
+        data: !requestedType || requestedType === 'text' ? [{
+          id: 'e2ee-test-model',
+          type: 'text',
+          model_spec: {
+            capabilities: {
+              supportsE2EE: true,
+              supportsTeeAttestation: true,
+              supportsReasoningEffort: true,
+            },
+          },
+        }] : [],
+      }));
+      return;
+    }
+    if (request.method === 'POST' && request.url === '/api/v1/chat/completions') {
+      completionRequests++;
+    }
+    response.statusCode = 500;
+    response.end();
+  });
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-e2ee-options-'));
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [
+        cliPath,
+        'chat',
+        '--model',
+        'e2ee-test-model',
+        '--reasoning-effort',
+        'high',
+        '--prompt-cache-key',
+        'secret-cache',
+        'hello',
+      ], {
+        env: {
+          ...process.env,
+          HOME: homeDir,
+          NODE_ENV: 'test',
+          NO_COLOR: '1',
+          VENICE_API_KEY: 'test-key',
+          VENICE_API_BASE_URL: `http://127.0.0.1:${address.port}/api/v1`,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+      child.on('close', (status) => resolve({ status, stdout, stderr }));
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      `${result.stderr}\n${result.stdout}`,
+      /not supported with E2EE/i,
+      requestUrls.join('\n')
+    );
+    assert.equal(completionRequests, 0);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
@@ -371,36 +489,53 @@ test('streaming chat preserves options and handles sequential tool rounds', asyn
 
 test('E2EE streaming strips server-side controls from the request', async () => {
   let seenOptions: Record<string, unknown> | undefined;
+  const clientKeys = generateEphemeralKeyPair();
+  const encryptedContent = encryptMessage('normal-content', clientKeys.publicKeyHex);
   const completionStream: NonNullable<NonNullable<Parameters<typeof streamChat>[5]>['completionStream']> =
     async function* (_messages, options) {
     seenOptions = options as unknown as Record<string, unknown>;
+    yield { reasoning_content: 'secret-reasoning', done: false };
+    yield { content: encryptedContent, done: false };
     yield { done: true };
   };
+  const output: string[] = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    output.push(chunk.toString());
+    return true;
+  }) as typeof process.stdout.write;
 
-  await streamChat(
-    [],
-    'e2ee-test-model',
-    getToolDefinitions(['datetime']),
-    false,
-    'raw',
-    {
-      e2eeContext: {
-        privateKey: new Uint8Array(32),
-        publicKeyHex: '00',
-        modelPublicKey: '00',
-        attestation: {} as never,
-      },
-      quiet: true,
-      veniceParams: {
-        enable_web_search: 'on',
-        enable_x_search: true,
-        include_search_results_in_stream: true,
-        include_venice_system_prompt: true,
-        character_slug: catalogCharacterSlug,
-      },
-      completionStream,
-    }
-  );
+  try {
+    await streamChat(
+      [],
+      'e2ee-test-model',
+      getToolDefinitions(['datetime']),
+      false,
+      'raw',
+      {
+        e2eeContext: {
+          privateKey: clientKeys.privateKey,
+          publicKeyHex: clientKeys.publicKeyHex,
+          modelPublicKey: '00',
+          attestation: {} as never,
+        },
+        quiet: true,
+        veniceParams: {
+          enable_web_search: 'on',
+          enable_x_search: true,
+          include_search_results_in_stream: true,
+          include_venice_system_prompt: true,
+          character_slug: catalogCharacterSlug,
+        },
+        reasoningEffort: 'high',
+        promptCacheKey: 'must-not-leak',
+        promptCacheRetention: '24h',
+        completionStream,
+      }
+    );
+  } finally {
+    process.stdout.write = originalWrite;
+  }
 
   assert.ok(seenOptions);
   assert.equal(seenOptions.tools, undefined);
@@ -410,6 +545,11 @@ test('E2EE streaming strips server-side controls from the request', async () => 
   assert.equal(params.include_search_results_in_stream, undefined);
   assert.equal(params.include_venice_system_prompt, false);
   assert.equal(params.character_slug, undefined);
+  assert.equal(seenOptions.reasoning_effort, undefined);
+  assert.equal(seenOptions.prompt_cache_key, undefined);
+  assert.equal(seenOptions.prompt_cache_retention, undefined);
+  assert.match(output.join(''), /^normal-content/);
+  assert.doesNotMatch(output.join(''), /secret-reasoning/);
 });
 
 test('structured non-streaming output stays valid JSON across tool rounds', async () => {
@@ -468,6 +608,34 @@ test('structured non-streaming output stays valid JSON across tool rounds', asyn
     assert.equal(options.prompt_cache_retention, '24h');
     assert.deepEqual(options.venice_parameters, { enable_x_search: true });
   }
+});
+
+test('direct non-streaming chat rejects an invalid schema before completion', async () => {
+  let completionCalled = false;
+  await assert.rejects(
+    nonStreamChat(
+      [{ role: 'user', content: 'Return JSON' }],
+      'test-model',
+      [],
+      false,
+      'raw',
+      {
+        responseFormat: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'response',
+            schema: { type: 'object', unsupportedKeyword: true },
+          },
+        },
+        completion: async () => {
+          completionCalled = true;
+          return { content: '{}', finish_reason: 'stop' };
+        },
+      }
+    ),
+    /Invalid or unsupported JSON schema.*unknown keyword/i
+  );
+  assert.equal(completionCalled, false);
 });
 
 test('non-streaming chat stops after the maximum tool rounds', async () => {
