@@ -111,11 +111,43 @@ test('continueConversationError uses catalog capabilities when the model id is n
   );
 });
 
-test('continueConversationError rejects plain-tagged private-model history into another plain model', () => {
-  assert.match(
+test('continueConversationError treats explicit plain privacy as authoritative for private model ids', () => {
+  assert.equal(
     continueConversationError(
       { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'plain' },
       { model: 'kimi-k2-5', privacy: 'plain' }
+    ),
+    undefined
+  );
+  assert.equal(
+    continueConversationError(
+      { model: 'qwen3-5-122b-a10b', privacy: 'plain' },
+      {
+        model: 'kimi-k2-5',
+        privacy: 'plain',
+        lastModel: {
+          id: 'qwen3-5-122b-a10b',
+          type: 'text',
+          model_spec: { capabilities: { supportsTeeAttestation: true } },
+        },
+      }
+    ),
+    undefined
+  );
+});
+
+test('continueConversationError rejects explicit plain private-model history into E2EE/TEE', () => {
+  assert.match(
+    continueConversationError(
+      { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'plain' },
+      { model: 'e2ee-qwen3-5-122b-a10b', privacy: 'e2ee' }
+    ) || '',
+    mixError
+  );
+  assert.match(
+    continueConversationError(
+      { model: 'tee-qwen3-5-122b-a10b', privacy: 'plain' },
+      { model: 'tee-qwen3-5-122b-a10b', privacy: 'tee' }
     ) || '',
     mixError
   );
