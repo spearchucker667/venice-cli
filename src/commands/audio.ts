@@ -65,12 +65,10 @@ export function registerAudioCommands(program: Command): void {
 
         // Determine output path
         const audioFormat = requestedFormat || formatFromContentType(result.contentType) || 'mp3';
-        let outputPath = options.output || `output.${audioFormat}`;
-        if (options.format && path.extname(outputPath).toLowerCase() !== `.${audioFormat}`) {
-          outputPath = path.extname(outputPath)
-            ? outputPath.replace(/\.[^.]+$/, `.${audioFormat}`)
-            : `${outputPath}.${audioFormat}`;
-        }
+        const outputPath = ensureAudioExtension(
+          options.output || `output.${audioFormat}`,
+          audioFormat
+        );
 
         writeBufferToFile(Buffer.from(result.audio), outputPath, {
           maxBytes: MAX_AUDIO_DOWNLOAD_BYTES,
@@ -263,4 +261,11 @@ function formatFromOutputPath(outputPath?: string): string | undefined {
   const extension = path.extname(outputPath).slice(1).toLowerCase();
   const formats = new Set(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']);
   return formats.has(extension) ? extension : undefined;
+}
+
+function ensureAudioExtension(outputPath: string, format: string): string {
+  const extension = path.extname(outputPath);
+  if (extension.toLowerCase() === `.${format}`) return outputPath;
+  if (!extension) return `${outputPath}.${format}`;
+  return `${outputPath.slice(0, -extension.length)}.${format}`;
 }

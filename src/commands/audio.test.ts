@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -163,6 +164,99 @@ test('tts infers the requested format from an explicit output extension', async 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(receivedBody?.response_format, 'mp3');
     assert.equal(readFileSync(outputPath, 'utf8'), 'mp3-audio');
+  } finally {
+    server.close();
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('tts appends the effective format when the output has no extension', async () => {
+  let receivedBody: Record<string, unknown> | undefined;
+  const server = createServer(async (request, response) => {
+    if (request.url === '/audio/speech') {
+      receivedBody = JSON.parse((await readBody(request)).toString('utf8'));
+      response.writeHead(200, { 'Content-Type': 'audio/flac' });
+      response.end('flac-audio');
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  const apiBaseUrl = await listen(server);
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-extensionless-audio-test-'));
+  const requestedPath = join(homeDir, 'speech');
+  const outputPath = `${requestedPath}.flac`;
+
+  try {
+    const result = await runCli([
+      'tts', '--output', requestedPath, 'Hello',
+    ], homeDir, apiBaseUrl);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(receivedBody?.response_format, undefined);
+    assert.equal(readFileSync(outputPath, 'utf8'), 'flac-audio');
+    assert.equal(existsSync(requestedPath), false);
+  } finally {
+    server.close();
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('tts replaces a misleading output extension with the effective format', async () => {
+  let receivedBody: Record<string, unknown> | undefined;
+  const server = createServer(async (request, response) => {
+    if (request.url === '/audio/speech') {
+      receivedBody = JSON.parse((await readBody(request)).toString('utf8'));
+      response.writeHead(200, { 'Content-Type': 'audio/wav' });
+      response.end('wav-audio');
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  const apiBaseUrl = await listen(server);
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-misleading-audio-test-'));
+  const requestedPath = join(homeDir, 'speech.download');
+  const outputPath = join(homeDir, 'speech.wav');
+
+  try {
+    const result = await runCli([
+      'tts', '--output', requestedPath, 'Hello',
+    ], homeDir, apiBaseUrl);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(receivedBody?.response_format, undefined);
+    assert.equal(readFileSync(outputPath, 'utf8'), 'wav-audio');
+    assert.equal(existsSync(requestedPath), false);
+  } finally {
+    server.close();
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('tts uses explicit format for the request and a mismatched output extension', async () => {
+  let receivedBody: Record<string, unknown> | undefined;
+  const server = createServer(async (request, response) => {
+    if (request.url === '/audio/speech') {
+      receivedBody = JSON.parse((await readBody(request)).toString('utf8'));
+      response.writeHead(200, { 'Content-Type': 'audio/wav' });
+      response.end('mp3-audio');
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  const apiBaseUrl = await listen(server);
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-explicit-audio-test-'));
+  const requestedPath = join(homeDir, 'speech.wav');
+  const outputPath = join(homeDir, 'speech.mp3');
+
+  try {
+    const result = await runCli([
+      'tts', '--format', 'mp3', '--output', requestedPath, 'Hello',
+    ], homeDir, apiBaseUrl);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(receivedBody?.response_format, 'mp3');
+    assert.equal(readFileSync(outputPath, 'utf8'), 'mp3-audio');
+    assert.equal(existsSync(requestedPath), false);
   } finally {
     server.close();
     rmSync(homeDir, { recursive: true, force: true });
