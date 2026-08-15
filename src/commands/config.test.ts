@@ -1,5 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -8,9 +16,10 @@ import { fileURLToPath } from 'node:url';
 
 const cliPath = fileURLToPath(new URL('../index.js', import.meta.url));
 
-function runCli(args: string[], homeDir: string) {
+function runCli(args: string[], homeDir: string, input?: string) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     encoding: 'utf8',
+    input,
     env: {
       ...process.env,
       HOME: homeDir,
@@ -36,3 +45,101 @@ test('config show --format json masks api_key', () => {
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
+
+test('config set api_key --stdin saves without printing the key', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-config-test-'));
+  const apiKey = 'sk-stdin-1234567890';
+
+  try {
+    const result = runCli(['config', 'set', 'api_key', '--stdin'], homeDir, `${apiKey}\n`);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!result.stdout.includes(apiKey));
+    assert.ok(!result.stderr.includes(apiKey));
+
+    const config = JSON.parse(
+      readFileSync(join(homeDir, '.venice', 'config.json'), 'utf8')
+    );
+    assert.equal(config.api_key, apiKey);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('config init does not print API key input', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-config-test-'));
+  const apiKey = 'sk-init-1234567890';
+
+  try {
+    const result = runCli(['config', 'init'], homeDir, `${apiKey}\n\n\n\n`);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!result.stdout.includes(apiKey));
+    assert.ok(!result.stderr.includes(apiKey));
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test(
+  'config writes repair directory and file permissions',
+  { skip: process.platform === 'win32' },
+  () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'venice-config-test-'));
+    const configDir = join(homeDir, '.venice');
+    const configFile = join(configDir, 'config.json');
+
+    try {
+      const initialResult = runCli(
+        ['config', 'set', 'api_key', '--stdin'],
+        homeDir,
+        'sk-permissions-1234567890\n'
+      );
+      assert.equal(initialResult.status, 0, initialResult.stderr);
+
+      chmodSync(configDir, 0o755);
+      chmodSync(configFile, 0o644);
+
+      const updateResult = runCli(
+        ['config', 'set', 'default_model', 'kimi-k2-5'],
+        homeDir
+      );
+      assert.equal(updateResult.status, 0, updateResult.stderr);
+      assert.equal(statSync(configDir).mode & 0o777, 0o700);
+      assert.equal(statSync(configFile).mode & 0o777, 0o600);
+    } finally {
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  'config writes reject a symbolic-link config file',
+  { skip: process.platform === 'win32' },
+  () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'venice-config-test-'));
+    const configDir = join(homeDir, '.venice');
+    const configFile = join(configDir, 'config.json');
+    const targetFile = join(homeDir, 'target.json');
+
+    try {
+      const initialResult = runCli(
+        ['config', 'set', 'api_key', '--stdin'],
+        homeDir,
+        'sk-initial-1234567890\n'
+      );
+      assert.equal(initialResult.status, 0, initialResult.stderr);
+
+      rmSync(configFile);
+      writeFileSync(targetFile, '{\"unchanged\":true}');
+      symlinkSync(targetFile, configFile);
+
+      const updateResult = runCli(
+        ['config', 'set', 'default_model', 'kimi-k2-5'],
+        homeDir
+      );
+      assert.notEqual(updateResult.status, 0);
+      assert.equal(readFileSync(targetFile, 'utf8'), '{\"unchanged\":true}');
+    } finally {
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }
+);
