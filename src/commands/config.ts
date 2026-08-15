@@ -3,6 +3,8 @@
  */
 
 import { Command } from 'commander';
+import * as readline from 'node:readline';
+import { Writable } from 'node:stream';
 import {
   loadConfig,
   setConfigValue,
@@ -89,9 +91,10 @@ export function registerConfigCommand(program: Command): void {
 
   // Set a config value
   config
-    .command('set <key> <value>')
+    .command('set <key> [value]')
     .description('Set a configuration value')
-    .action((key: string, value: string) => {
+    .option('--stdin', 'Read the API key from standard input')
+    .action(async (key: string, value: string | undefined, options: { stdin?: boolean }) => {
       const validKeys: Array<keyof VeniceConfig> = [
         'api_key',
         'default_model',
@@ -107,6 +110,41 @@ export function registerConfigCommand(program: Command): void {
           `Invalid config key: ${key}\n\nValid keys: ${validKeys.join(', ')}`
         ));
         process.exit(1);
+      }
+
+      if (options.stdin && key !== 'api_key') {
+        throw new Error('--stdin is only supported for api_key');
+      }
+
+      if (options.stdin && value !== undefined) {
+        throw new Error('Do not provide a value when using --stdin');
+      }
+
+      if (key === 'api_key') {
+        if (options.stdin) {
+          value = await readStdin();
+        } else if (value === undefined) {
+          if (!process.stdin.isTTY) {
+            throw new Error(
+              'Interactive API key input requires a terminal. Pipe the key using --stdin instead.'
+            );
+          }
+          value = await askHiddenQuestion(
+            'API Key (get from https://venice.ai/settings/api): '
+          );
+        } else {
+          console.error(
+            'Warning: passing an API key as an argument may expose it. ' +
+            'Use "venice config set api_key" or "--stdin" instead.'
+          );
+        }
+      } else if (value === undefined) {
+        throw new Error(`Missing value for ${key}`);
+      }
+
+      value = value.trim();
+      if (!value) {
+        throw new Error(`Value for ${key} cannot be empty`);
       }
 
       setConfigValue(key as keyof VeniceConfig, value);
@@ -154,41 +192,44 @@ export function registerConfigCommand(program: Command): void {
     .command('init')
     .description('Initialize configuration interactively')
     .action(async () => {
-      const readline = await import('readline');
       const c = getChalk();
-
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-
-      const question = (prompt: string): Promise<string> => {
-        return new Promise((resolve) => {
-          rl.question(prompt, resolve);
-        });
-      };
+      let rl: readline.Interface | undefined;
 
       console.log(c.bold('\nVenice CLI Setup\n'));
       console.log(`Config will be saved to: ${getConfigPath()}\n`);
 
       try {
-        const apiKey = await question('API Key (get from https://venice.ai/settings/api): ');
+        let apiKey: string;
+        if (process.stdin.isTTY) {
+          apiKey = await askHiddenQuestion(
+            'API Key (get from https://venice.ai/settings/api): '
+          );
+        } else {
+          rl = createQuestionInterface();
+          apiKey = await question(
+            rl,
+            'API Key (get from https://venice.ai/settings/api): '
+          );
+        }
+
         if (apiKey.trim()) {
           setConfigValue('api_key', apiKey.trim());
           console.log(formatSuccess('API key saved'));
         }
 
-        const model = await question('Default chat model [kimi-k2-5]: ');
+        rl ??= createQuestionInterface();
+
+        const model = await question(rl, 'Default chat model [kimi-k2-5]: ');
         if (model.trim()) {
           setConfigValue('default_model', model.trim());
         }
 
-        const imageModel = await question('Default image model [flux-2-pro]: ');
+        const imageModel = await question(rl, 'Default image model [flux-2-pro]: ');
         if (imageModel.trim()) {
           setConfigValue('default_image_model', imageModel.trim());
         }
 
-        const showUsage = await question('Show token usage after requests? [Y/n]: ');
+        const showUsage = await question(rl, 'Show token usage after requests? [Y/n]: ');
         if (showUsage.toLowerCase() === 'n') {
           setConfigValue('show_usage', 'false');
         }
@@ -196,9 +237,58 @@ export function registerConfigCommand(program: Command): void {
         console.log(formatSuccess('\nConfiguration complete!'));
         console.log(c.dim('Run "venice config show" to view your settings.'));
       } finally {
-        rl.close();
+        rl?.close();
       }
     });
+}
+
+function createQuestionInterface(): readline.Interface {
+  return readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+}
+
+function question(rl: readline.Interface, prompt: string): Promise<string> {
+  return new Promise((resolve) => {
+    rl.question(prompt, resolve);
+  });
+}
+
+function askHiddenQuestion(prompt: string): Promise<string> {
+  const mutedOutput = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: mutedOutput,
+    terminal: true,
+  });
+
+  process.stderr.write(prompt);
+
+  return new Promise((resolve, reject) => {
+    rl.once('SIGINT', () => {
+      rl.close();
+      reject(new Error('Input cancelled'));
+    });
+    rl.question('', (answer) => {
+      rl.close();
+      process.stderr.write('\n');
+      resolve(answer);
+    });
+  });
+}
+
+async function readStdin(): Promise<string> {
+  let value = '';
+  process.stdin.setEncoding('utf8');
+  for await (const chunk of process.stdin) {
+    value += chunk;
+  }
+  return value;
 }
 
 function maskApiKey(key: string): string {

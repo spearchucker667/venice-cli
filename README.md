@@ -25,13 +25,20 @@ npx veniceai-cli chat 'Hello, world!'
 
 2. **Configure the CLI**:
    ```bash
-   venice config set api_key YOUR_API_KEY
+   venice config set api_key
    ```
+
+   The CLI prompts for the key without displaying it. For non-interactive use,
+   pipe the key over standard input with `venice config set api_key --stdin`.
    
    Or use an environment variable:
    ```bash
    export VENICE_API_KEY=YOUR_API_KEY
    ```
+
+   Environment variables are convenient for CI and headless use, but can be
+   inherited by child processes or captured in diagnostic output. Scope them
+   to the process that needs them.
 
 3. **Start chatting**:
    ```bash
@@ -47,7 +54,8 @@ npx veniceai-cli chat 'Hello, world!'
 - 🖼️ **Image Generation** from text prompts
 - 🔊 **Text-to-Speech** with 35+ voices across languages
 - 🎤 **Speech-to-Text** transcription with timestamps
-- 🎬 **Video Generation** (quotes, transcription, upscaling, live models)
+- 🎵 **Music & Sound Effects Generation** with asynchronous job handling
+- 🎬 **Video Generation** (text/image-to-video, quotes, transcription, upscaling, live models)
 - 📐 **Embeddings** generation
 - 🔧 **Function Calling** with built-in tools
 - 🎭 **Character Personas** for fun interactions
@@ -69,8 +77,8 @@ venice chat -m deepseek-v3.2 "Solve this step by step: 15% of 340"
 # With a system prompt
 venice chat -s "You are a helpful coding assistant" "Write a fizzbuzz in Python"
 
-# Use a character persona
-venice chat -c pirate "Tell me about the weather"
+# Use a character from the Venice API catalog
+venice chat -c alan-watts "What is the nature of reality?"
 
 # Continue the previous conversation
 venice chat --continue "What about the next step?"
@@ -80,6 +88,9 @@ venice chat -t calculator,weather "What's 25 * 4.5?"
 
 # JSON output for scripting
 venice chat -f json "List 3 colors" | jq '.content'
+
+# Use piped context plus an instruction
+cat error.log | venice chat "find the root cause"
 
 # Disable streaming
 venice chat --no-stream "Quick question"
@@ -103,10 +114,10 @@ venice chat -m e2ee-qwen3-5-122b-a10b -q "This is encrypted but looks like norma
 |--------|-------------|
 | `-m, --model <model>` | Model to use (default: kimi-k2-5) |
 | `-s, --system <prompt>` | System prompt |
-| `-c, --character <name>` | Character persona |
+| `-c, --character <slug>` | Character slug from the Venice API catalog |
 | `-t, --tools <tools>` | Comma-separated list of tools |
 | `--interactive-tools` | Approve each tool call |
-| `--continue` | Continue last conversation |
+| `--continue` | Continue last conversation (local history only; not covered by TEE/E2EE guarantees) |
 | `--no-stream` | Disable streaming output |
 | `--web-search` | Enable web search for current information |
 | `--no-thinking` | Disable reasoning on reasoning models |
@@ -147,9 +158,51 @@ venice image -o sunset.png "A serene mountain lake at sunset"
 # Custom dimensions
 venice image -w 1024 -h 768 "Landscape photograph"
 
+# Aspect ratio and resolution-tier sizing
+venice image -m nano-banana-pro -a 16:9 --resolution 2K --quality medium "Canal at sunset"
+
+# Prompt and style controls
+venice image --negative "clouds, rain" --seed 123 --style "3D Model" "A sunny city square"
+
+# Guide the style with one or more references (optional strength: 0.1-1)
+venice image --style-reference "https://example.com/style.png::0.75" "A woodland cabin"
+
 # Use a specific model
 venice image -m flux-1-dev "Artistic portrait"
+
+# Apply a style preset
+venice image --style Cinematic "A gondola at sunset"
 ```
+
+### Image Editing
+
+```bash
+# Edit a local image
+venice image-edit photo.jpg "Remove the cars in the background" -o edited.png
+
+# Enhance the prompt using the input image
+venice image-edit portrait.jpg "Turn this into an illustration" \
+  --enhance-prompt -o illustrated.png
+
+# Edit with up to three layered images
+venice image-multi-edit base.jpg overlay.png \
+  --prompt "Blend the overlay into the scene" -o composited.png
+
+# Remove a background and save a transparent PNG
+venice image-bg-remove product.jpg -o cutout.png
+
+# List available style presets
+venice image-styles
+venice image-styles --format json
+```
+
+Image sizing is model-specific. Use `--width` and `--height` together for
+pixel-based models, `--aspect-ratio` for ratio-based models, and add
+`--resolution` for models with `1K`, `2K`, or `4K` tiers. These sizing modes
+cannot be mixed.
+
+Run `venice image --help` for all generation controls, including CFG scale,
+steps, LoRA strength, watermark, safe-mode, and EXIF metadata flags.
 
 ### Image Upscaling
 
@@ -217,16 +270,17 @@ venice video generate -d 10s -a 16:9 "A peaceful forest scene"
 # Check status of a video job
 venice video status <queue_id> -m wan-2.6-text-to-video
 
-# Wait for completion (polls every 5s)
-venice video status -w <queue_id> -m wan-2.6-text-to-video
+# Wait for completion (polls every 5s, times out after 10 minutes)
+venice video status -w <queue_id> -m <model>
+
+# Set a custom wait timeout in seconds
+venice video status -w <queue_id> -m <model> --timeout 900
 
 # Download completed video
 venice video retrieve <queue_id> -m wan-2.6-text-to-video -o my_video.mp4
 
-# Delete media after download
+# Delete media after download, or clean it up later
 venice video retrieve <queue_id> -m wan-2.6-text-to-video --complete
-
-# Or clean up later
 venice video complete <queue_id> -m wan-2.6-text-to-video
 
 # Estimate price before queueing
@@ -245,7 +299,40 @@ venice video models
 
 `venice video models` loads the live catalog from `GET /models?type=video`. If that request fails, the CLI prints a short fallback list and says so.
 
-Video transcription accepts a public HTTP(S) URL only. Local files can be upscaled as data URLs (MP4, MOV, or WebM) within the existing size limit.
+Video transcription accepts a public HTTP(S) URL only. Local MP4, MOV, and WebM files can be upscaled as data URLs within the existing size limit.
+
+### Music & Sound Effects
+
+Generate songs, instrumental tracks, and sound effects with Venice's asynchronous audio pipeline.
+
+```bash
+# List current models and their capabilities
+venice music models
+
+# Get a price quote
+venice music quote -m elevenlabs-music -d 60
+
+# Queue instrumental music
+venice music generate -m elevenlabs-music -d 60 --instrumental \
+  "Lofi beat on a rainy night"
+
+# Generate a song using lyrics from a file
+venice music generate -m elevenlabs-music --lyrics lyrics.txt \
+  "A folk song about the sea"
+
+# Check once, or poll until complete
+venice music status <queue_id> -m elevenlabs-music
+venice music status <queue_id> -m elevenlabs-music --wait
+
+# Download the finished audio
+venice music retrieve <queue_id> -m elevenlabs-music -o song.mp3
+```
+
+`retrieve` removes the remote media after a successful local write. Pass `--keep`
+to retain it, or use `venice music complete <queue_id> -m <model>` to clean it
+up later. Optional generation fields are model-specific; inspect
+`venice music models --format json` before using lyrics, duration, or
+instrumental mode.
 
 ### TEE Attestation
 
@@ -284,7 +371,7 @@ venice models
 
 # Filter by type
 venice models -t image
-venice models -t audio
+venice models -t music
 
 # Show only privacy-preserving models
 venice models --privacy
@@ -307,6 +394,9 @@ venice embeddings "Text to embed"
 
 # Save to file
 venice embeddings -o vectors.json "Text to embed"
+
+# From stdin
+echo "Text to embed" | venice embeddings
 ```
 
 ### Configuration
@@ -318,8 +408,13 @@ venice config init
 # Show current config
 venice config show
 
-# Set values
-venice config set api_key YOUR_KEY
+# Set the API key using a hidden prompt
+venice config set api_key
+
+# Or read the API key from standard input
+printf '%s' "$VENICE_API_KEY" | venice config set api_key --stdin
+
+# Set non-secret values
 venice config set default_model kimi-k2-5
 venice config set default_voice af_sky
 
@@ -345,7 +440,13 @@ venice config path
 | `no_color` | Disable colored output |
 | `show_usage` | Show token usage after requests |
 
+On POSIX systems, the CLI restricts the config directory to `0700` and the
+config file to `0600`. Windows does not implement equivalent POSIX permission
+bits, so protection there depends on the user profile's inherited ACLs.
+
 ### Conversation History
+
+`--continue` replays **local** history from `~/.venice/history.json`. It is not covered by TEE or E2EE enclave guarantees. E2EE and TEE transcripts are not written to history, and `--continue` refuses to mix encrypted and plaintext sessions.
 
 ```bash
 # List recent conversations
@@ -380,14 +481,20 @@ venice usage -d 30
 ### Characters
 
 ```bash
-# List available characters
+# List characters from the Venice API catalog
 venice characters
 
-# Use a character
-venice chat -c wizard "What is the nature of magic?"
+# Search the catalog
+venice characters --search philosophy
+
+# Show details (and reviews when available)
+venice characters show alan-watts
+
+# Chat as a catalog character — sends character_slug, not a local system prompt
+venice chat -c alan-watts "What is the nature of reality?"
 ```
 
-Available characters: `pirate`, `wizard`, `scientist`, `poet`, `coder`, `teacher`, `comedian`, `philosopher`
+`-c` / `--character` takes an API slug from `venice characters` (for example `alan-watts`), not a locally hardcoded persona.
 
 ### Voices
 
@@ -430,6 +537,10 @@ venice chat -t datetime "What day is it today?"
 # Interactive tool approval
 venice chat --interactive-tools -t calculator "Calculate 15% tip on $85"
 ```
+
+Only tools named by `--tools` are permitted to execute. The model may make
+sequential tool calls for up to 10 rounds; the command stops with an error if
+that limit is exceeded.
 
 ## Output Formats
 

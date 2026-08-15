@@ -8,12 +8,24 @@ import { requireApiKey, trackUsage } from './config.js';
 import { startSpinner, stopSpinner } from './output.js';
 import { getVersion } from './version.js';
 import { Readable } from 'stream';
-import type { Message, ToolDefinition, Model, Character } from '../types/index.js';
+import type {
+  Message,
+  ToolDefinition,
+  Model,
+  Character,
+  CharacterReviewsPage,
+  ImageGenerationOptions,
+} from '../types/index.js';
 import {
+  MAX_IMAGE_EDIT_BYTES,
+  MAX_IMAGE_DOWNLOAD_BYTES,
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
+  MAX_VIDEO_DOWNLOAD_BYTES,
   assertFileSizeWithinLimit,
+  formatBytes,
   mimeTypeFromPath,
+  streamResponseToFile,
 } from './media.js';
 
 // TODO: Remove VENICE_API_BASE_URL override before release - only for local dev testing
@@ -21,6 +33,7 @@ const VENICE_API = process.env.VENICE_API_BASE_URL || 'https://api.venice.ai/api
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes default timeout
+const MAX_VIDEO_STATUS_BYTES = 1024 * 1024;
 
 export class VeniceApiError extends Error {
   constructor(
@@ -58,12 +71,15 @@ export class VeniceApiError extends Error {
   }
 }
 
-function getHeaders(): Record<string, string> {
-  return {
-    'Authorization': `Bearer ${requireApiKey()}`,
+function getHeaders(authenticated = true): Record<string, string> {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'User-Agent': `venice-cli/${getVersion()}`,
   };
+  if (authenticated) {
+    headers.Authorization = `Bearer ${requireApiKey()}`;
+  }
+  return headers;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -87,18 +103,42 @@ async function checkOnline(): Promise<boolean> {
   }
 }
 
+type ApiRequestOptions = {
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  body?: unknown;
+  retries?: number;
+  showSpinner?: boolean;
+  spinnerText?: string;
+  timeoutMs?: number;
+  additionalHeaders?: Record<string, string>;
+  authenticated?: boolean;
+} & (
+  | {
+      responseType?: 'json';
+      stream?: boolean;
+      maxResponseBytes?: never;
+      responseLabel?: never;
+      expectedContentType?: never;
+    }
+  | {
+      responseType: 'arrayBuffer';
+      stream?: false;
+      maxResponseBytes: number;
+      responseLabel: string;
+      expectedContentType: 'image';
+    }
+);
+
+class BinaryResponseValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BinaryResponseValidationError';
+  }
+}
+
 export async function apiRequest<T>(
   endpoint: string,
-  options: {
-    method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
-    body?: unknown;
-    stream?: boolean;
-    retries?: number;
-    showSpinner?: boolean;
-    spinnerText?: string;
-    timeoutMs?: number;
-    additionalHeaders?: Record<string, string>;
-  } = {}
+  options: ApiRequestOptions = {}
 ): Promise<T> {
   const {
     method = 'GET',
@@ -109,7 +149,23 @@ export async function apiRequest<T>(
     spinnerText = 'Processing...',
     timeoutMs = DEFAULT_TIMEOUT_MS,
     additionalHeaders = {},
+    authenticated = true,
   } = options;
+
+  const binaryOptions = options.responseType === 'arrayBuffer' ? options : undefined;
+  if (binaryOptions && stream) {
+    throw new BinaryResponseValidationError(
+      'Binary responses cannot be returned as an unvalidated stream.'
+    );
+  }
+  if (
+    binaryOptions &&
+    (!Number.isSafeInteger(binaryOptions.maxResponseBytes) || binaryOptions.maxResponseBytes <= 0)
+  ) {
+    throw new BinaryResponseValidationError(
+      'Binary responses require a positive, finite byte limit.'
+    );
+  }
 
   let spinner = showSpinner && !stream ? startSpinner(spinnerText) : null;
   let lastError: VeniceApiError | null = null;
@@ -121,27 +177,76 @@ export async function apiRequest<T>(
     try {
       const response = await fetch(`${VENICE_API}${endpoint}`, {
         method,
-        headers: { ...getHeaders(), ...additionalHeaders },
+        headers: { ...getHeaders(authenticated), ...additionalHeaders },
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-
       if (!response.ok) {
-        const errorBody = await response.text();
+        let errorBody: string;
+        if (binaryOptions) {
+          const errorBytes = await readResponseBodyWithLimit(
+            response,
+            binaryOptions.maxResponseBytes,
+            `${binaryOptions.responseLabel} API error response`
+          );
+          errorBody = errorBytes.toString('utf-8');
+        } else {
+          // Preserve the existing JSON/stream behavior: only binary response
+          // bodies retain the request timeout while they are consumed.
+          clearTimeout(timeoutId);
+          errorBody = await response.text();
+        }
         throw VeniceApiError.fromResponse(response.status, errorBody);
       }
 
+      if (stream) {
+        clearTimeout(timeoutId);
+        if (spinner) {
+          stopSpinner(true);
+          spinner = null;
+        }
+        return response as unknown as T;
+      }
+
+      if (binaryOptions) {
+        const bytes = await readResponseBodyWithLimit(
+          response,
+          binaryOptions.maxResponseBytes,
+          binaryOptions.responseLabel
+        );
+        if (bytes.length === 0) {
+          throw new BinaryResponseValidationError(
+            `${binaryOptions.responseLabel} response was empty.`
+          );
+        }
+
+        const contentType = response.headers.get('content-type');
+        if (binaryOptions.expectedContentType === 'image' && !isImageContentType(contentType)) {
+          throw new BinaryResponseValidationError(
+            `${binaryOptions.responseLabel} did not return an image Content-Type ` +
+            `(received: ${contentType || 'missing'}).`
+          );
+        }
+        if (binaryOptions.expectedContentType === 'image' && !looksLikeImageBytes(bytes)) {
+          throw new BinaryResponseValidationError(
+            `${binaryOptions.responseLabel} did not contain a supported PNG, JPEG, or WebP image.`
+          );
+        }
+
+        clearTimeout(timeoutId);
+        if (spinner) {
+          stopSpinner(true);
+          spinner = null;
+        }
+        return Uint8Array.from(bytes).buffer as T;
+      }
+
+      clearTimeout(timeoutId);
       if (spinner) {
         stopSpinner(true);
         spinner = null;
       }
-
-      if (stream) {
-        return response as unknown as T;
-      }
-
       return await response.json() as T;
     } catch (error) {
       clearTimeout(timeoutId);
@@ -154,6 +259,11 @@ export async function apiRequest<T>(
         );
       }
 
+      if (error instanceof BinaryResponseValidationError) {
+        if (spinner) stopSpinner(false);
+        throw error;
+      }
+
       if (error instanceof VeniceApiError) {
         lastError = error;
 
@@ -161,7 +271,7 @@ export async function apiRequest<T>(
           if (spinner) stopSpinner(false, 'Authentication failed');
           throw new Error(
             'Authentication failed. Please check your API key.\n' +
-            'Update with: venice config set api_key <your-key>'
+            'Update with: venice config set api_key'
           );
         }
 
@@ -281,6 +391,7 @@ export async function* chatCompletionStream(
 ): AsyncGenerator<{
   content?: string;
   tool_calls?: any[];
+  finish_reason?: string;
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
   completionId?: string;
   done: boolean;
@@ -343,7 +454,8 @@ export async function* chatCompletionStream(
 
           try {
             const json = JSON.parse(data);
-            const delta = json.choices?.[0]?.delta;
+            const choice = json.choices?.[0];
+            const delta = choice?.delta;
             
             // Capture completion ID for E2EE signature verification
             if (json.id && !completionId) {
@@ -361,6 +473,10 @@ export async function* chatCompletionStream(
             if (delta?.tool_calls) {
               yield { tool_calls: delta.tool_calls, done: false, completionId };
             }
+
+            if (choice?.finish_reason) {
+              yield { finish_reason: choice.finish_reason, done: false, completionId };
+            }
           } catch {
             // Skip malformed JSON
           }
@@ -375,27 +491,52 @@ export async function* chatCompletionStream(
 }
 
 // Image generation (Venice-native endpoint)
-export async function generateImage(
+export function buildImageGenerationBody(
   prompt: string,
-  options: {
-    model?: string;
-    width?: number;
-    height?: number;
-    n?: number;
-    format?: 'png' | 'jpeg' | 'webp';
-  } = {}
-): Promise<string[]> {
+  options: Omit<ImageGenerationOptions, 'output'> = {}
+): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: options.model || 'flux-2-pro',
     prompt,
-    width: options.width || 1024,
-    height: options.height || 1024,
     format: options.format || 'png',
   };
 
-  if (options.n && options.n > 1) {
-    body.variants = options.n;
+  const optionalFields: Array<[keyof Omit<ImageGenerationOptions, 'output'>, string]> = [
+    ['width', 'width'],
+    ['height', 'height'],
+    ['aspectRatio', 'aspect_ratio'],
+    ['resolution', 'resolution'],
+    ['quality', 'quality'],
+    ['stylePreset', 'style_preset'],
+    ['styleReferences', 'style_references'],
+    ['negativePrompt', 'negative_prompt'],
+    ['seed', 'seed'],
+    ['cfgScale', 'cfg_scale'],
+    ['steps', 'steps'],
+    ['loraStrength', 'lora_strength'],
+    ['hideWatermark', 'hide_watermark'],
+    ['safeMode', 'safe_mode'],
+    ['embedExifMetadata', 'embed_exif_metadata'],
+  ];
+
+  for (const [optionName, fieldName] of optionalFields) {
+    const value = options[optionName];
+    if (value !== undefined) {
+      body[fieldName] = value;
+    }
   }
+  if (options.count !== undefined && options.count > 1) {
+    body.variants = options.count;
+  }
+
+  return body;
+}
+
+export async function generateImage(
+  prompt: string,
+  options: Omit<ImageGenerationOptions, 'output'> = {}
+): Promise<string[]> {
+  const body = buildImageGenerationBody(prompt, options);
 
   const response = await apiRequest<{
     id: string;
@@ -414,6 +555,177 @@ export async function generateImage(
   return response.images;
 }
 
+type ImageEditOptions = {
+  model?: string;
+  aspectRatio?: string;
+  enhancePrompt?: boolean;
+  safeMode?: boolean;
+};
+
+async function readImageAsBase64(imagePath: string): Promise<string> {
+  const fs = await import('fs');
+
+  if (!fs.existsSync(imagePath)) {
+    throw new Error(`File not found: ${imagePath}`);
+  }
+  assertFileSizeWithinLimit(imagePath, MAX_IMAGE_EDIT_BYTES, 'Image file');
+  return (await fs.promises.readFile(imagePath)).toString('base64');
+}
+
+// Edit a single local image
+export async function editImage(
+  imagePath: string,
+  prompt: string,
+  options: ImageEditOptions = {}
+): Promise<ArrayBuffer> {
+  const body: Record<string, unknown> = {
+    image: await readImageAsBase64(imagePath),
+    prompt,
+  };
+  if (options.model) body.model = options.model;
+  if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+  if (options.enhancePrompt) body.enhance_prompt = true;
+  if (options.safeMode === false) body.safe_mode = false;
+
+  const response = await apiRequest<ArrayBuffer>('/image/edit', {
+    method: 'POST',
+    body,
+    responseType: 'arrayBuffer',
+    maxResponseBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    responseLabel: 'Edited image',
+    expectedContentType: 'image',
+    spinnerText: 'Editing image...',
+  });
+
+  trackUsage({ command: 'image edit', model: options.model || 'default' });
+  return response;
+}
+
+// Edit using one to three local image layers
+export async function multiEditImage(
+  imagePaths: string[],
+  prompt: string,
+  options: ImageEditOptions = {}
+): Promise<ArrayBuffer> {
+  if (imagePaths.length < 1 || imagePaths.length > 3) {
+    throw new Error('Multi-edit requires between 1 and 3 images.');
+  }
+
+  const body: Record<string, unknown> = {
+    images: await Promise.all(imagePaths.map(readImageAsBase64)),
+    prompt,
+  };
+  if (options.model) body.modelId = options.model;
+  if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+  if (options.enhancePrompt) body.enhance_prompt = true;
+  if (options.safeMode === false) body.safe_mode = false;
+
+  const response = await apiRequest<ArrayBuffer>('/image/multi-edit', {
+    method: 'POST',
+    body,
+    responseType: 'arrayBuffer',
+    maxResponseBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    responseLabel: 'Edited image',
+    expectedContentType: 'image',
+    spinnerText: 'Editing image layers...',
+  });
+
+  trackUsage({ command: 'image multi-edit', model: options.model || 'default' });
+  return response;
+}
+
+// Remove the background from a local image
+export async function removeImageBackground(imagePath: string): Promise<ArrayBuffer> {
+  const response = await apiRequest<ArrayBuffer>('/image/background-remove', {
+    method: 'POST',
+    body: { image: await readImageAsBase64(imagePath) },
+    responseType: 'arrayBuffer',
+    maxResponseBytes: MAX_IMAGE_DOWNLOAD_BYTES,
+    responseLabel: 'Background removal image',
+    expectedContentType: 'image',
+    spinnerText: 'Removing background...',
+  });
+
+  trackUsage({ command: 'image bg-remove', model: 'background-remove' });
+  return response;
+}
+
+// List style presets accepted by image generation
+export async function listImageStyles(): Promise<string[]> {
+  const response = await apiRequest<{ data: string[] }>('/image/styles', {
+    showSpinner: false,
+    authenticated: false,
+  });
+  return response.data || [];
+}
+
+export type UpscaleImageResult = {
+  bytes: Buffer;
+  contentType: string;
+};
+
+export function isImageContentType(contentType: string | null | undefined): boolean {
+  const type = (contentType || '').split(';')[0].trim().toLowerCase();
+  return type.startsWith('image/');
+}
+
+export function looksLikeImageBytes(bytes: Buffer): boolean {
+  if (bytes.length < 12) return false;
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true;
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true;
+  if (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return true;
+  }
+  return false;
+}
+
+async function readResponseBodyWithLimit(
+  response: Response,
+  maxBytes: number,
+  label: string
+): Promise<Buffer> {
+  const contentLengthHeader = response.headers.get('content-length');
+  if (contentLengthHeader) {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && contentLength >= 0 && contentLength > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new BinaryResponseValidationError(
+        `${label} is too large (${formatBytes(contentLength)}). ` +
+        `Maximum allowed size is ${formatBytes(maxBytes)}.`
+      );
+    }
+  }
+
+  if (!response.body) {
+    return Buffer.alloc(0);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new BinaryResponseValidationError(
+          `${label} exceeded the limit of ${formatBytes(maxBytes)}.`
+        );
+      }
+
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, totalBytes);
+}
+
 // Image upscale
 export async function upscaleImage(
   imagePath: string,
@@ -421,7 +733,7 @@ export async function upscaleImage(
     model?: string;
     scale?: number;
   } = {}
-): Promise<{ url: string }> {
+): Promise<UpscaleImageResult> {
   const fs = await import('fs');
 
   if (!fs.existsSync(imagePath)) {
@@ -431,29 +743,65 @@ export async function upscaleImage(
   assertFileSizeWithinLimit(imagePath, MAX_UPSCALE_IMAGE_BYTES, 'Image file for upscaling');
 
   const imageData = await fs.promises.readFile(imagePath);
-  const base64 = imageData.toString('base64');
-  const mimeType = mimeTypeFromPath(imagePath, 'image/png');
-
   const body = {
-    model: options.model || 'upscaler',
-    image: `data:${mimeType};base64,${base64}`,
+    image: imageData.toString('base64'),
     scale: options.scale || 2,
+    ...(options.model ? { model: options.model } : {}),
   };
 
-  const response = await apiRequest<{
-    data: Array<{ url: string }>;
-  }>('/images/upscale', {
-    method: 'POST',
-    body,
-    spinnerText: 'Upscaling image...',
-  });
+  const spinner = startSpinner('Upscaling image...');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
-  trackUsage({
-    command: 'upscale',
-    model: options.model || 'upscaler',
-  });
+  try {
+    const response = await fetch(`${VENICE_API}/image/upscale`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
 
-  return response.data[0];
+    const bytes = await readResponseBodyWithLimit(
+      response,
+      MAX_IMAGE_DOWNLOAD_BYTES,
+      response.ok ? 'Upscaled image response' : 'Upscale API error response'
+    );
+
+    if (!response.ok) {
+      const errorBody = bytes.toString('utf-8');
+      throw VeniceApiError.fromResponse(response.status, errorBody);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+
+    if (!isImageContentType(contentType) && !looksLikeImageBytes(bytes)) {
+      const preview = bytes.subarray(0, 200).toString('utf-8');
+      throw new Error(
+        `Upscale did not return an image (content-type: ${contentType || 'unknown'}). ` +
+        `Response preview: ${preview}`
+      );
+    }
+
+    if (spinner) stopSpinner(true);
+
+    trackUsage({
+      command: 'upscale',
+      model: options.model || 'upscaler',
+    });
+
+    return {
+      bytes,
+      contentType: contentType.split(';')[0].trim() || 'image/png',
+    };
+  } catch (error) {
+    if (spinner) stopSpinner(false);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Image upscale request timed out. Please try again later.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // Text to speech
@@ -662,6 +1010,35 @@ export async function generateEmbeddings(
   return response.data;
 }
 
+const MODELS_CACHE_TTL_MS = 60_000;
+let modelsCache: { models: Model[]; fetchedAt: number } | null = null;
+
+export function clearModelsCache(): void {
+  modelsCache = null;
+}
+
+function mergeModel(merged: Map<string, Model>, model: Model, requestedType?: string): void {
+  const normalized: Model = { ...model };
+
+  if (requestedType && (!normalized.type || normalized.type.toLowerCase() === 'text')) {
+    normalized.type = requestedType;
+  }
+
+  const key = normalized.id || JSON.stringify(normalized);
+  const existing = merged.get(key);
+
+  if (!existing) {
+    merged.set(key, normalized);
+    return;
+  }
+
+  const existingType = (existing.type || '').toLowerCase();
+  const normalizedType = (normalized.type || '').toLowerCase();
+  if (existingType === 'text' && normalizedType && normalizedType !== 'text') {
+    merged.set(key, normalized);
+  }
+}
+
 // List models
 export async function listModels(
   options: { showSpinner?: boolean; type?: string } = {}
@@ -677,88 +1054,123 @@ export async function listModels(
         showSpinner: showSpinnerOption,
       }
     );
-
-    return (response.data || []).map((model) => {
-      if (!model.type || model.type.toLowerCase() === 'text') {
-        return { ...model, type };
-      }
-      return model;
-    });
+    return (response.data || []).map((model) =>
+      !model.type || model.type.toLowerCase() === 'text'
+        ? { ...model, type }
+        : model
+    );
   }
 
-  const modelTypes = ['text', 'asr', 'embedding', 'image', 'tts', 'upscale', 'inpaint', 'video'];
+  if (modelsCache && Date.now() - modelsCache.fetchedAt < MODELS_CACHE_TTL_MS) {
+    return [...modelsCache.models];
+  }
+
+  const modelTypes = ['text', 'asr', 'embedding', 'image', 'tts', 'upscale', 'inpaint', 'video', 'music'];
   const merged = new Map<string, Model>();
 
-  // API defaults to text-only when no type is provided, so iterate known types
-  const requests: Array<{ endpoint: string; requestedType?: string; showSpinner: boolean }> = [
-    { endpoint: '/models', showSpinner: showSpinnerOption },
-    ...modelTypes.map((modelType) => ({
-      endpoint: `/models?type=${encodeURIComponent(modelType)}`,
-      requestedType: modelType,
+  const base = apiRequest<{ data: Model[] }>('/models', {
+    method: 'GET',
+    spinnerText: 'Fetching models...',
+    showSpinner: showSpinnerOption,
+  });
+
+  const typed = modelTypes.map((type) =>
+    apiRequest<{ data: Model[] }>(`/models?type=${encodeURIComponent(type)}`, {
+      method: 'GET',
       showSpinner: false,
-    })),
-  ];
+    })
+      .then((response) => ({ type, response }))
+      .catch(() => null)
+  );
 
-  for (const request of requests) {
-    try {
-      const response = await apiRequest<{ data: Model[] }>(request.endpoint, {
-        method: 'GET',
-        spinnerText: 'Fetching models...',
-        showSpinner: request.showSpinner,
-      });
+  const [baseResponse, ...typedResponses] = await Promise.all([base, ...typed]);
 
-      for (const model of response.data || []) {
-        const normalized: Model = { ...model };
+  for (const model of baseResponse.data || []) {
+    mergeModel(merged, model);
+  }
 
-        // Some API responses still label type as text; preserve requested typed endpoint info
-        if (
-          request.requestedType &&
-          (!normalized.type || normalized.type.toLowerCase() === 'text')
-        ) {
-          normalized.type = request.requestedType;
-        }
-
-        const key = normalized.id || JSON.stringify(normalized);
-        const existing = merged.get(key);
-
-        if (!existing) {
-          merged.set(key, normalized);
-          continue;
-        }
-
-        // Prefer non-text type metadata when deduplicating
-        const existingType = (existing.type || '').toLowerCase();
-        const normalizedType = (normalized.type || '').toLowerCase();
-        if (existingType === 'text' && normalizedType && normalizedType !== 'text') {
-          merged.set(key, normalized);
-        }
-      }
-    } catch (error) {
-      // Keep typed fallback resilient. If the base endpoint fails, surface the error.
-      if (!request.requestedType) {
-        throw error;
-      }
+  for (const entry of typedResponses) {
+    if (!entry) continue;
+    for (const model of entry.response.data || []) {
+      mergeModel(merged, model, entry.type);
     }
   }
 
-  return Array.from(merged.values());
+  const models = Array.from(merged.values());
+  modelsCache = { models, fetchedAt: Date.now() };
+  return [...models];
 }
 
-// List characters (if Venice supports this endpoint)
-export async function listCharacters(): Promise<Character[]> {
-  try {
-    const response = await apiRequest<{
-      data: Character[];
-    }>('/characters', {
-      method: 'GET',
-      spinnerText: 'Fetching characters...',
-      retries: 0,
-    });
-    return response.data || [];
-  } catch {
-    // Characters endpoint might not exist
-    return [];
+export type ListCharactersOptions = {
+  search?: string;
+  limit?: number;
+  offset?: number;
+  showSpinner?: boolean;
+};
+
+function clampCharacterLimit(limit?: number): number {
+  const value = limit ?? 50;
+  if (!Number.isFinite(value)) return 50;
+  return Math.min(Math.max(Math.trunc(value), 1), 100);
+}
+
+function clampCharacterOffset(offset?: number): number {
+  if (offset === undefined || !Number.isFinite(offset)) return 0;
+  return Math.max(Math.trunc(offset), 0);
+}
+
+export async function listCharacters(
+  options: ListCharactersOptions = {}
+): Promise<Character[]> {
+  const params = new URLSearchParams();
+  params.set('limit', String(clampCharacterLimit(options.limit)));
+  params.set('offset', String(clampCharacterOffset(options.offset)));
+  if (options.search) {
+    params.set('search', options.search);
   }
+
+  const response = await apiRequest<{ data: Character[] }>(`/characters?${params}`, {
+    method: 'GET',
+    spinnerText: 'Fetching characters...',
+    showSpinner: options.showSpinner ?? true,
+  });
+  return response.data || [];
+}
+
+export async function getCharacter(
+  slug: string,
+  options: { showSpinner?: boolean } = {}
+): Promise<Character> {
+  const response = await apiRequest<{ data: Character }>(
+    `/characters/${encodeURIComponent(slug)}`,
+    {
+      method: 'GET',
+      spinnerText: 'Fetching character...',
+      showSpinner: options.showSpinner ?? true,
+    }
+  );
+  return response.data;
+}
+
+export async function getCharacterReviews(
+  slug: string,
+  options: { page?: number; pageSize?: number; showSpinner?: boolean } = {}
+): Promise<CharacterReviewsPage> {
+  const params = new URLSearchParams();
+  if (options.page !== undefined) {
+    params.set('page', String(options.page));
+  }
+  if (options.pageSize !== undefined) {
+    params.set('pageSize', String(options.pageSize));
+  }
+  const query = params.toString();
+  const endpoint = `/characters/${encodeURIComponent(slug)}/reviews${query ? `?${query}` : ''}`;
+
+  return apiRequest<CharacterReviewsPage>(endpoint, {
+    method: 'GET',
+    spinnerText: 'Fetching reviews...',
+    showSpinner: options.showSpinner ?? true,
+  });
 }
 
 export type VideoStatusResult = {
@@ -775,7 +1187,7 @@ export type VideoStatusResult = {
 
 export type VideoRetrieveResult =
   | { kind: 'status'; status: VideoStatusResult }
-  | { kind: 'video'; bytes: Buffer; contentType: string };
+  | { kind: 'video'; bytesWritten: number; contentType: string };
 
 export function classifyVideoRetrieveContentType(
   contentType: string | null | undefined
@@ -791,80 +1203,197 @@ export function videoUrlFromStatus(status: VideoStatusResult): string | undefine
   return status.video_url || status.url || status.download_url;
 }
 
-function isMp4Buffer(bytes: Buffer): boolean {
-  return bytes.length >= 8 && bytes.subarray(4, 8).toString('ascii') === 'ftyp';
-}
-
 async function retrieveVideoResponse(
   queueId: string,
   model: string,
   options: {
     deleteOnCompletion?: boolean;
     spinnerText?: string;
+    statusOnly?: boolean;
+    outputPath?: string;
+    maxBytes?: number;
   } = {}
 ): Promise<VideoRetrieveResult> {
   const spinner = startSpinner(options.spinnerText || 'Checking video status...');
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  const body: Record<string, unknown> = { queue_id: queueId, model };
+  if (options.deleteOnCompletion !== undefined) {
+    body.delete_media_on_completion = options.deleteOnCompletion;
+  }
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    let fileWriteStarted = false;
+    let requestTimeoutActive = true;
+    const clearRequestTimeout = () => {
+      if (requestTimeoutActive) {
+        clearTimeout(timeoutId);
+        requestTimeoutActive = false;
+      }
+    };
+
+    try {
+      const response = await fetch(`${VENICE_API}/video/retrieve`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw VeniceApiError.fromResponse(response.status, errorBody);
+      }
+
+      const inspected = await inspectVideoRetrieveResponse(response);
+      if (inspected.kind === 'status') {
+        if (spinner) stopSpinner(true);
+        return inspected;
+      }
+
+      // The request deadline bounds headers and body inspection only. Once an
+      // MP4 is confirmed, chunk-level inactivity timeouts protect the download.
+      clearRequestTimeout();
+
+      if (options.statusOnly) {
+        await inspected.reader.cancel();
+        inspected.reader.releaseLock();
+        if (spinner) stopSpinner(true);
+        return { kind: 'status', status: { status: 'completed' } };
+      }
+
+      if (!options.outputPath) {
+        await inspected.reader.cancel();
+        inspected.reader.releaseLock();
+        throw new VideoRetrieveValidationError(
+          'An output path is required to save the retrieved video.'
+        );
+      }
+
+      fileWriteStarted = true;
+      const saved = await streamResponseToFile(
+        response,
+        inspected.reader,
+        inspected.initialChunks,
+        options.outputPath,
+        {
+          maxBytes: options.maxBytes ?? MAX_VIDEO_DOWNLOAD_BYTES,
+          label: 'Video',
+        }
+      );
+      if (spinner) stopSpinner(true);
+      return { kind: 'video', ...saved };
+    } catch (error) {
+      const retryable =
+        !fileWriteStarted &&
+        attempt < MAX_RETRIES &&
+        !(error instanceof VideoRetrieveValidationError) &&
+        (
+          !(error instanceof VeniceApiError) ||
+          error.isRetryable() ||
+          error.isRateLimited()
+        );
+
+      if (retryable) {
+        await sleep(RETRY_DELAY_MS * (attempt + 1) * (
+          error instanceof VeniceApiError && error.isRateLimited() ? 2 : 1
+        ));
+        continue;
+      }
+
+      if (spinner) stopSpinner(false);
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error('Video retrieve request timed out. Please try again later.');
+      }
+      throw error;
+    } finally {
+      clearRequestTimeout();
+    }
+  }
+
+  if (spinner) stopSpinner(false);
+  throw new Error('Video retrieve request failed after retries.');
+}
+
+type InspectedVideoResponse =
+  | { kind: 'status'; status: VideoStatusResult }
+  | {
+      kind: 'video';
+      reader: ReadableStreamDefaultReader<Uint8Array>;
+      initialChunks: Buffer[];
+    };
+
+class VideoRetrieveValidationError extends Error {}
+
+async function inspectVideoRetrieveResponse(
+  response: Response
+): Promise<InspectedVideoResponse> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new VideoRetrieveValidationError('Video retrieve response had no body.');
+  }
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let readingJson = false;
 
   try {
-    const body: Record<string, unknown> = { queue_id: queueId, model };
-    if (options.deleteOnCompletion !== undefined) {
-      body.delete_media_on_completion = options.deleteOnCompletion;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = Buffer.from(value);
+      chunks.push(chunk);
+      totalBytes += chunk.length;
+      const buffered = Buffer.concat(chunks, totalBytes);
+
+      if (!readingJson && buffered.length >= 8) {
+        if (isMp4Buffer(buffered)) {
+          return { kind: 'video', reader, initialChunks: chunks };
+        }
+
+        const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
+        if (firstNonWhitespace === 0x7b) {
+          readingJson = true;
+        } else if (firstNonWhitespace !== undefined) {
+          throw unexpectedVideoRetrieveType(response);
+        }
+      }
+
+      if (totalBytes > MAX_VIDEO_STATUS_BYTES) {
+        throw new VideoRetrieveValidationError(
+          'Video status response exceeded the maximum expected size.'
+        );
+      }
     }
 
-    const response = await fetch(`${VENICE_API}/video/retrieve`, {
-      method: 'POST',
-      headers: getHeaders(),
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw VeniceApiError.fromResponse(response.status, errorBody);
-    }
-
-    const classified = classifyVideoRetrieveContentType(response.headers.get('content-type'));
-    if (classified === 'json') {
-      const status = await response.json() as VideoStatusResult;
-      if (spinner) stopSpinner(true);
+    const buffered = Buffer.concat(chunks, totalBytes);
+    const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
+    if (readingJson || firstNonWhitespace === 0x7b) {
+      const status = JSON.parse(buffered.toString('utf-8')) as VideoStatusResult;
+      reader.releaseLock();
       return { kind: 'status', status };
     }
-
-    if (classified === 'unknown') {
-      const peek = Buffer.from(await response.arrayBuffer());
-      if (peek.length > 0 && peek[0] === 0x7b) {
-        const status = JSON.parse(peek.toString('utf-8')) as VideoStatusResult;
-        if (spinner) stopSpinner(true);
-        return { kind: 'status', status };
-      }
-      if (isMp4Buffer(peek)) {
-        if (spinner) stopSpinner(true);
-        return { kind: 'video', bytes: peek, contentType: 'video/mp4' };
-      }
-      throw new Error(
-        `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}".`
-      );
+    if (isMp4Buffer(buffered)) {
+      return { kind: 'video', reader, initialChunks: chunks };
     }
-
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (spinner) stopSpinner(true);
-    return {
-      kind: 'video',
-      bytes,
-      contentType: response.headers.get('content-type') || 'video/mp4',
-    };
+    throw unexpectedVideoRetrieveType(response);
   } catch (error) {
-    clearTimeout(timeoutId);
-    if (spinner) stopSpinner(false);
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('Video retrieve request timed out. Please try again later.');
-    }
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
     throw error;
   }
+}
+
+function unexpectedVideoRetrieveType(response: Response): Error {
+  return new VideoRetrieveValidationError(
+    `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}": ` +
+    'response is neither JSON nor a valid MP4.'
+  );
+}
+
+function isMp4Buffer(bytes: Buffer): boolean {
+  return bytes.length >= 8 && bytes.subarray(4, 8).toString('ascii') === 'ftyp';
 }
 
 // Video generation - queue job
@@ -914,26 +1443,17 @@ export async function queueVideoUpscale(
   } = {}
 ): Promise<{ queue_id: string; model: string }> {
   const model = options.model || 'topaz-video-upscale';
-  const body: Record<string, unknown> = {
-    model,
-    video_url: videoUrl,
-    upscale_factor: options.upscaleFactor ?? 2,
-  };
-
-  const response = await apiRequest<{
-    queue_id: string;
-    model: string;
-  }>('/video/queue', {
+  const response = await apiRequest<{ queue_id: string; model: string }>('/video/queue', {
     method: 'POST',
-    body,
+    body: {
+      model,
+      video_url: videoUrl,
+      upscale_factor: options.upscaleFactor ?? 2,
+    },
     spinnerText: 'Queueing video upscale...',
   });
 
-  trackUsage({
-    command: 'video',
-    model,
-  });
-
+  trackUsage({ command: 'video', model });
   return response;
 }
 
@@ -950,21 +1470,11 @@ export async function quoteVideoGeneration(options: {
     model: options.model,
     duration: options.duration,
   };
-  if (options.aspectRatio) {
-    body.aspect_ratio = options.aspectRatio;
-  }
-  if (options.resolution) {
-    body.resolution = options.resolution;
-  }
-  if (options.upscaleFactor !== undefined) {
-    body.upscale_factor = options.upscaleFactor;
-  }
-  if (options.audio !== undefined) {
-    body.audio = options.audio;
-  }
-  if (options.videoUrl) {
-    body.video_url = options.videoUrl;
-  }
+  if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+  if (options.resolution) body.resolution = options.resolution;
+  if (options.upscaleFactor !== undefined) body.upscale_factor = options.upscaleFactor;
+  if (options.audio !== undefined) body.audio = options.audio;
+  if (options.videoUrl) body.video_url = options.videoUrl;
 
   return apiRequest('/video/quote', {
     method: 'POST',
@@ -1001,6 +1511,7 @@ export async function getVideoStatus(
 ): Promise<VideoStatusResult> {
   const result = await retrieveVideoResponse(queueId, model, {
     spinnerText: 'Checking video status...',
+    statusOnly: true,
   });
 
   if (result.kind === 'video') {
@@ -1014,11 +1525,147 @@ export async function getVideoStatus(
 export async function retrieveVideo(
   queueId: string,
   model: string,
-  options: { deleteOnCompletion?: boolean } = {}
+  options: {
+    deleteOnCompletion?: boolean;
+    outputPath?: string;
+    maxBytes?: number;
+  } = {}
 ): Promise<VideoRetrieveResult> {
   return retrieveVideoResponse(queueId, model, {
     deleteOnCompletion: options.deleteOnCompletion ?? false,
     spinnerText: 'Retrieving video...',
+    outputPath: options.outputPath,
+    maxBytes: options.maxBytes,
+  });
+}
+
+export interface AudioGenerationOptions {
+  model: string;
+  durationSeconds?: number;
+  lyricsPrompt?: string;
+  forceInstrumental?: boolean;
+}
+
+export interface AudioProcessingStatus {
+  status: string;
+  average_execution_time?: number;
+  execution_duration?: number;
+  error?: string;
+}
+
+export type AudioRetrieveResult =
+  | { kind: 'processing'; status: AudioProcessingStatus }
+  | { kind: 'audio'; response: Response; contentType: string; sizeBytes?: number };
+
+function audioGenerationBody(
+  prompt: string,
+  options: AudioGenerationOptions
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: options.model,
+    prompt,
+  };
+
+  if (options.durationSeconds !== undefined) {
+    body.duration_seconds = options.durationSeconds;
+  }
+  if (options.lyricsPrompt !== undefined) {
+    body.lyrics_prompt = options.lyricsPrompt;
+  }
+  if (options.forceInstrumental !== undefined) {
+    body.force_instrumental = options.forceInstrumental;
+  }
+
+  return body;
+}
+
+// Music and sound effects - get a price quote
+export async function quoteAudioGeneration(
+  model: string,
+  options: { durationSeconds?: number; characterCount?: number } = {}
+): Promise<{ quote: number }> {
+  const body: Record<string, unknown> = { model };
+  if (options.durationSeconds !== undefined) {
+    body.duration_seconds = options.durationSeconds;
+  }
+  if (options.characterCount !== undefined) {
+    body.character_count = options.characterCount;
+  }
+
+  return apiRequest('/audio/quote', {
+    method: 'POST',
+    body,
+    spinnerText: 'Fetching audio quote...',
+  });
+}
+
+// Music and sound effects - queue a generation job
+export async function queueAudioGeneration(
+  prompt: string,
+  options: AudioGenerationOptions
+): Promise<{ model: string; queue_id: string; status: string }> {
+  const response = await apiRequest<{
+    model: string;
+    queue_id: string;
+    status: string;
+  }>('/audio/queue', {
+    method: 'POST',
+    body: audioGenerationBody(prompt, options),
+    spinnerText: 'Queueing audio generation...',
+  });
+
+  trackUsage({ command: 'music', model: options.model });
+  return response;
+}
+
+// Music and sound effects - retrieve processing status or completed binary audio
+export async function retrieveGeneratedAudio(
+  queueId: string,
+  model: string
+): Promise<AudioRetrieveResult> {
+  const response = await apiRequest<Response>('/audio/retrieve', {
+    method: 'POST',
+    body: { queue_id: queueId, model, delete_media_on_completion: false },
+    stream: true,
+    showSpinner: false,
+  });
+  const contentType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() || '';
+
+  if (contentType === 'application/json') {
+    return {
+      kind: 'processing',
+      status: await response.json() as AudioProcessingStatus,
+    };
+  }
+
+  if (!['audio/mpeg', 'audio/wav', 'audio/flac'].includes(contentType)) {
+    throw new Error(
+      `Unexpected audio response content type "${contentType || 'missing'}".`
+    );
+  }
+
+  return {
+    kind: 'audio',
+    response,
+    contentType,
+    sizeBytes: (() => {
+      const value = response.headers.get('content-length');
+      if (!value) return undefined;
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+    })(),
+  };
+}
+
+// Music and sound effects - clean up stored media after a successful download
+export async function completeAudioGeneration(
+  queueId: string,
+  model: string
+): Promise<{ success: boolean }> {
+  return apiRequest('/audio/complete', {
+    method: 'POST',
+    body: { queue_id: queueId, model },
+    spinnerText: 'Cleaning up generated audio...',
   });
 }
 
