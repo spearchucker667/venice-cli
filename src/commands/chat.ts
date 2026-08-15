@@ -970,6 +970,20 @@ export function resolveChatPrivacyMode(input: {
   const supportsE2EE = isE2EEModel(input.modelInfo);
   const supportsTEE = isTEEModel(input.modelInfo);
 
+  if (
+    modelIdImpliesPrivateMode(input.modelId) &&
+    !supportsE2EE &&
+    !supportsTEE
+  ) {
+    return {
+      useE2EE: false,
+      useTEE: false,
+      error:
+        `Could not confirm private-mode capabilities for "${input.modelId}"; ` +
+        'refusing to send this request in the clear.',
+    };
+  }
+
   if (input.e2eeFlag === true) {
     if (!supportsE2EE) {
       return {

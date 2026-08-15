@@ -55,11 +55,68 @@ test('known E2EE model auto-enables encryption', () => {
   assert.deepEqual(result, { useE2EE: true, useTEE: false });
 });
 
+for (const modelInfo of [
+  {
+    id: 'e2ee-missing-capabilities',
+    type: 'text',
+  },
+  {
+    id: 'e2ee-false-capabilities',
+    type: 'text',
+    model_spec: {
+      capabilities: { supportsE2EE: false, supportsTeeAttestation: false },
+    },
+  },
+  {
+    id: 'tee-missing-capabilities',
+    type: 'text',
+  },
+  {
+    id: 'tee-false-capabilities',
+    type: 'text',
+    model_spec: {
+      capabilities: { supportsE2EE: false, supportsTeeAttestation: false },
+    },
+  },
+] satisfies Model[]) {
+  test(`${modelInfo.id} fails closed when catalog confirms no private capability`, () => {
+    const result = resolveChatPrivacyMode({
+      modelId: modelInfo.id,
+      modelInfo,
+      catalogFailed: false,
+    });
+
+    assert.equal(result.useE2EE, false);
+    assert.equal(result.useTEE, false);
+    assert.match(result.error || '', /refusing to send this request in the clear/);
+  });
+}
+
+test('--no-e2ee uses TEE for a model with confirmed private capabilities', () => {
+  const result = resolveChatPrivacyMode({
+    modelId: e2eeModel.id,
+    modelInfo: e2eeModel,
+    catalogFailed: false,
+    e2eeFlag: false,
+  });
+  assert.deepEqual(result, { useE2EE: false, useTEE: true });
+});
+
 test('plain model is unchanged when the catalog is available', () => {
   const result = resolveChatPrivacyMode({
     modelId: plainModel.id,
     modelInfo: plainModel,
     catalogFailed: false,
+  });
+  assert.deepEqual(result, { useE2EE: false, useTEE: false });
+});
+
+test('--no-e2ee leaves a normal plain model in plaintext mode', () => {
+  const result = resolveChatPrivacyMode({
+    modelId: plainModel.id,
+    modelInfo: plainModel,
+    catalogFailed: false,
+    e2eeFlag: false,
   });
   assert.deepEqual(result, { useE2EE: false, useTEE: false });
 });
