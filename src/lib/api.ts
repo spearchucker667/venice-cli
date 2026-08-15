@@ -838,7 +838,7 @@ export async function listModels(
   const { showSpinner: showSpinnerOption = true } = options;
 
   if (modelsCache && Date.now() - modelsCache.fetchedAt < MODELS_CACHE_TTL_MS) {
-    return modelsCache.models;
+    return [...modelsCache.models];
   }
 
   const modelTypes = ['text', 'asr', 'embedding', 'image', 'tts', 'upscale', 'inpaint', 'video', 'music'];
@@ -874,7 +874,7 @@ export async function listModels(
 
   const models = Array.from(merged.values());
   modelsCache = { models, fetchedAt: Date.now() };
-  return models;
+  return [...models];
 }
 
 // List characters (if Venice supports this endpoint)
