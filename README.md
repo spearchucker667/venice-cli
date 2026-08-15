@@ -51,6 +51,8 @@ npx veniceai-cli chat 'Hello, world!'
 - 🔐 **End-to-End Encryption (E2EE)** for maximum privacy
 - 🛡️ **TEE Attestation** verification for trusted execution
 - 🔍 **Web Search** with AI-powered synthesis
+- 📄 **Document Parsing** without model inference
+- 🌐 **Standalone Web Search & Scraping** for structured retrieval
 - 🖼️ **Image Generation** from text prompts
 - 🔊 **Text-to-Speech** with 35+ voices across languages
 - 🎤 **Speech-to-Text** transcription with timestamps
@@ -144,6 +146,37 @@ venice search --citations "Latest AI news"
 
 # Enable deep web scraping
 venice search --scrape "Company research on Anthropic"
+
+# Return structured results directly (no model inference)
+venice search --raw --provider brave -f json "Latest Venice API models"
+```
+
+### Document Parsing
+
+Extract text from PDF, DOCX, PPTX, XLSX, and plain text files (up to 25 MB):
+
+```bash
+# Print extracted text
+venice parse report.pdf
+
+# Save extracted text
+venice parse report.pdf -o report.txt
+
+# Include the extracted text and token count as JSON
+venice parse report.pdf -f json
+```
+
+Parsing runs in memory on Venice infrastructure with zero data retention and does not invoke a model.
+
+### Web Scraping
+
+```bash
+# Convert a public page to Markdown
+venice scrape https://docs.venice.ai/llms.txt
+
+# Save the Markdown or return the full structured response
+venice scrape https://example.com/article -o article.md
+venice scrape https://example.com/article -f json
 ```
 
 ### Image Generation

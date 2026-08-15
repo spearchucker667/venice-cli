@@ -44,7 +44,7 @@ _venice_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="chat search image image-edit image-multi-edit image-bg-remove image-styles tts transcribe models embeddings upscale history usage config characters voices voice video music completions"
+    local commands="chat search scrape parse image image-edit image-multi-edit image-bg-remove image-styles tts transcribe models embeddings upscale history usage config characters voices voice video music completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
     local video_cmds="generate quote status retrieve complete transcribe upscale models"
@@ -128,7 +128,11 @@ _venice_completion() {
             return 0
             ;;
         search)
-            COMPREPLY=( \$(compgen -W "-m --model -n --results -f --format" -- "\${cur}") )
+            COMPREPLY=( \$(compgen -W "-m --model -n --results --citations --scrape --raw --provider -f --format" -- "\${cur}") )
+            return 0
+            ;;
+        scrape|parse)
+            COMPREPLY=( \$(compgen -W "-o --output -f --format" -- "\${cur}") )
             return 0
             ;;
         image)
@@ -251,7 +255,9 @@ _venice() {
     local -a commands
     commands=(
         'chat:Chat with an AI model'
-        'search:Web search with AI synthesis'
+        'search:Web search with optional AI synthesis'
+        'scrape:Scrape a public page to Markdown'
+        'parse:Extract text from a document'
         'image:Generate an image'
         'image-edit:Edit a local image'
         'image-multi-edit:Edit layered local images'
@@ -370,8 +376,24 @@ _venice() {
                     _arguments \\
                         '-m[Model to use]:model:(\$models)' \\
                         '-n[Number of results]:number:' \\
+                        '--citations[Include citations in synthesized output]' \\
+                        '--scrape[Scrape pages for synthesized output]' \\
+                        '--raw[Use dedicated search without AI synthesis]' \\
+                        '--provider[Raw search provider]:provider:((brave google))' \\
                         '-f[Output format]:format:((\$formats))' \\
                         '*:query:'
+                    ;;
+                scrape)
+                    _arguments \\
+                        '-o[Output file]:file:_files' \\
+                        '-f[Output format]:format:((\$formats))' \\
+                        '1:url:'
+                    ;;
+                parse)
+                    _arguments \\
+                        '-o[Output file]:file:_files' \\
+                        '-f[Output format]:format:((\$formats))' \\
+                        '1:document:_files'
                     ;;
                 image)
                     _arguments \\
@@ -531,14 +553,16 @@ function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
 # Main commands
-set -l commands chat search image image-edit image-multi-edit image-bg-remove image-styles upscale tts transcribe video music models embeddings history usage config characters voices voice completions
+set -l commands chat search scrape parse image image-edit image-multi-edit image-bg-remove image-styles upscale tts transcribe video music models embeddings history usage config characters voices voice completions
 
 # Disable file completions by default
 complete -c venice -f
 
 # Main commands
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a chat -d "Chat with an AI model"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a search -d "Web search with AI synthesis"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a search -d "Web search with optional AI synthesis"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a scrape -d "Scrape a public page to Markdown"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a parse -d "Extract text from a document"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image -d "Generate an image"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-edit -d "Edit a local image"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-multi-edit -d "Edit layered local images"
@@ -579,6 +603,19 @@ complete -c venice -n "__fish_seen_subcommand_from chat" -l interactive-tools -d
 complete -c venice -n "__fish_seen_subcommand_from chat" -l continue -d "Continue conversation"
 complete -c venice -n "__fish_seen_subcommand_from chat" -l no-stream -d "Disable streaming"
 complete -c venice -n "__fish_seen_subcommand_from chat" -s f -l format -d "Format" -xa "$formats"
+
+# Search options
+complete -c venice -n "__fish_seen_subcommand_from search" -s m -l model -d "Model" -xa "$models"
+complete -c venice -n "__fish_seen_subcommand_from search" -s n -l results -d "Number of results"
+complete -c venice -n "__fish_seen_subcommand_from search" -l citations -d "Include citations"
+complete -c venice -n "__fish_seen_subcommand_from search" -l scrape -d "Scrape synthesized sources"
+complete -c venice -n "__fish_seen_subcommand_from search" -l raw -d "Search without AI synthesis"
+complete -c venice -n "__fish_seen_subcommand_from search" -l provider -d "Search provider" -xa "brave google"
+complete -c venice -n "__fish_seen_subcommand_from search" -s f -l format -d "Format" -xa "$formats"
+
+# Parse and scrape options
+complete -c venice -n "__fish_seen_subcommand_from parse scrape" -s o -l output -d "Output file" -r
+complete -c venice -n "__fish_seen_subcommand_from parse scrape" -s f -l format -d "Format" -xa "$formats"
 
 # Image options
 complete -c venice -n "__fish_seen_subcommand_from image" -s m -l model -d "Model" -xa "$image_models"

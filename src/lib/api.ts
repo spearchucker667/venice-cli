@@ -22,6 +22,7 @@ import {
   MAX_IMAGE_DOWNLOAD_BYTES,
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
+  MAX_DOCUMENT_PARSE_BYTES,
   MAX_VOICE_SAMPLE_BYTES,
   MAX_VIDEO_DOWNLOAD_BYTES,
   assertFileSizeWithinLimit,
@@ -35,6 +36,8 @@ const VENICE_API = process.env.VENICE_API_BASE_URL || 'https://api.venice.ai/api
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes default timeout
+const DOCUMENT_PARSE_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_DOCUMENT_PARSE_RESPONSE_BYTES = 50 * 1024 * 1024;
 const MAX_VIDEO_STATUS_BYTES = 1024 * 1024;
 
 export class VeniceApiError extends Error {
@@ -1834,6 +1837,156 @@ export async function webSearch(
     content: response.content,
     usage: response.usage,
   };
+}
+
+export type WebSearchResult = {
+  title: string;
+  url: string;
+  content: string;
+  date: string;
+};
+
+export type DedicatedWebSearchResponse = {
+  query: string;
+  results: WebSearchResult[];
+};
+
+// Web search without model inference
+export async function dedicatedWebSearch(
+  query: string,
+  options: {
+    limit?: number;
+    provider?: 'brave' | 'google';
+  } = {}
+): Promise<DedicatedWebSearchResponse> {
+  return apiRequest<DedicatedWebSearchResponse>('/augment/search', {
+    method: 'POST',
+    body: {
+      query,
+      limit: options.limit ?? 10,
+      search_provider: options.provider ?? 'brave',
+    },
+    spinnerText: 'Searching the web...',
+  });
+}
+
+export type WebScrapeResponse = {
+  url: string;
+  content: string;
+  format: 'markdown';
+};
+
+// Scrape a public page to Markdown without model inference
+export async function scrapeWebPage(url: string): Promise<WebScrapeResponse> {
+  return apiRequest<WebScrapeResponse>('/augment/scrape', {
+    method: 'POST',
+    body: { url },
+    spinnerText: 'Scraping page...',
+  });
+}
+
+export type DocumentParseResponse = {
+  text: string;
+  tokens: number;
+};
+
+function sanitizeMultipartFilename(filename: string): string {
+  return filename.replace(/[\u0000-\u001f\u007f"\\]/g, '_');
+}
+
+// Parse a document without model inference
+export async function parseDocument(filePath: string): Promise<DocumentParseResponse> {
+  const fs = await import('fs');
+  const path = await import('path');
+  const crypto = await import('crypto');
+
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`File not found: ${filePath}`);
+  }
+
+  const fileSize = assertFileSizeWithinLimit(
+    filePath,
+    MAX_DOCUMENT_PARSE_BYTES,
+    'Document'
+  );
+  const filename = path.basename(filePath);
+  const mimeType = mimeTypeFromPath(filePath);
+  const boundary = `----venice-cli-${crypto.randomUUID()}`;
+  const CRLF = '\r\n';
+  const safeFilename = sanitizeMultipartFilename(filename);
+  const headerBuffer = Buffer.from(
+    `--${boundary}${CRLF}` +
+    `Content-Disposition: form-data; name="response_format"${CRLF}${CRLF}` +
+    `json${CRLF}` +
+    `--${boundary}${CRLF}` +
+    `Content-Disposition: form-data; name="file"; filename="${safeFilename}"${CRLF}` +
+    `Content-Type: ${mimeType}${CRLF}${CRLF}`,
+    'utf-8'
+  );
+  const footerBuffer = Buffer.from(`${CRLF}--${boundary}--${CRLF}`, 'utf-8');
+  const contentLength = headerBuffer.length + fileSize + footerBuffer.length;
+  const multipartBody = Readable.from((async function* () {
+    yield headerBuffer;
+    for await (const chunk of fs.createReadStream(filePath)) {
+      yield chunk;
+    }
+    yield footerBuffer;
+  })());
+
+  const spinner = startSpinner('Parsing document...');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DOCUMENT_PARSE_TIMEOUT_MS);
+
+  try {
+    const requestInit: RequestInit & { duplex: 'half' } = {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${requireApiKey()}`,
+        'User-Agent': `venice-cli/${getVersion()}`,
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': String(contentLength),
+      },
+      body: multipartBody as unknown as RequestInit['body'],
+      duplex: 'half',
+      signal: controller.signal,
+    };
+    const response = await fetch(`${VENICE_API}/augment/text-parser`, requestInit);
+    const responseBytes = await readResponseBodyWithLimit(
+      response,
+      MAX_DOCUMENT_PARSE_RESPONSE_BYTES,
+      response.ok ? 'Document parse response' : 'Document parse API error response'
+    );
+
+    if (!response.ok) {
+      throw VeniceApiError.fromResponse(response.status, responseBytes.toString('utf-8'));
+    }
+
+    const responseBody = responseBytes.toString('utf-8');
+    if (responseBody.trim().length === 0) {
+      throw new Error('Document parse response was empty; expected JSON.');
+    }
+
+    let parsedResponse: DocumentParseResponse;
+    try {
+      parsedResponse = JSON.parse(responseBody) as DocumentParseResponse;
+    } catch {
+      throw new Error('Document parse response contained malformed JSON.');
+    }
+
+    if (spinner) stopSpinner(true);
+    return parsedResponse;
+  } catch (error) {
+    if (spinner) stopSpinner(false);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(
+        'Document parsing timed out after 10 minutes. ' +
+        'Check your connection or try a smaller document.'
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // TEE Attestation types
