@@ -60,7 +60,26 @@ export interface ImageGenerationOptions {
   output?: string;
   width?: number;
   height?: number;
-  format?: OutputFormat;
+  count?: number;
+  format?: 'jpeg' | 'png' | 'webp';
+  aspectRatio?: string;
+  resolution?: '1K' | '2K' | '4K';
+  quality?: 'low' | 'medium' | 'high';
+  stylePreset?: string;
+  styleReferences?: ImageStyleReference[];
+  negativePrompt?: string;
+  seed?: number;
+  cfgScale?: number;
+  steps?: number;
+  loraStrength?: number;
+  hideWatermark?: boolean;
+  safeMode?: boolean;
+  embedExifMetadata?: boolean;
+}
+
+export interface ImageStyleReference {
+  image: string;
+  strength?: number;
 }
 
 export interface TTSOptions {
