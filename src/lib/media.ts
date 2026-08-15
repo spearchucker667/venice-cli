@@ -191,6 +191,9 @@ export async function writeResponseToFile(
   }
 
   const contentLength = parseContentLength(response.headers.get('content-length'));
+  if (contentLength === 0) {
+    throw new Error('Download response was empty.');
+  }
   if (contentLength !== null && contentLength > options.maxBytes) {
     throw new Error(
       `Refusing to download ${formatBytes(contentLength)}. ` +
@@ -232,6 +235,9 @@ export async function writeResponseToFile(
       fs.createWriteStream(tempPath)
     );
 
+    if (bytesWritten === 0) {
+      throw new Error('Download response was empty.');
+    }
     fs.renameSync(tempPath, outputPath);
     return { bytesWritten, contentType };
   } catch (error) {

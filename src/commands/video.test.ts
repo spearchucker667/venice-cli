@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -226,6 +226,9 @@ test('video retrieve completes only after direct or URL downloads are safely wri
   const videoBytes = Buffer.from('xxxxftypisom-cleanup');
   const directOutput = join(homeDir, 'direct.mp4');
   const urlOutput = join(homeDir, 'url.mp4');
+  const declaredEmptyOutput = join(homeDir, 'declared-empty.mp4');
+  const chunkedEmptyOutput = join(homeDir, 'chunked-empty.mp4');
+  const existingBytes = Buffer.from('existing-video');
   const events: string[] = [];
   const completed: string[] = [];
   let origin = '';
@@ -256,6 +259,18 @@ test('video retrieve completes only after direct or URL downloads are safely wri
       if (queueId === 'url-fail') {
         response.writeHead(503, { 'Content-Type': 'text/plain' });
         response.end('unavailable');
+      } else if (queueId === 'url-empty-declared') {
+        response.writeHead(200, {
+          'Content-Type': 'video/mp4',
+          'Content-Length': '0',
+        });
+        response.end();
+      } else if (queueId === 'url-empty-chunked') {
+        response.writeHead(200, {
+          'Content-Type': 'video/mp4',
+          'Transfer-Encoding': 'chunked',
+        });
+        response.end();
       } else {
         response.writeHead(200, { 'Content-Type': 'video/mp4' });
         response.end(videoBytes);
@@ -325,6 +340,28 @@ test('video retrieve completes only after direct or URL downloads are safely wri
       '--complete',
     ], homeDir, `${origin}/api/v1`);
     assert.notEqual(urlFailure.status, 0);
+
+    writeFileSync(declaredEmptyOutput, existingBytes);
+    const declaredEmpty = await runCli([
+      'video', 'retrieve', 'url-empty-declared',
+      '--model', 'test-model',
+      '--output', declaredEmptyOutput,
+      '--complete',
+    ], homeDir, `${origin}/api/v1`);
+    assert.notEqual(declaredEmpty.status, 0);
+    assert.match(declaredEmpty.stderr, /Download response was empty/);
+    assert.equal(readFileSync(declaredEmptyOutput).equals(existingBytes), true);
+
+    writeFileSync(chunkedEmptyOutput, existingBytes);
+    const chunkedEmpty = await runCli([
+      'video', 'retrieve', 'url-empty-chunked',
+      '--model', 'test-model',
+      '--output', chunkedEmptyOutput,
+      '--complete',
+    ], homeDir, `${origin}/api/v1`);
+    assert.notEqual(chunkedEmpty.status, 0);
+    assert.match(chunkedEmpty.stderr, /Download response was empty/);
+    assert.equal(readFileSync(chunkedEmptyOutput).equals(existingBytes), true);
 
     assert.deepEqual(completed, ['direct-ok', 'url-ok']);
     assert.ok(events.indexOf('complete:direct-ok') > events.indexOf('retrieve:direct-ok'));
