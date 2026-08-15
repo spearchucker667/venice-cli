@@ -105,6 +105,7 @@ test('chat preserves options and enforces the allowlist across tool rounds', asy
           env: {
             ...process.env,
             HOME: homeDir,
+            NODE_ENV: 'test',
             NO_COLOR: '1',
             VENICE_API_KEY: 'test-key',
             VENICE_API_BASE_URL: `http://127.0.0.1:${address.port}/api/v1`,

@@ -506,7 +506,49 @@ venice history clear
 venice history export history.json
 ```
 
-### Usage Statistics
+### Billing and Account Usage
+
+These commands query Venice account-wide billing data, including usage from
+other clients:
+
+```bash
+# Current USD and DIEM balances
+venice billing balance
+
+# Billed usage from the replacement usage-history endpoint
+venice billing usage --days 7
+
+# Aggregated usage by date, model, and API key
+venice billing analytics --lookback 30d
+```
+
+### API Keys
+
+Key management requires an admin API key. New keys default to the narrower
+`INFERENCE` type; the secret returned by `create` is only available once.
+
+```bash
+# List key metadata (never includes key secrets)
+venice keys list
+
+# Create a bounded inference key
+venice keys create --name ci --usd-limit 25 --limit-period month --output ./ci.key
+
+# Show limits for the current key
+venice keys rate-limits
+
+# Delete by key ID (interactive confirmation)
+venice keys delete <key-id>
+```
+
+Use `--force` for intentional non-interactive deletion. `keys create` never
+prints the secret in pretty or JSON output. It requires `--output` and creates
+that file with mode `0600` without following symlinks or overwriting a file.
+
+### Local Usage Statistics
+
+The legacy `venice usage` command reports only token logs recorded locally by
+this CLI. Use `venice billing usage` for billed account-wide usage.
 
 ```bash
 # Show last 7 days

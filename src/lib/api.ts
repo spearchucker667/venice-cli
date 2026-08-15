@@ -31,8 +31,11 @@ import {
   streamResponseToFile,
 } from './media.js';
 
-// TODO: Remove VENICE_API_BASE_URL override before release - only for local dev testing
-const VENICE_API = process.env.VENICE_API_BASE_URL || 'https://api.venice.ai/api/v1';
+// Never allow production environment variables to redirect bearer credentials.
+const VENICE_API =
+  process.env.NODE_ENV === 'test' && process.env.VENICE_API_BASE_URL
+    ? process.env.VENICE_API_BASE_URL
+    : 'https://api.venice.ai/api/v1';
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes default timeout

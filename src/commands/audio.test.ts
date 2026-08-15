@@ -44,6 +44,7 @@ async function runCli(
     env: {
       ...process.env,
       HOME: homeDir,
+      NODE_ENV: 'test',
       NO_COLOR: '1',
       VENICE_API_KEY: 'test-key',
       VENICE_API_BASE_URL: apiBaseUrl,
