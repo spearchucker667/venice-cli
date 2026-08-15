@@ -1,6 +1,7 @@
 import readline from 'node:readline';
 
 export const REPL_PROMPT = 'you> ';
+export const REPL_HELP = 'Commands: /help, exit, quit, Ctrl-C, or Ctrl-D';
 
 export function shouldEnterRepl(prompt: string, stdinIsTTY: boolean | undefined): boolean {
   return prompt.trim() === '' && stdinIsTTY === true;
@@ -9,6 +10,10 @@ export function shouldEnterRepl(prompt: string, stdinIsTTY: boolean | undefined)
 export function isReplExitCommand(line: string): boolean {
   const normalized = line.trim().toLowerCase();
   return normalized === 'exit' || normalized === 'quit';
+}
+
+export function isReplHelpCommand(line: string): boolean {
+  return line.trim().toLowerCase() === '/help';
 }
 
 export async function runChatRepl(options: {
@@ -47,6 +52,11 @@ export async function runChatRepl(options: {
       }
       if (isReplExitCommand(line)) {
         break;
+      }
+      if (isReplHelpCommand(line)) {
+        options.output.write(`${REPL_HELP}\n`);
+        rl.prompt();
+        continue;
       }
       await options.onTurn(line);
       if (closed) {

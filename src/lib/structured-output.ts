@@ -2,8 +2,16 @@
  * Structured output helpers for chat completions.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { Ajv, type ErrorObject, type ValidateFunction } from 'ajv';
+import { Ajv2019 } from 'ajv/dist/2019.js';
+import { Ajv2020 } from 'ajv/dist/2020.js';
+import * as formatsModule from 'ajv-formats';
+
+export const MAX_SCHEMA_FILE_BYTES = 1024 * 1024;
+const MAX_RESPONSE_FORMAT_NAME_LENGTH = 64;
+const RESPONSE_FORMAT_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 export const REASONING_EFFORTS = [
   'none',
@@ -59,23 +67,57 @@ export function isPromptCacheRetention(value: string): value is PromptCacheReten
 
 export function loadResponseFormat(filePath: string): ResponseFormat {
   const resolved = resolve(filePath);
-  if (!existsSync(resolved)) {
-    throw new Error(`JSON schema file not found: ${filePath}`);
+  let descriptor: number;
+  try {
+    descriptor = openSync(resolved, 'r');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      throw new Error(`JSON schema file not found: ${filePath}`);
+    }
+    throw new Error(`Unable to open JSON schema file "${filePath}": ${errorMessage(error)}`);
   }
 
   let raw: string;
   try {
-    raw = readFileSync(resolved, 'utf-8');
-  } catch {
-    throw new Error(`Unable to read JSON schema file: ${filePath}`);
+    const initialSize = fstatSync(descriptor).size;
+    if (initialSize > MAX_SCHEMA_FILE_BYTES) {
+      throw schemaSizeError(filePath);
+    }
+
+    // The fixed-size buffer and MAX+1 read limit enforce the cap even if the
+    // file grows after fstatSync. No race can cause an unbounded allocation.
+    const buffer = Buffer.allocUnsafe(MAX_SCHEMA_FILE_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead <= MAX_SCHEMA_FILE_BYTES) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        bytesRead,
+        MAX_SCHEMA_FILE_BYTES + 1 - bytesRead,
+        null
+      );
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    if (bytesRead > MAX_SCHEMA_FILE_BYTES) {
+      throw schemaSizeError(filePath);
+    }
+    raw = buffer.toString('utf8', 0, bytesRead);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('JSON schema file exceeds')) {
+      throw error;
+    }
+    throw new Error(`Unable to read JSON schema file "${filePath}": ${errorMessage(error)}`);
+  } finally {
+    closeSync(descriptor);
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid JSON in schema file "${filePath}": ${reason}`);
+    throw new Error(`Invalid JSON in schema file "${filePath}": ${errorMessage(error)}`);
   }
 
   return normalizeResponseFormat(parsed, filePath);
@@ -93,6 +135,9 @@ export function normalizeResponseFormat(parsed: unknown, source = 'schema'): Res
   }
 
   if (obj.type === 'json_schema' && obj.json_schema && typeof obj.json_schema === 'object') {
+    if (Array.isArray(obj.json_schema)) {
+      throw new Error(`JSON schema wrapper in "${source}" must be an object`);
+    }
     return {
       type: 'json_schema',
       json_schema: normalizeJsonSchemaWrapper(obj.json_schema as Record<string, unknown>, source),
@@ -106,20 +151,17 @@ export function normalizeResponseFormat(parsed: unknown, source = 'schema'): Res
     };
   }
 
-  if (obj.type === 'object' || obj.properties || obj.$schema) {
-    return {
-      type: 'json_schema',
-      json_schema: {
-        name: 'response',
-        strict: true,
-        schema: obj,
-      },
-    };
-  }
-
-  throw new Error(
-    `Unrecognized JSON schema in "${source}". Provide a JSON Schema object, a { name, schema } wrapper, or a response_format object.`
-  );
+  // Any remaining object is a raw JSON Schema. Compilation is the authority:
+  // valid schemas using enum/const/$ref/composition do not need a top-level type.
+  compileSchema(obj, source);
+  return {
+    type: 'json_schema',
+    json_schema: {
+      name: 'response',
+      strict: true,
+      schema: obj,
+    },
+  };
 }
 
 function normalizeJsonSchemaWrapper(
@@ -131,9 +173,26 @@ function normalizeJsonSchemaWrapper(
     throw new Error(`JSON schema wrapper in "${source}" is missing a schema object`);
   }
 
-  const name = typeof wrapper.name === 'string' && wrapper.name.trim()
-    ? wrapper.name
-    : 'response';
+  let name = 'response';
+  if (wrapper.name !== undefined) {
+    if (typeof wrapper.name !== 'string' || !wrapper.name.trim()) {
+      throw new Error(`JSON schema name in "${source}" must be a non-empty string`);
+    }
+    name = wrapper.name.trim();
+  }
+  if (
+    name.length > MAX_RESPONSE_FORMAT_NAME_LENGTH ||
+    !RESPONSE_FORMAT_NAME_PATTERN.test(name)
+  ) {
+    throw new Error(
+      `JSON schema name in "${source}" must be 1-${MAX_RESPONSE_FORMAT_NAME_LENGTH} characters using only letters, numbers, "_" or "-"`
+    );
+  }
+  if (wrapper.strict !== undefined && typeof wrapper.strict !== 'boolean') {
+    throw new Error(`JSON schema strict setting in "${source}" must be a boolean`);
+  }
+
+  compileSchema(schema as Record<string, unknown>, source);
 
   return {
     name,
@@ -167,96 +226,58 @@ function extractJson(text: string): string {
 
 export function validateAgainstSchema(
   value: unknown,
-  schema: Record<string, unknown>,
-  path = '$'
+  schema: Record<string, unknown>
 ): string[] {
-  const errors: string[] = [];
-  const types = normalizeTypes(schema.type);
+  const validate = compileSchema(schema, 'response schema');
+  return validate(value) ? [] : formatValidationErrors(validate.errors);
+}
 
-  if (types.length > 0 && !types.some((type) => matchesType(value, type))) {
-    errors.push(`${path}: expected ${types.join(' | ')}, got ${describeType(value)}`);
-    return errors;
+function compileSchema(
+  schema: Record<string, unknown>,
+  source: string
+): ValidateFunction {
+  const schemaUri = typeof schema.$schema === 'string' ? schema.$schema : '';
+  const options = {
+    allErrors: true,
+    strict: true,
+    validateSchema: true,
+    allowUnionTypes: true,
+  } as const;
+  const ajv = schemaUri.includes('2020-12')
+    ? new Ajv2020(options)
+    : schemaUri.includes('2019-09')
+      ? new Ajv2019(options)
+      : new Ajv(options);
+  const addFormats = formatsModule.default as unknown as
+    (instance: typeof ajv) => typeof ajv;
+  addFormats(ajv);
+
+  try {
+    return ajv.compile(schema);
+  } catch (error) {
+    throw new Error(`Invalid or unsupported JSON schema in "${source}": ${errorMessage(error)}`);
   }
+}
 
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const obj = value as Record<string, unknown>;
-    const properties = isSchemaMap(schema.properties) ? schema.properties : undefined;
-    const required = Array.isArray(schema.required)
-      ? schema.required.filter((key): key is string => typeof key === 'string')
-      : [];
-
-    for (const key of required) {
-      if (!(key in obj) || obj[key] === undefined) {
-        errors.push(`${path}: missing required property "${key}"`);
-      }
+function formatValidationErrors(errors: ErrorObject[] | null | undefined): string[] {
+  return (errors ?? []).map((error) => {
+    const path = error.instancePath ? `$${error.instancePath}` : '$';
+    if (error.keyword === 'required') {
+      return `${path}: missing required property "${String(error.params.missingProperty)}"`;
     }
-
-    if (schema.additionalProperties === false && properties) {
-      for (const key of Object.keys(obj)) {
-        if (!(key in properties)) {
-          errors.push(`${path}: unexpected property "${key}"`);
-        }
-      }
+    if (error.keyword === 'additionalProperties') {
+      return `${path}: unexpected property "${String(error.params.additionalProperty)}"`;
     }
-
-    if (properties) {
-      for (const [key, propSchema] of Object.entries(properties)) {
-        if (key in obj && obj[key] !== undefined) {
-          errors.push(...validateAgainstSchema(obj[key], propSchema, `${path}.${key}`));
-        }
-      }
-    }
-  }
-
-  if (Array.isArray(value) && isSchemaObject(schema.items)) {
-    value.forEach((item, index) => {
-      errors.push(...validateAgainstSchema(item, schema.items as Record<string, unknown>, `${path}[${index}]`));
-    });
-  }
-
-  return errors;
+    return `${path}: ${error.message ?? `failed ${error.keyword} validation`}`;
+  });
 }
 
-function isSchemaMap(value: unknown): value is Record<string, Record<string, unknown>> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-  return Object.values(value).every((entry) => isSchemaObject(entry));
+function schemaSizeError(filePath: string): Error {
+  return new Error(
+    `JSON schema file exceeds the ${MAX_SCHEMA_FILE_BYTES}-byte (1 MiB) limit: ${filePath}`
+  );
 }
 
-function isSchemaObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function normalizeTypes(type: unknown): string[] {
-  if (typeof type === 'string') return [type];
-  if (Array.isArray(type)) return type.filter((entry): entry is string => typeof entry === 'string');
-  return [];
-}
-
-function matchesType(value: unknown, type: string): boolean {
-  switch (type) {
-    case 'null':
-      return value === null;
-    case 'object':
-      return value !== null && typeof value === 'object' && !Array.isArray(value);
-    case 'array':
-      return Array.isArray(value);
-    case 'string':
-      return typeof value === 'string';
-    case 'number':
-      return typeof value === 'number' && !Number.isNaN(value);
-    case 'integer':
-      return typeof value === 'number' && Number.isInteger(value);
-    case 'boolean':
-      return typeof value === 'boolean';
-    default:
-      return true;
-  }
-}
-
-function describeType(value: unknown): string {
-  if (value === null) return 'null';
-  if (Array.isArray(value)) return 'array';
-  return typeof value;
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

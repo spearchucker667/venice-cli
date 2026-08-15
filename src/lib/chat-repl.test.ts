@@ -3,6 +3,8 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import {
   isReplExitCommand,
+  isReplHelpCommand,
+  REPL_HELP,
   REPL_PROMPT,
   runChatRepl,
   shouldEnterRepl,
@@ -21,6 +23,11 @@ test('isReplExitCommand accepts exit and quit', () => {
   assert.equal(isReplExitCommand('QUIT'), true);
   assert.equal(isReplExitCommand('  quit  '), true);
   assert.equal(isReplExitCommand('hello'), false);
+});
+
+test('isReplHelpCommand only accepts /help', () => {
+  assert.equal(isReplHelpCommand('/HELP'), true);
+  assert.equal(isReplHelpCommand('help'), false);
 });
 
 test('runChatRepl collects turns until exit without requiring a TTY', async () => {
@@ -42,6 +49,7 @@ test('runChatRepl collects turns until exit without requiring a TTY', async () =
 
   input.write('hello\n');
   input.write('\n');
+  input.write('/help\n');
   input.write('next turn\n');
   input.write('exit\n');
   input.end();
@@ -49,4 +57,5 @@ test('runChatRepl collects turns until exit without requiring a TTY', async () =
   await done;
   assert.deepEqual(turns, ['hello', 'next turn']);
   assert.match(outputText, new RegExp(REPL_PROMPT));
+  assert.match(outputText, new RegExp(REPL_HELP));
 });

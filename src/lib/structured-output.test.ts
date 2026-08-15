@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import fs, { appendFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
   loadResponseFormat,
+  MAX_SCHEMA_FILE_BYTES,
   normalizeResponseFormat,
   parseStructuredContent,
   resolveResponseFormat,
@@ -96,6 +98,65 @@ test('loadResponseFormat reads a schema file and rejects missing files', () => {
   }
 });
 
+test('loadResponseFormat rejects schema files over 1 MiB', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'venice-schema-large-'));
+  try {
+    const schemaPath = join(dir, 'schema.json');
+    writeFileSync(schemaPath, Buffer.alloc(MAX_SCHEMA_FILE_BYTES + 1, 0x20));
+    assert.throws(() => loadResponseFormat(schemaPath), /exceeds.*1 MiB/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadResponseFormat remains bounded if the schema file grows after its size check', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'venice-schema-growing-'));
+  const schemaPath = join(dir, 'schema.json');
+  writeFileSync(schemaPath, '{}');
+  const originalReadSync = fs.readSync;
+  let grew = false;
+  fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
+    if (!grew) {
+      grew = true;
+      appendFileSync(schemaPath, Buffer.alloc(MAX_SCHEMA_FILE_BYTES + 1, 0x20));
+    }
+    return originalReadSync(...args);
+  }) as typeof fs.readSync;
+  syncBuiltinESMExports();
+
+  try {
+    assert.throws(() => loadResponseFormat(schemaPath), /exceeds.*1 MiB/i);
+    assert.equal(grew, true);
+  } finally {
+    fs.readSync = originalReadSync;
+    syncBuiltinESMExports();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('normalizeResponseFormat rejects unsafe wrappers and schemas before use', () => {
+  assert.throws(
+    () => normalizeResponseFormat({ name: '../unsafe', schema: mathSchema }),
+    /name.*letters.*numbers/i
+  );
+  assert.throws(
+    () => normalizeResponseFormat({ name: 'safe', strict: 'yes', schema: mathSchema }),
+    /strict.*boolean/i
+  );
+  assert.throws(
+    () => normalizeResponseFormat({ type: 'object', unknownKeyword: true }),
+    /Invalid or unsupported JSON schema.*unknown keyword/i
+  );
+  assert.throws(
+    () => normalizeResponseFormat({ type: 'text' }),
+    /Invalid or unsupported JSON schema/i
+  );
+  assert.throws(
+    () => normalizeResponseFormat({ type: 'definitely-not-a-json-schema-type' }),
+    /Invalid or unsupported JSON schema/i
+  );
+});
+
 test('parseStructuredContent extracts JSON from fenced responses', () => {
   const parsed = parseStructuredContent('```json\n{"final_answer":"4"}\n```');
   assert.deepEqual(parsed, { final_answer: '4' });
@@ -115,4 +176,67 @@ test('validateAgainstSchema reports missing and extra fields', () => {
   const extra = { ...valid, extra: true };
   const extraErrors = validateAgainstSchema(extra, mathSchema);
   assert.ok(extraErrors.some((error) => error.includes('unexpected property')));
+});
+
+test('validateAgainstSchema enforces modern constraints, composition, and local refs', () => {
+  const schema = {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $defs: {
+      tag: { type: 'string', minLength: 2, maxLength: 5, pattern: '^[a-z]+$' },
+    },
+    type: 'object',
+    properties: {
+      status: { enum: ['ready', 'done'] },
+      version: { const: 2 },
+      score: { type: 'number', minimum: 0, maximum: 10 },
+      tags: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 2,
+        uniqueItems: true,
+        items: { $ref: '#/$defs/tag' },
+      },
+      choice: {
+        oneOf: [
+          { type: 'string', minLength: 3 },
+          { type: 'integer', minimum: 100 },
+        ],
+      },
+      nested: {
+        allOf: [{
+          type: 'object',
+          properties: { enabled: { type: 'boolean' } },
+          required: ['enabled'],
+          additionalProperties: false,
+        }],
+      },
+    },
+    required: ['status', 'version', 'score', 'tags', 'choice', 'nested'],
+    additionalProperties: false,
+  };
+
+  assert.deepEqual(validateAgainstSchema({
+    status: 'ready',
+    version: 2,
+    score: 7,
+    tags: ['ok'],
+    choice: 101,
+    nested: { enabled: true },
+  }, schema), []);
+
+  const errors = validateAgainstSchema({
+    status: 'waiting',
+    version: 1,
+    score: 11,
+    tags: ['A', 'A', 'toolong'],
+    choice: 'x',
+    nested: { extra: true },
+  }, schema);
+  assert.ok(errors.some((error) => error.includes('allowed values')));
+  assert.ok(errors.some((error) => error.includes('equal to constant')));
+  assert.ok(errors.some((error) => error.includes('<= 10')));
+  assert.ok(errors.some((error) => error.includes('more than 2 items')));
+  assert.ok(errors.some((error) => error.includes('oneOf')));
+  assert.ok(errors.some((error) => error.includes('missing required property "enabled"')));
+  assert.ok(errors.some((error) => error.includes('unexpected property "extra"')));
 });

@@ -5,7 +5,12 @@
 import { Command } from 'commander';
 import * as fs from 'fs';
 import * as path from 'path';
-import { textToSpeech, transcribe } from '../lib/api.js';
+import {
+  cloneVoice,
+  listTtsModels,
+  textToSpeech,
+  transcribe,
+} from '../lib/api.js';
 import { getDefaultVoice } from '../lib/config.js';
 import {
   formatSuccess,
@@ -13,6 +18,7 @@ import {
   getChalk,
   detectOutputFormat,
 } from '../lib/output.js';
+import { MAX_AUDIO_DOWNLOAD_BYTES, writeBufferToFile } from '../lib/media.js';
 
 export function registerAudioCommands(program: Command): void {
   // Text to speech
@@ -22,9 +28,11 @@ export function registerAudioCommands(program: Command): void {
     .description('Convert text to speech')
     .option('-v, --voice <voice>', 'Voice to use (default: af_sky)')
     .option('-m, --model <model>', 'Model to use', 'tts-kokoro')
-    .option('-o, --output <path>', 'Output file path', 'output.mp3')
-    .option('--format <fmt>', 'Audio format (mp3|wav|opus|aac|flac)', 'mp3')
+    .option('-o, --output <path>', 'Output file path')
+    .option('--format <fmt>', 'Audio format (mp3|wav|opus|aac|flac|pcm)')
     .option('-s, --speed <speed>', 'Speech speed (0.25-4.0)', '1.0')
+    .option('--temperature <temperature>', 'Sampling temperature (0-2)')
+    .option('--streaming', 'Request sentence-by-sentence audio streaming')
     .action(async (textParts: string[], options) => {
       let text = textParts.join(' ');
       
@@ -41,20 +49,60 @@ export function registerAudioCommands(program: Command): void {
       const voice = options.voice || getDefaultVoice();
 
       try {
-        const audioBuffer = await textToSpeech(text, {
+        const speed = parseNumberOption(options.speed, 'speed', 0.25, 4);
+        const temperature = options.temperature === undefined
+          ? undefined
+          : parseNumberOption(options.temperature, 'temperature', 0, 2);
+        const requestedFormat = options.format || formatFromOutputPath(options.output);
+        const result = await textToSpeech(text, {
           model: options.model,
           voice,
-          format: options.format,
+          format: requestedFormat,
+          speed,
+          temperature,
+          streaming: options.streaming,
         });
 
         // Determine output path
-        let outputPath = options.output;
-        if (!outputPath.endsWith(`.${options.format}`)) {
-          outputPath = outputPath.replace(/\.[^.]+$/, `.${options.format}`);
+        const audioFormat = requestedFormat || formatFromContentType(result.contentType) || 'mp3';
+        const outputPath = ensureAudioExtension(
+          options.output || `output.${audioFormat}`,
+          audioFormat
+        );
+
+        writeBufferToFile(Buffer.from(result.audio), outputPath, {
+          maxBytes: MAX_AUDIO_DOWNLOAD_BYTES,
+          label: 'Text-to-speech audio',
+        });
+        console.log(formatSuccess(`Saved audio to ${outputPath}`));
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+
+  // Voice cloning
+  program
+    .command('voice')
+    .description('Create and manage cloned voices')
+    .command('clone <audio>')
+    .description('Clone a voice from a reference audio sample')
+    .option('-m, --model <model>', 'Voice cloning model', 'tts-chatterbox-hd')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (audioPath: string, options) => {
+      const format = detectOutputFormat(options.format);
+      const resolvedPath = path.resolve(audioPath);
+
+      try {
+        const result = await cloneVoice(resolvedPath, { model: options.model });
+        if (format === 'json') {
+          console.log(JSON.stringify(result, null, 2));
+          return;
         }
 
-        fs.writeFileSync(outputPath, Buffer.from(audioBuffer));
-        console.log(formatSuccess(`Saved audio to ${outputPath}`));
+        console.log(formatSuccess(`Cloned voice: ${result.id}`));
+        console.log(`Model: ${result.model}`);
+        console.log(`Use: venice tts -m ${result.model} -v ${result.id} "Hello"`);
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);
@@ -115,66 +163,58 @@ export function registerAudioCommands(program: Command): void {
   program
     .command('voices')
     .description('List available TTS voices')
+    .option('-m, --model <model>', 'Only list voices for this model')
     .option('-f, --format <format>', 'Output format (pretty|json)')
-    .action((options) => {
+    .action(async (options) => {
       const format = detectOutputFormat(options.format);
       const c = getChalk();
 
-      const voices = [
-        // American English - Female
-        { id: 'af_sky', name: 'Sky', language: 'en-US', gender: 'Female' },
-        { id: 'af_alloy', name: 'Alloy', language: 'en-US', gender: 'Female' },
-        { id: 'af_bella', name: 'Bella', language: 'en-US', gender: 'Female' },
-        { id: 'af_heart', name: 'Heart', language: 'en-US', gender: 'Female' },
-        { id: 'af_jessica', name: 'Jessica', language: 'en-US', gender: 'Female' },
-        { id: 'af_nicole', name: 'Nicole', language: 'en-US', gender: 'Female' },
-        { id: 'af_nova', name: 'Nova', language: 'en-US', gender: 'Female' },
-        { id: 'af_river', name: 'River', language: 'en-US', gender: 'Female' },
-        { id: 'af_sarah', name: 'Sarah', language: 'en-US', gender: 'Female' },
-        // American English - Male
-        { id: 'am_adam', name: 'Adam', language: 'en-US', gender: 'Male' },
-        { id: 'am_echo', name: 'Echo', language: 'en-US', gender: 'Male' },
-        { id: 'am_eric', name: 'Eric', language: 'en-US', gender: 'Male' },
-        { id: 'am_liam', name: 'Liam', language: 'en-US', gender: 'Male' },
-        { id: 'am_michael', name: 'Michael', language: 'en-US', gender: 'Male' },
-        { id: 'am_onyx', name: 'Onyx', language: 'en-US', gender: 'Male' },
-        // British English - Female
-        { id: 'bf_alice', name: 'Alice', language: 'en-GB', gender: 'Female' },
-        { id: 'bf_emma', name: 'Emma', language: 'en-GB', gender: 'Female' },
-        { id: 'bf_lily', name: 'Lily', language: 'en-GB', gender: 'Female' },
-        // British English - Male
-        { id: 'bm_daniel', name: 'Daniel', language: 'en-GB', gender: 'Male' },
-        { id: 'bm_george', name: 'George', language: 'en-GB', gender: 'Male' },
-        { id: 'bm_lewis', name: 'Lewis', language: 'en-GB', gender: 'Male' },
-        // Other Languages
-        { id: 'ff_siwis', name: 'Siwis', language: 'fr-FR', gender: 'Female' },
-        { id: 'if_sara', name: 'Sara', language: 'it-IT', gender: 'Female' },
-        { id: 'im_nicola', name: 'Nicola', language: 'it-IT', gender: 'Male' },
-        { id: 'ef_dora', name: 'Dora', language: 'es-ES', gender: 'Female' },
-        { id: 'em_alex', name: 'Alex', language: 'es-ES', gender: 'Male' },
-        { id: 'pf_dora', name: 'Dora', language: 'pt-BR', gender: 'Female' },
-        { id: 'pm_alex', name: 'Alex', language: 'pt-BR', gender: 'Male' },
-        { id: 'jf_nezumi', name: 'Nezumi', language: 'ja-JP', gender: 'Female' },
-        { id: 'jm_kumo', name: 'Kumo', language: 'ja-JP', gender: 'Male' },
-        { id: 'zf_xiaoxiao', name: 'Xiaoxiao', language: 'zh-CN', gender: 'Female' },
-        { id: 'zm_yunxi', name: 'Yunxi', language: 'zh-CN', gender: 'Male' },
-      ];
+      try {
+        let models = await listTtsModels();
+        if (options.model) {
+          models = models.filter((model) => model.id === options.model);
+        }
+        models.sort((a, b) => a.id.localeCompare(b.id));
 
-      if (format === 'json') {
-        console.log(JSON.stringify(voices, null, 2));
-        return;
+        const voices = models.flatMap((model) =>
+          (model.model_spec?.voices || []).map((voice) => ({
+            id: voice,
+            model: model.id,
+            default: voice === model.model_spec?.default_voice,
+          }))
+        );
+
+        if (format === 'json') {
+          console.log(JSON.stringify(voices, null, 2));
+          return;
+        }
+
+        if (models.length === 0) {
+          console.log(c.yellow('No TTS models found matching your criteria.'));
+          return;
+        }
+
+        console.log(c.bold(`Available TTS Voices (${voices.length})`));
+        for (const model of models) {
+          const modelVoices = model.model_spec?.voices || [];
+          const cloneLabel = model.model_spec?.voice_cloning
+            ? c.dim(` · cloning (${model.model_spec.voice_cloning.retention_days}-day handles)`)
+            : '';
+          console.log(`\n${c.bold(model.id)}${cloneLabel}`);
+          if (modelVoices.length === 0) {
+            console.log(c.dim('  No preset voices advertised.'));
+            continue;
+          }
+          console.log(modelVoices.map((voice) =>
+            voice === model.model_spec?.default_voice ? `${c.cyan(voice)} ${c.dim('(default)')}` : c.cyan(voice)
+          ).join(', '));
+        }
+
+        console.log(`\n${c.dim('Usage: venice tts -m <model> -v <voice> "Hello world"')}`);
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
       }
-
-      console.log(c.bold('Available TTS Voices\n'));
-      console.log(`${c.dim('ID'.padEnd(14))} ${c.dim('Name'.padEnd(12))} ${c.dim('Language'.padEnd(8))} ${c.dim('Gender')}`);
-      console.log(c.dim('─'.repeat(50)));
-
-      for (const voice of voices) {
-        console.log(`${c.cyan(voice.id.padEnd(14))} ${voice.name.padEnd(12)} ${voice.language.padEnd(8)} ${voice.gender}`);
-      }
-
-      console.log(`\n${c.dim('Default: af_sky')}`);
-      console.log(`${c.dim('Usage: venice tts "Hello world" --voice bf_emma')}`);
     });
 }
 
@@ -184,4 +224,48 @@ async function readStdin(): Promise<string> {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf-8').trim();
+}
+
+function parseNumberOption(
+  value: string,
+  name: string,
+  minimum: number,
+  maximum: number
+): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`--${name} must be a number from ${minimum} to ${maximum}.`);
+  }
+  return parsed;
+}
+
+function formatFromContentType(contentType?: string): string | undefined {
+  const formats: Record<string, string> = {
+    'audio/mpeg': 'mp3',
+    'audio/mp3': 'mp3',
+    'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+    'audio/opus': 'opus',
+    'audio/ogg': 'opus',
+    'audio/aac': 'aac',
+    'audio/flac': 'flac',
+    'audio/pcm': 'pcm',
+    'application/octet-stream': 'pcm',
+  };
+  return contentType ? formats[contentType.toLowerCase()] : undefined;
+}
+
+function formatFromOutputPath(outputPath?: string): string | undefined {
+  if (!outputPath) return undefined;
+
+  const extension = path.extname(outputPath).slice(1).toLowerCase();
+  const formats = new Set(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']);
+  return formats.has(extension) ? extension : undefined;
+}
+
+function ensureAudioExtension(outputPath: string, format: string): string {
+  const extension = path.extname(outputPath);
+  if (extension.toLowerCase() === `.${format}`) return outputPath;
+  if (!extension) return `${outputPath}.${format}`;
+  return `${outputPath.slice(0, -extension.length)}.${format}`;
 }
