@@ -245,8 +245,11 @@ venice video generate -d 10s -a 16:9 "A peaceful forest scene"
 # Check status of a video job
 venice video status <queue_id>
 
-# Wait for completion (polls every 5s)
-venice video status -w <queue_id>
+# Wait for completion (polls every 5s, times out after 10 minutes)
+venice video status -w <queue_id> -m <model>
+
+# Set a custom wait timeout in seconds
+venice video status -w <queue_id> -m <model> --timeout 900
 
 # Download completed video
 venice video retrieve <queue_id> -o my_video.mp4
