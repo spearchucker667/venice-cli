@@ -44,10 +44,11 @@ _venice_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="chat search image image-edit image-multi-edit image-bg-remove image-styles tts transcribe models embeddings upscale history usage config characters voices video music completions"
+    local commands="chat search image image-edit image-multi-edit image-bg-remove image-styles tts transcribe models embeddings upscale history usage config characters voices voice video music completions"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
     local video_cmds="generate quote status retrieve complete transcribe upscale models"
+    local voice_cmds="clone"
     local music_cmds="generate quote status retrieve complete models"
     local formats="pretty json markdown raw"
     local models="kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25"
@@ -74,6 +75,10 @@ _venice_completion() {
             ;;
         video)
             COMPREPLY=( \$(compgen -W "\${video_cmds}" -- "\${cur}") )
+            return 0
+            ;;
+        voice)
+            COMPREPLY=( \$(compgen -W "\${voice_cmds}" -- "\${cur}") )
             return 0
             ;;
         music)
@@ -147,7 +152,11 @@ _venice_completion() {
             return 0
             ;;
         tts|speak)
-            COMPREPLY=( \$(compgen -W "-v --voice -m --model -o --output --format" -- "\${cur}") )
+            COMPREPLY=( \$(compgen -W "-v --voice -m --model -o --output --format -s --speed --temperature --streaming" -- "\${cur}") )
+            return 0
+            ;;
+        voice)
+            COMPREPLY=( \$(compgen -W "clone" -- "\${cur}") )
             return 0
             ;;
         transcribe)
@@ -260,6 +269,7 @@ _venice() {
         'config:Manage configuration'
         'characters:List characters from the Venice API catalog'
         'voices:List available TTS voices'
+        'voice:Create and manage cloned voices'
         'completions:Generate shell completions'
     )
 
@@ -426,8 +436,19 @@ _venice() {
                         '-v[Voice to use]:voice:((\$voices))' \\
                         '-m[Model to use]:model:(tts-kokoro)' \\
                         '-o[Output file]:file:_files' \\
-                        '--format[Audio format]:format:(mp3 wav opus)' \\
+                        '--format[Audio format]:format:(mp3 wav opus aac flac pcm)' \\
+                        '-s[Speech speed]:speed:' \\
+                        '--speed[Speech speed]:speed:' \\
+                        '--temperature[Sampling temperature]:temperature:' \\
+                        '--streaming[Request sentence streaming]' \\
                         '*:text:'
+                    ;;
+                voice)
+                    _arguments \\
+                        '1:action:(clone)' \\
+                        '2:audio file:_files' \\
+                        '-m[Voice cloning model]:model:' \\
+                        '-f[Output format]:format:(pretty json)'
                     ;;
                 transcribe)
                     _arguments \\
@@ -510,7 +531,7 @@ function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
 # Main commands
-set -l commands chat search image image-edit image-multi-edit image-bg-remove image-styles upscale tts transcribe video music models embeddings history usage config characters voices completions
+set -l commands chat search image image-edit image-multi-edit image-bg-remove image-styles upscale tts transcribe video music models embeddings history usage config characters voices voice completions
 
 # Disable file completions by default
 complete -c venice -f
@@ -535,6 +556,7 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a usage -d "S
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a config -d "Manage config"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a characters -d "List API characters"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voices -d "List voices"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voice -d "Create and manage cloned voices"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions -d "Shell completions"
 
 # Models
@@ -590,6 +612,15 @@ complete -c venice -n "__fish_seen_subcommand_from image-multi-edit" -s p -l pro
 # TTS options
 complete -c venice -n "__fish_seen_subcommand_from tts" -s v -l voice -d "Voice" -xa "$voices"
 complete -c venice -n "__fish_seen_subcommand_from tts" -s o -l output -d "Output file" -r
+complete -c venice -n "__fish_seen_subcommand_from tts" -s s -l speed -d "Speech speed"
+complete -c venice -n "__fish_seen_subcommand_from tts" -l temperature -d "Sampling temperature"
+complete -c venice -n "__fish_seen_subcommand_from tts" -l streaming -d "Request sentence streaming"
+
+# Voice cloning
+complete -c venice -n "__fish_seen_subcommand_from voice; and not __fish_seen_subcommand_from clone" -a clone -d "Clone a reference voice"
+complete -c venice -n "__fish_seen_subcommand_from voice; and __fish_seen_subcommand_from clone" -s m -l model -d "Voice cloning model"
+complete -c venice -n "__fish_seen_subcommand_from voice; and __fish_seen_subcommand_from clone" -s f -l format -d "Output format" -xa "pretty json"
+complete -c venice -n "__fish_seen_subcommand_from voice; and __fish_seen_subcommand_from clone" -r
 
 # Transcribe options
 complete -c venice -n "__fish_seen_subcommand_from transcribe" -s m -l model -d "Model" -xa "$asr_models"

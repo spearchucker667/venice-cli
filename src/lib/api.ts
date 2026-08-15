@@ -17,10 +17,12 @@ import type {
   ImageGenerationOptions,
 } from '../types/index.js';
 import {
+  MAX_AUDIO_DOWNLOAD_BYTES,
   MAX_IMAGE_EDIT_BYTES,
   MAX_IMAGE_DOWNLOAD_BYTES,
   MAX_UPSCALE_IMAGE_BYTES,
   MAX_TRANSCRIPTION_AUDIO_BYTES,
+  MAX_VOICE_SAMPLE_BYTES,
   MAX_VIDEO_DOWNLOAD_BYTES,
   assertFileSizeWithinLimit,
   formatBytes,
@@ -71,11 +73,16 @@ export class VeniceApiError extends Error {
   }
 }
 
-function getHeaders(authenticated = true): Record<string, string> {
+function getHeaders(
+  authenticated = true,
+  contentType = 'application/json'
+): Record<string, string> {
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
     'User-Agent': `venice-cli/${getVersion()}`,
   };
+  if (contentType) {
+    headers['Content-Type'] = contentType;
+  }
   if (authenticated) {
     headers.Authorization = `Bearer ${requireApiKey()}`;
   }
@@ -810,15 +817,29 @@ export async function textToSpeech(
   options: {
     model?: string;
     voice?: string;
-    format?: 'mp3' | 'wav' | 'opus';
+    format?: 'mp3' | 'wav' | 'opus' | 'aac' | 'flac' | 'pcm';
+    speed?: number;
+    temperature?: number;
+    streaming?: boolean;
   } = {}
-): Promise<ArrayBuffer> {
-  const body = {
+): Promise<{ audio: ArrayBuffer; contentType?: string }> {
+  const body: Record<string, unknown> = {
     model: options.model || 'tts-kokoro',
     input: text,
     voice: options.voice || 'af_sky',
-    response_format: options.format || 'mp3',
   };
+  if (options.format !== undefined) {
+    body.response_format = options.format;
+  }
+  if (options.speed !== undefined) {
+    body.speed = options.speed;
+  }
+  if (options.temperature !== undefined) {
+    body.temperature = options.temperature;
+  }
+  if (options.streaming !== undefined) {
+    body.streaming = options.streaming;
+  }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
@@ -831,11 +852,33 @@ export async function textToSpeech(
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
-
     if (!response.ok) {
-      const error = await response.text();
-      throw VeniceApiError.fromResponse(response.status, error);
+      const errorBytes = await readResponseBodyWithLimit(
+        response,
+        MAX_AUDIO_DOWNLOAD_BYTES,
+        'Text-to-speech API error response'
+      );
+      throw VeniceApiError.fromResponse(response.status, errorBytes.toString('utf-8'));
+    }
+
+    const contentType = response.headers.get('content-type')?.split(';')[0].trim();
+    if (
+      !contentType ||
+      (!contentType.toLowerCase().startsWith('audio/') &&
+        contentType.toLowerCase() !== 'application/octet-stream')
+    ) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(
+        `Text-to-speech returned an unexpected Content-Type: ${contentType || 'missing'}.`
+      );
+    }
+    const bytes = await readResponseBodyWithLimit(
+      response,
+      MAX_AUDIO_DOWNLOAD_BYTES,
+      'Text-to-speech audio'
+    );
+    if (bytes.length === 0) {
+      throw new Error('Text-to-speech response was empty.');
     }
 
     trackUsage({
@@ -843,13 +886,82 @@ export async function textToSpeech(
       model: options.model || 'tts-kokoro',
     });
 
-    return response.arrayBuffer();
+    return {
+      audio: Uint8Array.from(bytes).buffer,
+      contentType,
+    };
   } catch (error) {
-    clearTimeout(timeoutId);
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('Text-to-speech request timed out. Please try with shorter text.');
     }
     throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Create a model-specific voice handle from a reference audio sample
+export async function cloneVoice(
+  audioPath: string,
+  options: { model?: string } = {}
+): Promise<{ id: string; model: string }> {
+  const fs = await import('fs');
+  const path = await import('path');
+
+  if (!fs.existsSync(audioPath)) {
+    throw new Error(`File not found: ${audioPath}`);
+  }
+
+  const acceptedExtensions = new Set(['.mp3', '.wav', '.flac', '.mp4']);
+  const extension = path.extname(audioPath).toLowerCase();
+  if (!acceptedExtensions.has(extension)) {
+    throw new Error(
+      `Unsupported voice sample format "${extension || '(none)'}". ` +
+      'Use MP3, WAV, FLAC, or MP4.'
+    );
+  }
+
+  assertFileSizeWithinLimit(
+    audioPath,
+    MAX_VOICE_SAMPLE_BYTES,
+    'Voice reference sample'
+  );
+  const audioData = await fs.promises.readFile(audioPath);
+  const form = new FormData();
+  form.append('model', options.model || 'tts-chatterbox-hd');
+  form.append(
+    'file',
+    new Blob([new Uint8Array(audioData)], { type: mimeTypeFromPath(audioPath) }),
+    path.basename(audioPath)
+  );
+
+  const spinner = startSpinner('Cloning voice...');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${VENICE_API}/audio/voices`, {
+      method: 'POST',
+      headers: getHeaders(true, ''),
+      body: form,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw VeniceApiError.fromResponse(response.status, errorBody);
+    }
+
+    if (spinner) stopSpinner(true);
+    return await response.json() as { id: string; model: string };
+  } catch (error) {
+    if (spinner) stopSpinner(false);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Voice cloning request timed out. Try a shorter audio sample.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -1099,6 +1211,19 @@ export async function listModels(
   const models = Array.from(merged.values());
   modelsCache = { models, fetchedAt: Date.now() };
   return [...models];
+}
+
+// List TTS models and their model-specific voice catalogs
+export async function listTtsModels(): Promise<Model[]> {
+  const response = await apiRequest<{ data: Model[] }>('/models?type=tts', {
+    method: 'GET',
+    spinnerText: 'Fetching voices...',
+  });
+
+  return (response.data || []).map((model) => ({
+    ...model,
+    type: model.type && model.type.toLowerCase() !== 'text' ? model.type : 'tts',
+  }));
 }
 
 export type ListCharactersOptions = {

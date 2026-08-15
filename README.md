@@ -223,6 +223,17 @@ venice tts "Hello, world!"
 # Custom voice and output
 venice tts -v bf_emma -o greeting.mp3 "Good morning, everyone!"
 
+# Adjust generation and request sentence-by-sentence streaming
+venice tts --speed 1.2 --temperature 0.8 --streaming "Hello, world!"
+
+# Browse live, model-specific voice catalogs
+venice voices
+venice voices --model tts-chatterbox-hd
+
+# Clone a voice, then synthesize with its temporary handle
+venice voice clone reference.wav -m tts-chatterbox-hd
+venice tts -m tts-chatterbox-hd -v vv_... "Hello from a cloned voice"
+
 # From stdin
 echo "Text to speak" | venice tts -o output.mp3
 ```
