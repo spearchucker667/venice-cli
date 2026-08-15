@@ -7,8 +7,9 @@ import * as fs from 'fs';
 import {
   loadHistory,
   clearHistory,
-  ConversationEntry,
+  type ConversationEntry,
 } from '../lib/config.js';
+import { messageContentToText } from '../types/index.js';
 import {
   formatSuccess,
   formatError,
@@ -41,7 +42,7 @@ export function registerHistoryCommand(program: Command): void {
         const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
         const firstUser = conv.messages.find(m => m.role === 'user');
-        const preview = firstUser?.content?.slice(0, 50) || '(no content)';
+        const preview = messageContentToText(firstUser?.content ?? '').slice(0, 50) || '(no content)';
         const truncated = preview.length >= 50 ? preview + '...' : preview;
 
         console.log(`${c.dim(dateStr)} ${c.dim(timeStr)} ${c.cyan(conv.model)}`);
@@ -88,9 +89,8 @@ export function registerHistoryCommand(program: Command): void {
         const dateStr = date.toLocaleDateString();
         const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-        // Get first user message as preview
         const firstUser = conv.messages.find(m => m.role === 'user');
-        const preview = firstUser?.content?.slice(0, 50) || '(no content)';
+        const preview = messageContentToText(firstUser?.content ?? '').slice(0, 50) || '(no content)';
         const truncated = preview.length >= 50 ? preview + '...' : preview;
 
         console.log(`${c.dim(dateStr)} ${c.dim(timeStr)} ${c.cyan(conv.model)}`);
@@ -152,10 +152,11 @@ export function registerHistoryCommand(program: Command): void {
         const roleColor = msg.role === 'user' ? c.green : msg.role === 'assistant' ? c.cyan : c.yellow;
         const roleName = msg.role.charAt(0).toUpperCase() + msg.role.slice(1);
 
+        const text = messageContentToText(msg.content);
         if (format === 'markdown') {
-          console.log(`**${roleName}:** ${msg.content}\n`);
+          console.log(`**${roleName}:** ${text}\n`);
         } else {
-          console.log(`${roleColor(roleName + ':')} ${msg.content}\n`);
+          console.log(`${roleColor(roleName + ':')} ${text}\n`);
         }
       }
     });

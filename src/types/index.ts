@@ -14,12 +14,95 @@ export interface VeniceConfig {
 
 export type OutputFormat = 'pretty' | 'json' | 'markdown' | 'raw';
 
+export interface TextContentPart {
+  type: 'text';
+  text: string;
+}
+
+export interface ImageUrlContentPart {
+  type: 'image_url';
+  image_url: { url: string };
+}
+
+export interface InputAudioContentPart {
+  type: 'input_audio';
+  input_audio: { data: string; format: string };
+}
+
+export interface VideoUrlContentPart {
+  type: 'video_url';
+  video_url: { url: string };
+}
+
+export interface FileContentPart {
+  type: 'file';
+  file: { file_data: string; filename?: string };
+}
+
+export type ContentPart =
+  | TextContentPart
+  | ImageUrlContentPart
+  | InputAudioContentPart
+  | VideoUrlContentPart
+  | FileContentPart;
+
+export type MessageContent = string | ContentPart[];
+
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: MessageContent;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
+}
+
+export function messageContentToText(content: MessageContent): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  return content
+    .map((part) => {
+      switch (part.type) {
+        case 'text':
+          return part.text;
+        case 'image_url':
+          return '[image]';
+        case 'input_audio':
+          return '[audio]';
+        case 'video_url':
+          return '[video]';
+        case 'file': {
+          const filename = safeAttachmentFilename(part.file.filename);
+          return filename ? `[file: ${filename}]` : '[file]';
+        }
+        default:
+          return '';
+      }
+    })
+    .filter(Boolean)
+    .join(' ');
+}
+
+function safeAttachmentFilename(filename: string | undefined): string | undefined {
+  if (!filename || /^(?:data|https?):/i.test(filename)) return undefined;
+  const safe = filename
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/[\\/]+/g, '_')
+    .trim()
+    .slice(0, 255);
+  return safe || undefined;
+}
+
+export function sanitizeMessagesForHistory(messages: Message[]): Message[] {
+  return messages.map((message) => ({
+    ...message,
+    content: messageContentToText(message.content),
+  }));
+}
+
+export function isTextMessageContent(content: MessageContent): content is string {
+  return typeof content === 'string';
 }
 
 export interface ToolCall {
@@ -131,6 +214,12 @@ export interface ModelCapabilities {
   supportsReasoning?: boolean;
   supportsReasoningEffort?: boolean;
   supportsXSearch?: boolean;
+  supportsVision?: boolean;
+  supportsMultipleImages?: boolean;
+  maxImages?: number;
+  supportsAudioInput?: boolean;
+  supportsVideoInput?: boolean;
+  maxVideos?: number;
 }
 
 export interface Model {
@@ -167,6 +256,18 @@ export const supportsReasoningEffort = (model: Model): boolean =>
 
 export const supportsXSearch = (model: Model): boolean =>
   model.model_spec?.capabilities?.supportsXSearch === true;
+
+export const supportsVision = (model: Model): boolean =>
+  model.model_spec?.capabilities?.supportsVision === true;
+
+export const supportsMultipleImages = (model: Model): boolean =>
+  model.model_spec?.capabilities?.supportsMultipleImages === true;
+
+export const supportsAudioInput = (model: Model): boolean =>
+  model.model_spec?.capabilities?.supportsAudioInput === true;
+
+export const supportsVideoInput = (model: Model): boolean =>
+  model.model_spec?.capabilities?.supportsVideoInput === true;
 
 export interface CharacterStats {
   averageRating: number;

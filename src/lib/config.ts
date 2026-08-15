@@ -8,7 +8,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
-import type { VeniceConfig } from '../types/index.js';
+import type { Message, VeniceConfig } from '../types/index.js';
+import { sanitizeMessagesForHistory } from '../types/index.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.venice');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
@@ -166,7 +167,7 @@ export function shouldShowUsage(): boolean {
 export interface ConversationEntry {
   id: string;
   timestamp: string;
-  messages: Array<{ role: string; content: string }>;
+  messages: Message[];
   model: string;
   character?: string;
   privacy?: 'plain' | 'e2ee' | 'tee';
@@ -177,7 +178,8 @@ export function loadHistory(): ConversationEntry[] {
   try {
     if (fs.existsSync(HISTORY_FILE)) {
       const content = fs.readFileSync(HISTORY_FILE, 'utf-8');
-      return JSON.parse(content);
+      const parsed: ConversationEntry[] = JSON.parse(content);
+      return parsed.map(sanitizeConversationForHistory);
     }
   } catch {
     // Return empty on error
@@ -188,14 +190,23 @@ export function loadHistory(): ConversationEntry[] {
 export function saveHistory(history: ConversationEntry[]): void {
   ensureConfigDir();
   // Keep only last 100 conversations
-  const trimmed = history.slice(-100);
+  const trimmed = history.slice(-100).map(sanitizeConversationForHistory);
   fs.writeFileSync(HISTORY_FILE, JSON.stringify(trimmed, null, 2), { mode: 0o600 });
 }
 
 export function addConversation(entry: ConversationEntry): void {
   const history = loadHistory();
-  history.push(entry);
+  history.push(sanitizeConversationForHistory(entry));
   saveHistory(history);
+}
+
+export function sanitizeConversationForHistory(
+  entry: ConversationEntry
+): ConversationEntry {
+  return {
+    ...entry,
+    messages: sanitizeMessagesForHistory(entry.messages),
+  };
 }
 
 export function getLastConversation(): ConversationEntry | undefined {

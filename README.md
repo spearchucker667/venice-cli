@@ -107,6 +107,12 @@ venice chat --x-search "what is trending about venice ai"
 # Improve prompt-cache affinity across related requests
 venice chat --prompt-cache-key session-123 "continue with cached prefix"
 
+# Attach images, files, audio, or video (repeatable; local path or URL)
+venice chat --image photo.jpg "what is in this picture?"
+venice chat --file report.pdf "summarize the findings"
+venice chat --audio clip.wav "transcribe and answer"
+venice chat --video https://example.com/clip.mp4 "describe this clip"
+
 # Use piped context plus an instruction
 cat error.log | venice chat "find the root cause"
 
@@ -144,6 +150,10 @@ venice chat -m e2ee-qwen3-5-122b-a10b -q "This is encrypted but looks like norma
 | `--reasoning-effort <level>` | Reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 | `--prompt-cache-key <key>` | Route requests for better prompt-cache affinity |
 | `--prompt-cache-retention <mode>` | Prompt cache retention (`default`, `extended`, `24h`) |
+| `--image <path>` | Attach an image file or URL (repeatable) |
+| `--file <path>` | Attach a document or source file (repeatable) |
+| `--audio <path>` | Attach an audio file or URL (repeatable) |
+| `--video <path>` | Attach a video file or URL (repeatable) |
 | `--no-thinking` | Disable reasoning on reasoning models |
 | `--strip-thinking` | Strip thinking blocks from response |
 | `--no-venice-prompt` | Disable Venice system prompts |
@@ -554,7 +564,9 @@ bits, so protection there depends on the user profile's inherited ACLs.
 
 ### Conversation History
 
-`--continue` replays **local** history from `~/.venice/history.json`. It is not covered by TEE or E2EE enclave guarantees. E2EE and TEE transcripts are not written to history, and `--continue` refuses to mix encrypted and plaintext sessions.
+Remote attachments are downloaded by the CLI before the request rather than fetched by the API server. Local files, data URLs, and downloads are MIME-checked, must be non-empty, use per-type size limits and download timeouts, and share a 100 MiB combined attachment limit.
+
+`--continue` replays **local** history from `~/.venice/history.json`. Attachment bytes and source URLs are not retained there; history stores only the message text and generic attachment markers (including a safe filename summary for files). It is not covered by TEE or E2EE enclave guarantees. E2EE and TEE transcripts are not written to history, and `--continue` refuses to mix encrypted and plaintext sessions.
 
 ```bash
 # List recent conversations
@@ -744,7 +756,7 @@ venice chat -m <e2ee-capable-model> "Your private message here"
 venice chat -m <e2ee-capable-model> --no-e2ee "TEE verified, not encrypted"
 ```
 
-**Note:** E2EE mode disables tools and web search to maintain end-to-end encryption.
+**Note:** E2EE mode disables tools and web search to maintain end-to-end encryption. Multimodal attachments (`--image`, `--file`, `--audio`, `--video`) are not supported with E2EE or TEE models.
 
 ### TEE Models
 

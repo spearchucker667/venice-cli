@@ -16,6 +16,7 @@ import {
 } from './chat.js';
 import { getToolDefinitions } from '../lib/tools.js';
 import { encryptMessage, generateEphemeralKeyPair } from '../lib/e2ee.js';
+import { buildUserMessageContent } from '../lib/chat-attachments.js';
 import type { Message } from '../types/index.js';
 
 const cliPath = fileURLToPath(new URL('../index.js', import.meta.url));
@@ -53,6 +54,10 @@ test('chat --help lists structured output, reasoning, and X search flags', () =>
     assert.match(result.stdout, /--x-search/);
     assert.match(result.stdout, /--prompt-cache-key/);
     assert.match(result.stdout, /--prompt-cache-retention/);
+    assert.match(result.stdout, /--image/);
+    assert.match(result.stdout, /--file/);
+    assert.match(result.stdout, /--audio/);
+    assert.match(result.stdout, /--video/);
   } finally {
     rmSync(homeDir, { recursive: true, force: true });
   }
@@ -308,6 +313,49 @@ test('chat rejects --no-thinking with a non-none reasoning effort', () => {
     );
     assert.notEqual(result.status, 0);
     assert.match(`${result.stderr}\n${result.stdout}`, /Cannot combine --no-thinking/i);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('chat --image fails before the API when the file is missing', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-image-'));
+
+  try {
+    const result = runCli(
+      ['chat', '--image', join(homeDir, 'missing.jpg'), 'what is in this picture?'],
+      homeDir
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}\n${result.stdout}`, /Image not found/i);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('chat rejects explicit E2EE attachments before any API request or file read', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-e2ee-attachment-'));
+  try {
+    const imagePath = join(homeDir, 'photo.png');
+    writeFileSync(imagePath, Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64'
+    ));
+    const result = runCli([
+      'chat',
+      '--e2ee',
+      '--model',
+      'test-model',
+      '--image',
+      imagePath,
+      'describe this',
+    ], homeDir);
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      `${result.stderr}\n${result.stdout}`,
+      /No attachment data was read or sent/i
+    );
   } finally {
     rmSync(homeDir, { recursive: true, force: true });
   }
@@ -607,6 +655,53 @@ test('structured non-streaming output stays valid JSON across tool rounds', asyn
     assert.equal(options.prompt_cache_key, 'session-123');
     assert.equal(options.prompt_cache_retention, '24h');
     assert.deepEqual(options.venice_parameters, { enable_x_search: true });
+  }
+});
+
+test('non-streaming tool rounds reuse encoded attachments without rereading files', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'venice-chat-round-attachment-'));
+  const imagePath = join(dir, 'photo.png');
+  writeFileSync(imagePath, Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  ));
+
+  try {
+    const content = await buildUserMessageContent('describe this', {
+      images: [imagePath],
+      files: [],
+      audio: [],
+      videos: [],
+    });
+    rmSync(imagePath);
+    const messages: Message[] = [{ role: 'user', content }];
+    const seenUserContent: Message['content'][] = [];
+    let round = 0;
+
+    await nonStreamChat(messages, 'test-model', [], false, 'raw', {
+      quiet: true,
+      completion: async (roundMessages) => {
+        seenUserContent.push(roundMessages[0].content);
+        round++;
+        if (round === 1) {
+          return {
+            content: '',
+            tool_calls: [{
+              id: 'call-disabled',
+              type: 'function',
+              function: { name: 'disabled', arguments: '{}' },
+            }],
+            finish_reason: 'tool_calls',
+          };
+        }
+        return { content: 'done', finish_reason: 'stop' };
+      },
+    });
+
+    assert.equal(round, 2);
+    assert.deepEqual(seenUserContent, [content, content]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

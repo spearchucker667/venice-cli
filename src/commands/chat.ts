@@ -64,6 +64,15 @@ import {
   REASONING_EFFORTS,
 } from '../lib/structured-output.js';
 import type { ChatCompletionRequestOptions } from '../lib/api.js';
+import {
+  assertAttachmentCapabilities,
+  assertAttachmentsAllowedForPrivacy,
+  assertLocalAttachmentFiles,
+  buildUserMessageContent,
+  collectOptionValue,
+  hasChatAttachments,
+  parseChatAttachments,
+} from '../lib/chat-attachments.js';
 
 interface E2EEContext {
   privateKey: Uint8Array;
@@ -74,6 +83,7 @@ interface E2EEContext {
 }
 
 export const MAX_TOOL_ROUNDS = 10;
+export const MAX_CHAT_STDIN_BYTES = 1024 * 1024;
 type ChatCompletionFn = typeof chatCompletion;
 type ChatCompletionStreamFn = typeof chatCompletionStream;
 
@@ -250,6 +260,11 @@ function encryptMessagesForE2EE(
 ): Message[] {
   return messages.map((msg) => {
     if (msg.role === 'user' || msg.role === 'system') {
+      if (typeof msg.content !== 'string') {
+        throw new Error(
+          'E2EE does not support multimodal attachments. Use a text-only prompt, or omit --image/--file/--audio/--video.'
+        );
+      }
       return {
         ...msg,
         content: encryptMessage(msg.content, modelPublicKey),
@@ -287,6 +302,10 @@ export function registerChatCommand(program: Command): void {
     .option('-q, --quiet', 'Hide E2EE/TEE status messages (show only response)')
     .option('-f, --format <format>', 'Output format (pretty|json|markdown|raw)')
     .option('--list-tools', 'List available tools')
+    .option('--image <path>', 'Attach an image file or URL (repeatable)', collectOptionValue, [])
+    .option('--file <path>', 'Attach a document or source file (repeatable)', collectOptionValue, [])
+    .option('--audio <path>', 'Attach an audio file or URL (repeatable)', collectOptionValue, [])
+    .option('--video <path>', 'Attach a video file or URL (repeatable)', collectOptionValue, [])
     .action(async (promptParts: string[], options) => {
       const c = getChalk();
 
@@ -338,14 +357,27 @@ export function registerChatCommand(program: Command): void {
 
       // Get prompt from args and optionally stdin
       let prompt = promptParts.join(' ');
+      const attachments = parseChatAttachments(options);
+
+      try {
+        assertLocalAttachmentFiles(attachments);
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
       let pipedInput = '';
 
       if (!process.stdin.isTTY) {
-        pipedInput = await readStdin();
+        try {
+          pipedInput = await readStdin();
+        } catch (error) {
+          console.error(formatError(error instanceof Error ? error.message : String(error)));
+          process.exit(1);
+        }
       }
 
       const userMessage = buildChatUserMessage(prompt, pipedInput);
-      if (!userMessage) {
+      if (!userMessage && !hasChatAttachments(attachments)) {
         console.error(formatError('No prompt provided. Usage: venice chat "Your message"'));
         process.exit(1);
       }
@@ -354,6 +386,20 @@ export function registerChatCommand(program: Command): void {
       const format = detectOutputFormat(options.format);
       const shouldStream = options.stream !== false && !isPiped() && format === 'pretty' && !responseFormat;
       const quietStatus = options.quiet || Boolean(responseFormat) || format === 'json';
+
+      if (
+        hasChatAttachments(attachments) &&
+        (
+          options.e2ee === true ||
+          (options.e2ee !== false && modelIdImpliesPrivateMode(model))
+        )
+      ) {
+        console.error(formatError(
+          'Multimodal attachments are not supported with E2EE or TEE. ' +
+          'No attachment data was read or sent.'
+        ));
+        process.exit(1);
+      }
 
       let useE2EE = false;
       let useTEE = false;
@@ -396,6 +442,21 @@ export function registerChatCommand(program: Command): void {
       if (capabilityError) {
         console.error(formatError(capabilityError));
         process.exit(1);
+      }
+
+      if (hasChatAttachments(attachments)) {
+        try {
+          assertAttachmentsAllowedForPrivacy(useE2EE, useTEE);
+          if (catalogFailed || !modelInfo) {
+            throw new Error(
+              'Could not verify attachment capabilities for the selected model; refusing to send attachments.'
+            );
+          }
+          assertAttachmentCapabilities(modelInfo, attachments);
+        } catch (error) {
+          console.error(formatError(error instanceof Error ? error.message : String(error)));
+          process.exit(1);
+        }
       }
 
       const lastConv = options.continue ? getLastConversation() : undefined;
@@ -493,8 +554,19 @@ export function registerChatCommand(program: Command): void {
         messages.push({ role: 'system', content: options.system });
       }
 
-      // Add user message from stdin/args
-      messages.push(userMessage);
+      // Add user message
+      let userContent: Message['content'];
+      try {
+        const textContent =
+          userMessage && typeof userMessage.content === 'string'
+            ? userMessage.content
+            : '';
+        userContent = await buildUserMessageContent(textContent, attachments);
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+      messages.push({ role: 'user', content: userContent });
 
       // Get tool definitions
       const toolNames = options.tools?.split(',').map((t: string) => t.trim()) || [];
@@ -1128,8 +1200,14 @@ function outputResponse(content: string, format: OutputFormat): void {
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of process.stdin) {
-    chunks.push(chunk);
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > MAX_CHAT_STDIN_BYTES) {
+      throw new Error('Chat input from stdin exceeds the 1 MiB limit.');
+    }
+    chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString('utf-8').trim();
 }
@@ -1165,16 +1243,21 @@ export function isLegacyLocalCharacter(character?: string): boolean {
 
 function hasLegacyLocalPersonaPrompt(
   character: string,
-  messages?: Array<{ role: string; content?: string }>
+  messages?: Array<{ role: string; content?: Message['content'] }>
 ): boolean {
   const prompt = LEGACY_LOCAL_CHARACTER_PROMPTS[character.toLowerCase()];
   if (!prompt) return false;
-  return Boolean(messages?.some((message) => message.role === 'system' && message.content === prompt));
+  return Boolean(messages?.some(
+    (message) =>
+      message.role === 'system' &&
+      typeof message.content === 'string' &&
+      message.content === prompt
+  ));
 }
 
 export function restoreCharacterSlug(lastConv?: {
   character?: string;
-  messages?: Array<{ role: string; content?: string }>;
+  messages?: Array<{ role: string; content?: Message['content'] }>;
 }): string | undefined {
   if (!lastConv?.character) return undefined;
   // Old local personas stored the name plus an injected system prompt. Skip
