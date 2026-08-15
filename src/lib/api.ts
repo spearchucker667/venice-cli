@@ -791,7 +791,13 @@ async function retrieveVideoResponse(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
     let fileWriteStarted = false;
-    let successfulBodyConsumptionStarted = false;
+    let requestTimeoutActive = true;
+    const clearRequestTimeout = () => {
+      if (requestTimeoutActive) {
+        clearTimeout(timeoutId);
+        requestTimeoutActive = false;
+      }
+    };
 
     try {
       const response = await fetch(`${VENICE_API}/video/retrieve`, {
@@ -806,12 +812,15 @@ async function retrieveVideoResponse(
         throw VeniceApiError.fromResponse(response.status, errorBody);
       }
 
-      successfulBodyConsumptionStarted = true;
       const inspected = await inspectVideoRetrieveResponse(response);
       if (inspected.kind === 'status') {
         if (spinner) stopSpinner(true);
         return inspected;
       }
+
+      // The request deadline bounds headers and body inspection only. Once an
+      // MP4 is confirmed, chunk-level inactivity timeouts protect the download.
+      clearRequestTimeout();
 
       if (options.statusOnly) {
         await inspected.reader.cancel();
@@ -823,7 +832,9 @@ async function retrieveVideoResponse(
       if (!options.outputPath) {
         await inspected.reader.cancel();
         inspected.reader.releaseLock();
-        throw new Error('An output path is required to save the retrieved video.');
+        throw new VideoRetrieveValidationError(
+          'An output path is required to save the retrieved video.'
+        );
       }
 
       fileWriteStarted = true;
@@ -842,9 +853,8 @@ async function retrieveVideoResponse(
     } catch (error) {
       const retryable =
         !fileWriteStarted &&
-        !successfulBodyConsumptionStarted &&
         attempt < MAX_RETRIES &&
-        !(error instanceof Error && error.name === 'AbortError') &&
+        !(error instanceof VideoRetrieveValidationError) &&
         (
           !(error instanceof VeniceApiError) ||
           error.isRetryable() ||
@@ -864,7 +874,7 @@ async function retrieveVideoResponse(
       }
       throw error;
     } finally {
-      clearTimeout(timeoutId);
+      clearRequestTimeout();
     }
   }
 
@@ -880,12 +890,14 @@ type InspectedVideoResponse =
       initialChunks: Buffer[];
     };
 
+class VideoRetrieveValidationError extends Error {}
+
 async function inspectVideoRetrieveResponse(
   response: Response
 ): Promise<InspectedVideoResponse> {
   const reader = response.body?.getReader();
   if (!reader) {
-    throw new Error('Video retrieve response had no body.');
+    throw new VideoRetrieveValidationError('Video retrieve response had no body.');
   }
 
   const chunks: Buffer[] = [];
@@ -915,7 +927,9 @@ async function inspectVideoRetrieveResponse(
       }
 
       if (totalBytes > MAX_VIDEO_STATUS_BYTES) {
-        throw new Error('Video status response exceeded the maximum expected size.');
+        throw new VideoRetrieveValidationError(
+          'Video status response exceeded the maximum expected size.'
+        );
       }
     }
 
@@ -937,7 +951,7 @@ async function inspectVideoRetrieveResponse(
 }
 
 function unexpectedVideoRetrieveType(response: Response): Error {
-  return new Error(
+  return new VideoRetrieveValidationError(
     `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}": ` +
     'response is neither JSON nor a valid MP4.'
   );

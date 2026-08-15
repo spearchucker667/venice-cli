@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
+import type { ReadableStreamReadResult } from 'stream/web';
 
 const MB = 1024 * 1024;
 
@@ -11,6 +12,27 @@ export const MAX_UPSCALE_IMAGE_BYTES = 25 * MB;
 export const MAX_TRANSCRIPTION_AUDIO_BYTES = 200 * MB;
 export const MAX_VIDEO_REFERENCE_IMAGE_BYTES = 20 * MB;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 120000;
+const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 120000;
+
+export async function readWithInactivityTimeout<T>(
+  reader: ReadableStreamDefaultReader<T>,
+  timeoutMs: number
+): Promise<ReadableStreamReadResult<T>> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Download stalled for ${Math.ceil(timeoutMs / 1000)} seconds.`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+}
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -206,10 +228,13 @@ export async function streamResponseToFile(
   options: {
     maxBytes: number;
     label: string;
+    inactivityTimeoutMs?: number;
   }
 ): Promise<{ bytesWritten: number; contentType: string }> {
   let tempPath: string | null = null;
   let bytesWritten = 0;
+  const inactivityTimeoutMs =
+    options.inactivityTimeoutMs ?? DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS;
 
   try {
     const contentLength = parseContentLength(response.headers.get('content-length'));
@@ -232,7 +257,10 @@ export async function streamResponseToFile(
         yield chunk;
       }
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readWithInactivityTimeout(
+          reader,
+          inactivityTimeoutMs
+        );
         if (done) return;
         yield Buffer.from(value);
       }
