@@ -25,7 +25,12 @@ interface CliResult {
   stderr: string;
 }
 
-function runCli(args: string[], homeDir: string, apiBaseUrl: string): Promise<CliResult> {
+function runCli(
+  args: string[],
+  homeDir: string,
+  apiBaseUrl: string,
+  extraEnv: NodeJS.ProcessEnv = {}
+): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cliPath, ...args], {
       env: {
@@ -35,6 +40,7 @@ function runCli(args: string[], homeDir: string, apiBaseUrl: string): Promise<Cl
         NO_COLOR: '1',
         VENICE_API_BASE_URL: apiBaseUrl,
         VENICE_API_KEY: 'test-admin-key',
+        ...extraEnv,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -45,6 +51,60 @@ function runCli(args: string[], homeDir: string, apiBaseUrl: string): Promise<Cl
     child.once('error', reject);
     child.once('close', (status) => resolve({ status, stdout, stderr }));
   });
+}
+
+function secretFileFailureEnv(
+  homeDir: string,
+  failure: 'remove' | 'cleanup'
+): NodeJS.ProcessEnv {
+  const preloadPath = join(homeDir, 'secret-file-failure.cjs');
+  writeFileSync(preloadPath, `
+const fs = require('node:fs');
+const { syncBuiltinESMExports } = require('node:module');
+const failure = process.env.VENICE_TEST_SECRET_FILE_FAILURE;
+const temporaryDescriptors = new Set();
+const isTemporary = (path) => String(path).endsWith('.tmp');
+const injectedError = (code) => {
+  const error = new Error('injected venice-secret-once');
+  error.code = code;
+  return error;
+};
+const originalOpenSync = fs.openSync;
+const originalCloseSync = fs.closeSync;
+const originalUnlinkSync = fs.unlinkSync;
+const originalRmSync = fs.rmSync;
+fs.openSync = function (path, ...args) {
+  const descriptor = originalOpenSync.call(this, path, ...args);
+  if (isTemporary(path)) temporaryDescriptors.add(descriptor);
+  return descriptor;
+};
+fs.closeSync = function (descriptor, ...args) {
+  if (failure === 'cleanup' && temporaryDescriptors.has(descriptor)) {
+    throw injectedError('EIO');
+  }
+  return originalCloseSync.call(this, descriptor, ...args);
+};
+fs.unlinkSync = function (path, ...args) {
+  if (failure === 'remove' && isTemporary(path)) {
+    throw injectedError('EACCES');
+  }
+  return originalUnlinkSync.call(this, path, ...args);
+};
+fs.rmSync = function (path, ...args) {
+  if ((failure === 'remove' || failure === 'cleanup') && isTemporary(path)) {
+    throw injectedError('EACCES');
+  }
+  return originalRmSync.call(this, path, ...args);
+};
+syncBuiltinESMExports();
+`);
+  const requireOption = `--require=${preloadPath}`;
+  return {
+    NODE_OPTIONS: process.env.NODE_OPTIONS
+      ? `${process.env.NODE_OPTIONS} ${requireOption}`
+      : requireOption,
+    VENICE_TEST_SECRET_FILE_FAILURE: failure,
+  };
 }
 
 async function withApiServer(
@@ -168,6 +228,98 @@ test('keys create defaults to a bounded inference credential', async () => {
     consumptionLimit: { usd: 5 },
     limitPeriod: 'MONTH',
   });
+});
+
+test('keys create succeeds and warns when its published temporary duplicate remains', async () => {
+  const methods: string[] = [];
+  await withApiServer((request, response) => {
+    methods.push(request.method ?? '');
+    request.resume();
+    request.on('end', () => {
+      sendJson(response, {
+        data: {
+          id: 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5',
+          apiKey: 'venice-secret-once',
+          apiKeyType: 'INFERENCE',
+          description: 'ci',
+        },
+      });
+    });
+  }, async (baseUrl, homeDir) => {
+    for (const format of ['json', 'pretty']) {
+      const secretFile = join(homeDir, `${format}.key`);
+      const result = await runCli(
+        ['keys', 'create', '--name', 'ci', '--output', secretFile, '--format', format],
+        homeDir,
+        baseUrl,
+        secretFileFailureEnv(homeDir, 'remove')
+      );
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(secretFile, 'utf8'), 'venice-secret-once\n');
+      assert.equal(statSync(secretFile).mode & 0o777, 0o600);
+      assert.doesNotMatch(result.stdout, /venice-secret-once/);
+      assert.doesNotMatch(result.stderr, /venice-secret-once/);
+
+      const temporary = readdirSync(homeDir)
+        .find((name) => name.startsWith(`.${format}.key-`) && name.endsWith('.tmp'));
+      assert.ok(temporary);
+      const temporaryPath = join(homeDir, temporary);
+      assert.equal(readFileSync(temporaryPath, 'utf8'), 'venice-secret-once\n');
+      assert.equal(statSync(temporaryPath).mode & 0o777, 0o600);
+      assert.ok(result.stderr.includes(temporaryPath));
+      assert.match(result.stderr, /0600 temporary duplicate remains/);
+      assert.match(result.stderr, /Remove this temporary file/);
+
+      if (format === 'json') {
+        assert.equal(JSON.parse(result.stdout).secretFile, secretFile);
+      } else {
+        assert.match(result.stdout, /Created INFERENCE API key/);
+        assert.match(result.stdout, /Secret saved to:/);
+      }
+    }
+  });
+  assert.deepEqual(methods, ['POST', 'POST']);
+});
+
+test('keys create cleanup reports close and removal failures and rolls back', async () => {
+  const keyId = 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5';
+  const methods: string[] = [];
+  await withApiServer((request, response) => {
+    methods.push(request.method ?? '');
+    if (request.method === 'POST') {
+      request.resume();
+      request.on('end', () => {
+        sendJson(response, {
+          data: {
+            id: keyId,
+            apiKey: 'venice-secret-once',
+            apiKeyType: 'INFERENCE',
+            description: 'ci',
+          },
+        });
+      });
+      return;
+    }
+    sendJson(response, { success: true });
+  }, async (baseUrl, homeDir) => {
+    const secretFile = join(homeDir, 'ci.key');
+    const result = await runCli(
+      ['keys', 'create', '--name', 'ci', '--output', secretFile],
+      homeDir,
+      baseUrl,
+      secretFileFailureEnv(homeDir, 'cleanup')
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /close failed \(EIO\); remove failed \(EACCES\)/);
+    assert.match(result.stderr, new RegExp(`New API key ${keyId} was deleted`));
+    assert.doesNotMatch(result.stdout, /venice-secret-once/);
+    assert.doesNotMatch(result.stderr, /venice-secret-once/);
+    assert.equal(existsSync(secretFile), false);
+    assert.equal(readdirSync(homeDir).some((name) => name.endsWith('.tmp')), true);
+  });
+  assert.deepEqual(methods, ['POST', 'DELETE']);
 });
 
 test('keys create deletes the remote key when committing the secret fails', async () => {

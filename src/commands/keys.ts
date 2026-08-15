@@ -118,8 +118,9 @@ export function registerKeysCommand(program: Command): void {
         throw error;
       }
 
+      let saveWarning: string | undefined;
       try {
-        secretFile.commit(created.apiKey);
+        saveWarning = secretFile.commit(created.apiKey);
       } catch (saveError) {
         let cleanupError: unknown;
         try {
@@ -149,6 +150,10 @@ export function registerKeysCommand(program: Command): void {
           `Failed to save the API key secret (${saveFailure}). ` +
           `New API key ${keyId} was deleted; the secret was not saved.`
         );
+      }
+
+      if (saveWarning !== undefined) {
+        console.error(formatWarning(saveWarning));
       }
 
       if (detectOutputFormat(options.format) === 'json') {
@@ -287,7 +292,7 @@ function toSafeApiKeyMetadata(key: ApiKeyMetadata): ApiKeyMetadata {
 
 function prepareSecretFile(output: string): {
   path: string;
-  commit: (secret: string) => void;
+  commit: (secret: string) => string | undefined;
   cleanup: () => void;
 } {
   const requestedDestination = resolve(output);
@@ -315,41 +320,66 @@ function prepareSecretFile(output: string): {
   return {
     path: destination,
     commit(secret: string) {
+      writeFileSync(descriptor, `${secret}\n`, { encoding: 'utf8' });
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      open = false;
+      chmodSync(temporary, 0o600);
+      linkSync(temporary, destination);
+      committed = true;
+
       try {
-        writeFileSync(descriptor, `${secret}\n`, { encoding: 'utf8' });
-        fsyncSync(descriptor);
-        closeSync(descriptor);
-        open = false;
-        chmodSync(temporary, 0o600);
-        linkSync(temporary, destination);
         unlinkSync(temporary);
-        committed = true;
-      } catch (error) {
-        if (open) {
-          try {
-            closeSync(descriptor);
-            open = false;
-          } catch {
-            // cleanup() retries the close without hiding the original save failure.
-          }
-        }
+        return undefined;
+      } catch {
         try {
           rmSync(temporary, { force: true });
         } catch {
-          // cleanup() retries removal and reports its failure to the caller.
+          // Verify below whether the duplicate still exists.
         }
-        throw error;
+
+        try {
+          lstatSync(temporary);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            return undefined;
+          }
+        }
+
+        return (
+          `The API key was created and saved, but a 0600 temporary duplicate remains at ` +
+          `${temporary}. Remove this temporary file.`
+        );
       }
     },
     cleanup() {
       if (committed) return;
+      const failures: string[] = [];
       if (open) {
-        closeSync(descriptor);
-        open = false;
+        try {
+          closeSync(descriptor);
+          open = false;
+        } catch (error) {
+          failures.push(describeCleanupFailure('close', error));
+        }
       }
-      rmSync(temporary, { force: true });
+      try {
+        rmSync(temporary, { force: true });
+      } catch (error) {
+        failures.push(describeCleanupFailure('remove', error));
+      }
+      if (failures.length > 0) {
+        throw new Error(
+          `Failed to clean up temporary API key file ${temporary}: ${failures.join('; ')}`
+        );
+      }
     },
   };
+}
+
+function describeCleanupFailure(operation: string, error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return `${operation} failed${typeof code === 'string' ? ` (${code})` : ''}`;
 }
 
 function summarizeError(error: unknown, secret: string): string {
