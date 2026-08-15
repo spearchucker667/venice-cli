@@ -117,7 +117,7 @@ venice chat -m e2ee-qwen3-5-122b-a10b -q "This is encrypted but looks like norma
 | `-c, --character <name>` | Character persona |
 | `-t, --tools <tools>` | Comma-separated list of tools |
 | `--interactive-tools` | Approve each tool call |
-| `--continue` | Continue last conversation |
+| `--continue` | Continue last conversation (local history only; not covered by TEE/E2EE guarantees) |
 | `--no-stream` | Disable streaming output |
 | `--web-search` | Enable web search for current information |
 | `--no-thinking` | Disable reasoning on reasoning models |
@@ -390,6 +390,8 @@ config file to `0600`. Windows does not implement equivalent POSIX permission
 bits, so protection there depends on the user profile's inherited ACLs.
 
 ### Conversation History
+
+`--continue` replays **local** history from `~/.venice/history.json`. It is not covered by TEE or E2EE enclave guarantees. E2EE and TEE transcripts are not written to history, and `--continue` refuses to mix encrypted and plaintext sessions.
 
 ```bash
 # List recent conversations
