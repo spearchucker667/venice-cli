@@ -34,6 +34,7 @@ test('runChatRepl collects turns until exit without requiring a TTY', async () =
   const input = new PassThrough();
   const output = new PassThrough();
   const turns: string[] = [];
+  const signals: AbortSignal[] = [];
   let outputText = '';
   output.on('data', (chunk) => {
     outputText += chunk.toString();
@@ -42,8 +43,9 @@ test('runChatRepl collects turns until exit without requiring a TTY', async () =
   const done = runChatRepl({
     input,
     output,
-    onTurn: async (line) => {
+    onTurn: async (line, signal) => {
       turns.push(line);
+      signals.push(signal);
     },
   });
 
@@ -56,6 +58,9 @@ test('runChatRepl collects turns until exit without requiring a TTY', async () =
 
   await done;
   assert.deepEqual(turns, ['hello', 'next turn']);
+  assert.equal(signals.length, 2);
+  assert.notEqual(signals[0], signals[1]);
+  assert.ok(signals.every((signal) => !signal.aborted));
   assert.match(outputText, new RegExp(REPL_PROMPT));
   assert.match(outputText, new RegExp(REPL_HELP));
 });

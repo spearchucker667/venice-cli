@@ -552,6 +552,106 @@ test('streaming chat preserves options and handles sequential tool rounds', asyn
   }
 });
 
+test('--strip-thinking excludes hidden content from streaming tool follow-up context', async () => {
+  const messages: Message[] = [{ role: 'user', content: 'Use a tool' }];
+  let round = 0;
+  let followUpMessages: Message[] | undefined;
+
+  await streamChat(
+    messages,
+    'test-model',
+    [],
+    false,
+    'raw',
+    {
+      quiet: true,
+      stripThinking: true,
+      completionStream: async function* (roundMessages) {
+        round++;
+        if (round === 1) {
+          yield { content: 'visible <thi', done: false };
+          yield { content: 'nk>hidden plan</think> answer', done: false };
+          yield {
+            tool_calls: [{
+              index: 0,
+              id: 'call-disabled',
+              type: 'function',
+              function: { name: 'disabled', arguments: '{}' },
+            }],
+            done: false,
+          };
+          yield { finish_reason: 'tool_calls', done: false };
+          yield { done: true };
+          return;
+        }
+        followUpMessages = structuredClone(roundMessages);
+        yield { content: 'done', done: false };
+        yield { finish_reason: 'stop', done: false };
+        yield { done: true };
+      },
+    }
+  );
+
+  assert.ok(followUpMessages);
+  const toolCallMessage = followUpMessages.find((message) => message.role === 'assistant');
+  assert.equal(toolCallMessage?.content, 'visible  answer');
+  assert.doesNotMatch(JSON.stringify(followUpMessages), /hidden plan|<think>/);
+});
+
+test('--strip-thinking excludes hidden content from the next streaming REPL turn', async () => {
+  const messages: Message[] = [{ role: 'user', content: 'first prompt' }];
+  await streamChat(messages, 'test-model', [], false, 'raw', {
+    quiet: true,
+    stripThinking: true,
+    completionStream: async function* () {
+      yield { reasoning_content: 'redacted reasoning', done: false };
+      yield { content: '<think>hidden reasoning</think>safe answer', done: false };
+      yield { finish_reason: 'stop', done: false };
+      yield { done: true };
+    },
+  });
+
+  messages.push({ role: 'user', content: 'second prompt' });
+  let nextTurnMessages: Message[] | undefined;
+  await streamChat(messages, 'test-model', [], false, 'raw', {
+    quiet: true,
+    stripThinking: true,
+    completionStream: async function* (roundMessages) {
+      nextTurnMessages = structuredClone(roundMessages);
+      yield { content: 'second answer', done: false };
+      yield { finish_reason: 'stop', done: false };
+      yield { done: true };
+    },
+  });
+
+  assert.ok(nextTurnMessages);
+  assert.equal(
+    nextTurnMessages.find((message) => message.role === 'assistant')?.content,
+    'safe answer'
+  );
+  assert.doesNotMatch(
+    JSON.stringify(nextTurnMessages),
+    /hidden reasoning|redacted reasoning|<think>/
+  );
+});
+
+test('--strip-thinking preserves an unclosed thinking tag in assistant context', async () => {
+  const messages: Message[] = [{ role: 'user', content: 'prompt' }];
+  await streamChat(messages, 'test-model', [], false, 'raw', {
+    quiet: true,
+    stripThinking: true,
+    completionStream: async function* () {
+      yield { content: 'before <think>unfinished', done: false };
+      yield { done: true };
+    },
+  });
+
+  assert.deepEqual(messages.at(-1), {
+    role: 'assistant',
+    content: 'before <think>unfinished',
+  });
+});
+
 test('E2EE streaming strips server-side controls from the request', async () => {
   let seenOptions: Record<string, unknown> | undefined;
   const clientKeys = generateEphemeralKeyPair();

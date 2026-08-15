@@ -19,7 +19,7 @@ export function isReplHelpCommand(line: string): boolean {
 export async function runChatRepl(options: {
   input: NodeJS.ReadableStream;
   output: NodeJS.WritableStream;
-  onTurn: (prompt: string) => Promise<void>;
+  onTurn: (prompt: string, signal: AbortSignal) => Promise<void>;
   prompt?: string;
 }): Promise<void> {
   const promptLabel = options.prompt ?? REPL_PROMPT;
@@ -32,9 +32,11 @@ export async function runChatRepl(options: {
   rl.setPrompt(promptLabel);
 
   let closed = false;
+  let activeTurn: AbortController | undefined;
   const onSigint = () => {
     options.output.write('\n');
     closed = true;
+    activeTurn?.abort();
     rl.close();
   };
   rl.on('SIGINT', onSigint);
@@ -58,7 +60,12 @@ export async function runChatRepl(options: {
         rl.prompt();
         continue;
       }
-      await options.onTurn(line);
+      activeTurn = new AbortController();
+      try {
+        await options.onTurn(line, activeTurn.signal);
+      } finally {
+        activeTurn = undefined;
+      }
       if (closed) {
         break;
       }

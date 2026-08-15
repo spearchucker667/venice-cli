@@ -1,6 +1,6 @@
 import { spawn as spawnPty, type IPty } from 'node-pty';
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -37,9 +37,13 @@ function createQuote(reportAddress?: string): string {
   return quote.toString('hex');
 }
 
-function startMockApi(options: { failFirstToolTurn?: boolean } = {}): {
+function startMockApi(options: {
+  failFirstToolTurn?: boolean;
+  stallFirstCompletion?: boolean;
+} = {}): {
   server: Server;
   requests: CapturedRequest[];
+  completionWasCancelled: () => boolean;
   listen: () => Promise<number>;
 } {
   const requests: CapturedRequest[] = [];
@@ -49,6 +53,7 @@ function startMockApi(options: { failFirstToolTurn?: boolean } = {}): {
   const e2eeQuote = createQuote(signingAddress);
   const teeQuote = createQuote();
   let reply = 0;
+  let completionCancelled = false;
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://localhost');
@@ -110,6 +115,16 @@ function startMockApi(options: { failFirstToolTurn?: boolean } = {}): {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as
         CapturedRequest & { stream?: boolean };
       requests.push(body);
+      if (options.stallFirstCompletion && requests.length === 1) {
+        const markCancelled = () => {
+          completionCancelled = true;
+        };
+        request.once('aborted', markCancelled);
+        response.once('close', markCancelled);
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.flushHeaders();
+        return;
+      }
       if (options.failFirstToolTurn && requests.length === 1) {
         response.setHeader('Content-Type', 'application/json');
         response.end(JSON.stringify({
@@ -155,6 +170,7 @@ function startMockApi(options: { failFirstToolTurn?: boolean } = {}): {
   return {
     server,
     requests,
+    completionWasCancelled: () => completionCancelled,
     listen: async () => {
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
       const address = server.address();
@@ -240,6 +256,36 @@ function assertNoHistory(homeDir: string): void {
   const historyPath = join(homeDir, '.venice', 'history.json');
   if (!existsSync(historyPath)) return;
   assert.deepEqual(JSON.parse(readFileSync(historyPath, 'utf8')), []);
+}
+
+function writeExistingHistory(homeDir: string): string {
+  const configDir = join(homeDir, '.venice');
+  const historyPath = join(configDir, 'history.json');
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(historyPath, JSON.stringify([{
+    id: 'existing-conversation',
+    timestamp: '2026-08-15T00:00:00.000Z',
+    model: PLAIN_MODEL,
+    privacy: 'plain',
+    messages: [
+      { role: 'user', content: 'prior question' },
+      { role: 'assistant', content: 'prior answer' },
+    ],
+  }]));
+  return historyPath;
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  description: string
+): Promise<void> {
+  const deadline = Date.now() + TEST_TIMEOUT_MS;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for ${description}.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -387,9 +433,79 @@ for (const [name, input] of [['Ctrl-C', '\x03'], ['EOF', '\x04']] as const) {
       const result = await waitForExit(session);
       assert.equal(result.exitCode, 0, session.output);
       assert.equal(mock.requests.length, 0);
+      assertNoHistory(homeDir);
     } finally {
       await closeServer(mock.server);
       rmSync(homeDir, { recursive: true, force: true });
     }
   });
 }
+
+for (const [name, inputs] of [
+  ['exit', ['exit\r']],
+  ['help then exit', ['/help\r', 'exit\r']],
+  ['Ctrl-C', ['\x03']],
+  ['EOF', ['\x04']],
+] as const) {
+  test(`--continue with ${name} does not duplicate existing history`, async () => {
+    const mock = startMockApi();
+    const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-continue-no-turn-'));
+    try {
+      const historyPath = writeExistingHistory(homeDir);
+      const port = await mock.listen();
+      const session = startPty(
+        ['chat', '--model', PLAIN_MODEL, '--continue'],
+        homeDir,
+        port
+      );
+      await waitFor(session, (output) => occurrences(output, PROMPT) >= 1, 'continued prompt');
+      for (const input of inputs) {
+        session.terminal.write(input);
+        if (input.startsWith('/help')) {
+          await waitFor(
+            session,
+            (output) => occurrences(output, PROMPT) >= 2,
+            'prompt after continued help'
+          );
+        }
+      }
+
+      const result = await waitForExit(session);
+      assert.equal(result.exitCode, 0, session.output);
+      assert.equal(mock.requests.length, 0);
+      const history = JSON.parse(readFileSync(historyPath, 'utf8')) as unknown[];
+      assert.equal(history.length, 1);
+    } finally {
+      await closeServer(mock.server);
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('Ctrl-C aborts a stalled in-flight completion without saving or retrying', async () => {
+  const mock = startMockApi({ stallFirstCompletion: true });
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-cancel-turn-'));
+  try {
+    const port = await mock.listen();
+    const session = startPty(['chat', '--model', PLAIN_MODEL], homeDir, port);
+    await waitFor(session, (output) => occurrences(output, PROMPT) >= 1, 'cancellation prompt');
+    session.terminal.write('stall this turn\r');
+    await waitForCondition(() => mock.requests.length === 1, 'stalled completion request');
+
+    const startedAt = Date.now();
+    session.terminal.write('\x03');
+    const result = await waitForExit(session);
+
+    assert.equal(result.exitCode, 0, session.output);
+    assert.ok(Date.now() - startedAt < 2_000, `Cancellation was too slow:\n${session.output}`);
+    await waitForCondition(mock.completionWasCancelled, 'server-side connection close');
+    assert.equal(mock.requests.length, 1);
+    assert.deepEqual(mock.requests[0].messages, [
+      { role: 'user', content: 'stall this turn' },
+    ]);
+    assertNoHistory(homeDir);
+  } finally {
+    await closeServer(mock.server);
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});

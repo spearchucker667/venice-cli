@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  chatCompletion,
+  chatCompletionStream,
   completeVideo,
   cryptoRpc,
   dedicatedWebSearch,
@@ -19,8 +21,72 @@ import {
   scrapeWebPage,
   transcribeVideo,
   videoUrlFromStatus,
+  RequestCancelledError,
 } from './api.js';
 import type { Character, CharacterReviewsPage } from '../types/index.js';
+
+function stalledResponse(signal?: AbortSignal): Response {
+  return new Response(new ReadableStream({
+    start(controller) {
+      signal?.addEventListener('abort', () => {
+        controller.error(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    },
+  }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+test('chat cancellation aborts non-streaming response body consumption', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) =>
+    stalledResponse(init?.signal ?? undefined)) as typeof fetch;
+
+  try {
+    const completion = chatCompletion(
+      [{ role: 'user', content: 'wait' }],
+      { signal: controller.signal }
+    );
+    setTimeout(() => controller.abort(), 10);
+    await assert.rejects(completion, RequestCancelledError);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('chat cancellation remains active while a streaming body is consumed', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) =>
+    stalledResponse(init?.signal ?? undefined)) as typeof fetch;
+
+  try {
+    const stream = chatCompletionStream(
+      [{ role: 'user', content: 'wait' }],
+      { signal: controller.signal }
+    );
+    const nextChunk = stream.next();
+    setTimeout(() => controller.abort(), 10);
+    await assert.rejects(nextChunk, RequestCancelledError);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
 
 test('augment API helpers send the documented requests', async () => {
   const originalFetch = globalThis.fetch;
