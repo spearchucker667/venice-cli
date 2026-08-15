@@ -289,6 +289,7 @@ export function registerChatCommand(program: Command): void {
       let useTEE = false;
       let e2eeContext: E2EEContext | undefined;
       let modelInfo: Model | undefined;
+      let catalogFailed = false;
       let catalog: Model[] = [];
 
       // Fetch model capabilities from API
@@ -296,39 +297,23 @@ export function registerChatCommand(program: Command): void {
         catalog = await listModels({ showSpinner: !options.quiet });
         modelInfo = catalog.find((m) => m.id === model);
       } catch {
-        // If we can't fetch models and user explicitly requested E2EE, fail
-        if (options.e2ee === true) {
-          console.error(formatError('Failed to fetch model capabilities.'));
-          process.exit(1);
-        }
+        catalogFailed = true;
       }
 
-      // Determine mode based on model capabilities and flags
-      if (modelInfo) {
-        const supportsE2EE = isE2EEModel(modelInfo);
-        const supportsTEE = isTEEModel(modelInfo);
+      const privacyDecision = resolveChatPrivacyMode({
+        modelId: model,
+        modelInfo,
+        catalogFailed,
+        e2eeFlag: options.e2ee,
+      });
 
-        if (options.e2ee === true) {
-          // User explicitly requested E2EE
-          if (!supportsE2EE) {
-            console.error(formatError(`Model "${model}" does not support E2EE encryption.`));
-            process.exit(1);
-          }
-          useE2EE = true;
-        } else if (options.e2ee === false) {
-          // User explicitly disabled E2EE - use TEE-only if supported
-          if (supportsTEE || supportsE2EE) {
-            useTEE = true;
-          }
-        } else {
-          // Auto-detect: use E2EE if supported, otherwise TEE if supported
-          if (supportsE2EE) {
-            useE2EE = true;
-          } else if (supportsTEE) {
-            useTEE = true;
-          }
-        }
+      if (privacyDecision.error) {
+        console.error(formatError(privacyDecision.error));
+        process.exit(1);
       }
+
+      useE2EE = privacyDecision.useE2EE;
+      useTEE = privacyDecision.useTEE;
 
       if (options.continue) {
         const lastConv = getLastConversation();
@@ -421,8 +406,9 @@ export function registerChatCommand(program: Command): void {
       if (options.searchResultsInStream) {
         veniceParams.include_search_results_in_stream = true;
       }
-      // Explicitly disable E2EE when --no-e2ee is specified
-      if (options.e2ee === false) {
+      if (useE2EE) {
+        veniceParams.enable_e2ee = true;
+      } else if (options.e2ee === false) {
         veniceParams.enable_e2ee = false;
       }
 
@@ -941,9 +927,85 @@ export function getAvailableCharacters(): string[] {
   return Object.keys(CHARACTER_PROMPTS);
 }
 
-export function modelImpliesPrivateHistory(modelId: string): boolean {
+export function modelIdImpliesPrivateMode(modelId: string): boolean {
   const id = modelId.toLowerCase();
   return id.includes('e2ee') || id.startsWith('tee-') || id.includes('-tee');
+}
+
+export function modelImpliesPrivateHistory(modelId: string): boolean {
+  return modelIdImpliesPrivateMode(modelId);
+}
+
+export function resolveChatPrivacyMode(input: {
+  modelId: string;
+  modelInfo?: Model;
+  catalogFailed: boolean;
+  e2eeFlag?: boolean;
+}): { useE2EE: boolean; useTEE: boolean; error?: string } {
+  if (input.catalogFailed) {
+    if (input.e2eeFlag === true || modelIdImpliesPrivateMode(input.modelId)) {
+      return {
+        useE2EE: false,
+        useTEE: false,
+        error:
+          'Could not fetch model capabilities; refusing to send this request in the clear. ' +
+          'Retry when /models is reachable, or use a non-E2EE/TEE model.',
+      };
+    }
+    return { useE2EE: false, useTEE: false };
+  }
+
+  if (!input.modelInfo) {
+    if (input.e2eeFlag === true || modelIdImpliesPrivateMode(input.modelId)) {
+      return {
+        useE2EE: false,
+        useTEE: false,
+        error:
+          `Could not confirm capabilities for "${input.modelId}"; refusing to send this request in the clear.`,
+      };
+    }
+    return { useE2EE: false, useTEE: false };
+  }
+
+  const supportsE2EE = isE2EEModel(input.modelInfo);
+  const supportsTEE = isTEEModel(input.modelInfo);
+
+  if (
+    modelIdImpliesPrivateMode(input.modelId) &&
+    !supportsE2EE &&
+    !supportsTEE
+  ) {
+    return {
+      useE2EE: false,
+      useTEE: false,
+      error:
+        `Could not confirm private-mode capabilities for "${input.modelId}"; ` +
+        'refusing to send this request in the clear.',
+    };
+  }
+
+  if (input.e2eeFlag === true) {
+    if (!supportsE2EE) {
+      return {
+        useE2EE: false,
+        useTEE: false,
+        error: `Model "${input.modelId}" does not support E2EE encryption.`,
+      };
+    }
+    return { useE2EE: true, useTEE: false };
+  }
+
+  if (input.e2eeFlag === false) {
+    return { useE2EE: false, useTEE: supportsTEE || supportsE2EE };
+  }
+
+  if (supportsE2EE) {
+    return { useE2EE: true, useTEE: false };
+  }
+  if (supportsTEE) {
+    return { useE2EE: false, useTEE: true };
+  }
+  return { useE2EE: false, useTEE: false };
 }
 
 export function continueConversationError(
