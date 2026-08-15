@@ -66,19 +66,43 @@ test('queueVideoGeneration omits aspect_ratio unless the user set it', async () 
   }
 });
 
-test('video status treats a completed MP4 body as completed', async () => {
+test('video status cancels a completed MP4 body without buffering it', async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.VENICE_API_KEY;
   const mp4 = Buffer.from('xxxxftypisom');
+  let fetchCount = 0;
+  let statusBodyCancelled = false;
+  let statusBodyBuffered = false;
 
   process.env.VENICE_API_KEY = 'test-key';
-  globalThis.fetch = (async () => new Response(mp4, {
-    headers: { 'Content-Type': 'video/mp4' },
-  })) as typeof fetch;
+  globalThis.fetch = (async () => {
+    fetchCount++;
+    if (fetchCount === 1) {
+      return {
+        ok: true,
+        headers: new Headers({ 'Content-Type': 'video/mp4' }),
+        body: {
+          cancel: async () => {
+            statusBodyCancelled = true;
+          },
+        },
+        arrayBuffer: async () => {
+          statusBodyBuffered = true;
+          return mp4;
+        },
+      } as unknown as Response;
+    }
+
+    return new Response(mp4, {
+      headers: { 'Content-Type': 'video/mp4' },
+    });
+  }) as typeof fetch;
 
   try {
     const status = await getVideoStatus('q1', 'kling-v3-pro-image-to-video');
     assert.equal(status.status, 'completed');
+    assert.equal(statusBodyCancelled, true);
+    assert.equal(statusBodyBuffered, false);
 
     const retrieved = await retrieveVideo('q1', 'kling-v3-pro-image-to-video');
     assert.equal(retrieved.kind, 'video');

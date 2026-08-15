@@ -205,7 +205,9 @@ export function registerVideoCommands(program: Command): void {
             return;
           }
 
-          console.log(`${c.dim('Downloading video...')}`);
+          if (format !== 'json') {
+            console.log(`${c.dim('Downloading video...')}`);
+          }
           await downloadToFile(downloadUrl, options.output, {
             maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
             expectedContentTypePrefixes: ['video/'],

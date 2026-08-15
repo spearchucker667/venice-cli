@@ -21,6 +21,7 @@ const VENICE_API = process.env.VENICE_API_BASE_URL || 'https://api.venice.ai/api
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes default timeout
+const MAX_VIDEO_STATUS_BYTES = 1024 * 1024;
 
 export class VeniceApiError extends Error {
   constructor(
@@ -773,6 +774,7 @@ async function retrieveVideoResponse(
   options: {
     deleteOnCompletion?: boolean;
     spinnerText?: string;
+    statusOnly?: boolean;
   } = {}
 ): Promise<VideoRetrieveResult> {
   const spinner = startSpinner(options.spinnerText || 'Checking video status...');
@@ -806,7 +808,19 @@ async function retrieveVideoResponse(
       return { kind: 'status', status };
     }
 
+    if (classified === 'video' && options.statusOnly) {
+      await response.body?.cancel();
+      if (spinner) stopSpinner(true);
+      return { kind: 'status', status: { status: 'completed' } };
+    }
+
     if (classified === 'unknown') {
+      if (options.statusOnly) {
+        const status = await readVideoStatusFromUnknownResponse(response);
+        if (spinner) stopSpinner(true);
+        return { kind: 'status', status };
+      }
+
       const peek = Buffer.from(await response.arrayBuffer());
       if (peek.length > 0 && peek[0] === 0x7b) {
         const status = JSON.parse(peek.toString('utf-8')) as VideoStatusResult;
@@ -836,6 +850,63 @@ async function retrieveVideoResponse(
       throw new Error('Video retrieve request timed out. Please try again later.');
     }
     throw error;
+  }
+}
+
+async function readVideoStatusFromUnknownResponse(
+  response: Response
+): Promise<VideoStatusResult> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error('Video retrieve response had no body.');
+  }
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let isJson = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = Buffer.from(value);
+      chunks.push(chunk);
+      totalBytes += chunk.length;
+      const buffered = Buffer.concat(chunks, totalBytes);
+
+      if (!isJson) {
+        const firstNonWhitespace = buffered.find((byte) => byte > 0x20);
+        isJson = firstNonWhitespace === 0x7b;
+
+        if (!isJson && buffered.length >= 8) {
+          if (isMp4Buffer(buffered)) {
+            await reader.cancel();
+            return { status: 'completed' };
+          }
+          throw new Error(
+            `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}".`
+          );
+        }
+      }
+
+      if (totalBytes > MAX_VIDEO_STATUS_BYTES) {
+        throw new Error('Video status response exceeded the maximum expected size.');
+      }
+    }
+
+    const buffered = Buffer.concat(chunks, totalBytes);
+    if (isMp4Buffer(buffered)) {
+      return { status: 'completed' };
+    }
+    if (isJson) {
+      return JSON.parse(buffered.toString('utf-8')) as VideoStatusResult;
+    }
+    throw new Error(
+      `Unexpected video retrieve content type "${response.headers.get('content-type') || 'unknown'}".`
+    );
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -889,6 +960,7 @@ export async function getVideoStatus(
 ): Promise<VideoStatusResult> {
   const result = await retrieveVideoResponse(queueId, model, {
     spinnerText: 'Checking video status...',
+    statusOnly: true,
   });
 
   if (result.kind === 'video') {
