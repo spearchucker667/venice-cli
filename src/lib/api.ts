@@ -37,6 +37,7 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes default timeout
 const DOCUMENT_PARSE_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_DOCUMENT_PARSE_RESPONSE_BYTES = 50 * 1024 * 1024;
 const MAX_VIDEO_STATUS_BYTES = 1024 * 1024;
 
 export class VeniceApiError extends Error {
@@ -1889,6 +1890,10 @@ export type DocumentParseResponse = {
   tokens: number;
 };
 
+function sanitizeMultipartFilename(filename: string): string {
+  return filename.replace(/[\u0000-\u001f\u007f"\\]/g, '_');
+}
+
 // Parse a document without model inference
 export async function parseDocument(filePath: string): Promise<DocumentParseResponse> {
   const fs = await import('fs');
@@ -1908,13 +1913,13 @@ export async function parseDocument(filePath: string): Promise<DocumentParseResp
   const mimeType = mimeTypeFromPath(filePath);
   const boundary = `----venice-cli-${crypto.randomUUID()}`;
   const CRLF = '\r\n';
-  const escapedFilename = filename.replace(/"/g, '\\"');
+  const safeFilename = sanitizeMultipartFilename(filename);
   const headerBuffer = Buffer.from(
     `--${boundary}${CRLF}` +
     `Content-Disposition: form-data; name="response_format"${CRLF}${CRLF}` +
     `json${CRLF}` +
     `--${boundary}${CRLF}` +
-    `Content-Disposition: form-data; name="file"; filename="${escapedFilename}"${CRLF}` +
+    `Content-Disposition: form-data; name="file"; filename="${safeFilename}"${CRLF}` +
     `Content-Type: ${mimeType}${CRLF}${CRLF}`,
     'utf-8'
   );
@@ -1946,14 +1951,30 @@ export async function parseDocument(filePath: string): Promise<DocumentParseResp
       signal: controller.signal,
     };
     const response = await fetch(`${VENICE_API}/augment/text-parser`, requestInit);
-    clearTimeout(timeoutId);
+    const responseBytes = await readResponseBodyWithLimit(
+      response,
+      MAX_DOCUMENT_PARSE_RESPONSE_BYTES,
+      response.ok ? 'Document parse response' : 'Document parse API error response'
+    );
 
     if (!response.ok) {
-      throw VeniceApiError.fromResponse(response.status, await response.text());
+      throw VeniceApiError.fromResponse(response.status, responseBytes.toString('utf-8'));
+    }
+
+    const responseBody = responseBytes.toString('utf-8');
+    if (responseBody.trim().length === 0) {
+      throw new Error('Document parse response was empty; expected JSON.');
+    }
+
+    let parsedResponse: DocumentParseResponse;
+    try {
+      parsedResponse = JSON.parse(responseBody) as DocumentParseResponse;
+    } catch {
+      throw new Error('Document parse response contained malformed JSON.');
     }
 
     if (spinner) stopSpinner(true);
-    return await response.json() as DocumentParseResponse;
+    return parsedResponse;
   } catch (error) {
     if (spinner) stopSpinner(false);
     if (error instanceof Error && error.name === 'AbortError') {
