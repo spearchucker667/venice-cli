@@ -1,6 +1,16 @@
 import { spawn } from 'node:child_process';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
@@ -61,6 +71,11 @@ async function withApiServer(
 function sendJson(response: ServerResponse, body: unknown): void {
   response.writeHead(200, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify(body));
+}
+
+function sendError(response: ServerResponse, status: number, message: string): void {
+  response.writeHead(status, { 'Content-Type': 'application/json' });
+  response.end(JSON.stringify({ error: { message } }));
 }
 
 test('billing usage follows opaque cursors without repeating filters', async () => {
@@ -153,6 +168,164 @@ test('keys create defaults to a bounded inference credential', async () => {
     consumptionLimit: { usd: 5 },
     limitPeriod: 'MONTH',
   });
+});
+
+test('keys create deletes the remote key when committing the secret fails', async () => {
+  const keyId = 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5';
+  const methods: string[] = [];
+  let destinationPath = '';
+  await withApiServer((request, response) => {
+    methods.push(request.method ?? '');
+    if (request.method === 'POST') {
+      request.resume();
+      request.on('end', () => {
+        writeFileSync(destinationPath, 'won-the-race');
+        sendJson(response, {
+          data: {
+            id: keyId,
+            apiKey: 'venice-secret-once',
+            apiKeyType: 'INFERENCE',
+            description: 'ci',
+          },
+        });
+      });
+      return;
+    }
+
+    assert.equal(new URL(request.url ?? '/', 'http://localhost').searchParams.get('id'), keyId);
+    sendJson(response, { success: true });
+  }, async (baseUrl, homeDir) => {
+    const secretFile = join(homeDir, 'ci.key');
+    destinationPath = secretFile;
+    const result = await runCli(
+      ['keys', 'create', '--name', 'ci', '--output', secretFile],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, new RegExp(`New API key ${keyId} was deleted`));
+    assert.match(result.stderr, /the secret was not saved/);
+    assert.doesNotMatch(result.stderr, /venice-secret-once/);
+    assert.equal(readFileSync(secretFile, 'utf8'), 'won-the-race');
+    assert.equal(readdirSync(homeDir).some((name) => name.endsWith('.tmp')), false);
+  });
+  assert.deepEqual(methods, ['POST', 'DELETE']);
+});
+
+test('keys create gives a secret-free recovery command when rollback fails', async () => {
+  const keyId = 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5';
+  const secret = 'venice-secret-once';
+  const methods: string[] = [];
+  let destinationPath = '';
+  await withApiServer((request, response) => {
+    methods.push(request.method ?? '');
+    if (request.method === 'POST') {
+      request.resume();
+      request.on('end', () => {
+        writeFileSync(destinationPath, 'existing');
+        sendJson(response, {
+          data: {
+            id: keyId,
+            apiKey: secret,
+            apiKeyType: 'INFERENCE',
+            description: 'ci',
+          },
+        });
+      });
+      return;
+    }
+    sendError(response, 500, `rollback rejected ${secret}`);
+  }, async (baseUrl, homeDir) => {
+    const secretFile = join(homeDir, 'ci.key');
+    destinationPath = secretFile;
+    const result = await runCli(
+      ['keys', 'create', '--name', 'ci', '--output', secretFile],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Failed to save the API key secret/);
+    assert.match(result.stderr, /Automatic deletion also failed/);
+    assert.match(result.stderr, new RegExp(`venice keys delete ${keyId} --force`));
+    assert.doesNotMatch(result.stderr, new RegExp(secret));
+    assert.equal(readFileSync(secretFile, 'utf8'), 'existing');
+    assert.equal(readdirSync(homeDir).some((name) => name.endsWith('.tmp')), false);
+  });
+  assert.deepEqual(methods, ['POST', 'DELETE']);
+});
+
+test('keys create does not attempt deletion when creation fails', async () => {
+  const methods: string[] = [];
+  await withApiServer((request, response) => {
+    methods.push(request.method ?? '');
+    sendError(response, 500, 'creation failed');
+  }, async (baseUrl, homeDir) => {
+    const secretFile = join(homeDir, 'ci.key');
+    const result = await runCli(
+      ['keys', 'create', '--name', 'ci', '--output', secretFile],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /creation failed/);
+    assert.equal(existsSync(secretFile), false);
+  });
+  assert.deepEqual(methods, ['POST']);
+});
+
+test('keys create canonicalizes a symlinked output directory', async () => {
+  await withApiServer((request, response) => {
+    assert.equal(request.method, 'POST');
+    request.resume();
+    request.on('end', () => {
+      sendJson(response, {
+        data: {
+          id: 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5',
+          apiKey: 'venice-secret-once',
+          apiKeyType: 'INFERENCE',
+          description: 'ci',
+        },
+      });
+    });
+  }, async (baseUrl, homeDir) => {
+    const canonicalDirectory = join(homeDir, 'private-tmp');
+    const aliasDirectory = join(homeDir, 'tmp');
+    mkdirSync(canonicalDirectory);
+    symlinkSync(canonicalDirectory, aliasDirectory);
+    const requestedFile = join(aliasDirectory, 'ci.key');
+    const canonicalFile = join(canonicalDirectory, 'ci.key');
+    const result = await runCli(
+      ['keys', 'create', '--name', 'ci', '--output', requestedFile, '--format', 'json'],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).secretFile, canonicalFile);
+    assert.equal(readFileSync(canonicalFile, 'utf8'), 'venice-secret-once\n');
+    assert.equal(statSync(canonicalFile).mode & 0o777, 0o600);
+  });
+});
+
+test('keys create rejects a destination symlink without making a request', async () => {
+  let requests = 0;
+  await withApiServer((_request, response) => {
+    requests++;
+    sendJson(response, {});
+  }, async (baseUrl, homeDir) => {
+    const target = join(homeDir, 'target');
+    const destination = join(homeDir, 'ci.key');
+    writeFileSync(target, 'do-not-overwrite');
+    symlinkSync(target, destination);
+    const result = await runCli(
+      ['keys', 'create', '--name', 'ci', '--output', destination],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Refusing to overwrite API key output/);
+    assert.equal(readFileSync(target, 'utf8'), 'do-not-overwrite');
+  });
+  assert.equal(requests, 0);
 });
 
 test('keys delete refuses non-interactive deletion without --force', async () => {

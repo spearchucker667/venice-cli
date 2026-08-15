@@ -113,10 +113,42 @@ export function registerKeysCommand(program: Command): void {
             ? { consumptionLimit, limitPeriod }
             : {}),
         });
-        secretFile.commit(created.apiKey);
       } catch (error) {
         secretFile.cleanup();
         throw error;
+      }
+
+      try {
+        secretFile.commit(created.apiKey);
+      } catch (saveError) {
+        let cleanupError: unknown;
+        try {
+          secretFile.cleanup();
+        } catch (error) {
+          cleanupError = error;
+        }
+        const saveFailure = cleanupError === undefined
+          ? summarizeError(saveError, created.apiKey)
+          : `${summarizeError(saveError, created.apiKey)}; local temporary-file cleanup failed: ` +
+            summarizeError(cleanupError, created.apiKey);
+        const keyId = created.id;
+        assertApiKeyId(keyId);
+
+        try {
+          await deleteApiKey(keyId);
+        } catch (rollbackError) {
+          throw new Error(
+            `Failed to save the API key secret (${saveFailure}). ` +
+            `Automatic deletion also failed (${summarizeError(rollbackError, created.apiKey)}). ` +
+            `The secret was not saved; delete the newly created key with: ` +
+            `venice keys delete ${keyId} --force`
+          );
+        }
+
+        throw new Error(
+          `Failed to save the API key secret (${saveFailure}). ` +
+          `New API key ${keyId} was deleted; the secret was not saved.`
+        );
       }
 
       if (detectOutputFormat(options.format) === 'json') {
@@ -258,12 +290,13 @@ function prepareSecretFile(output: string): {
   commit: (secret: string) => void;
   cleanup: () => void;
 } {
-  const destination = resolve(output);
-  const parent = dirname(destination);
-  const parentStat = lstatSync(parent);
-  if (parentStat.isSymbolicLink() || !parentStat.isDirectory() || realpathSync(parent) !== parent) {
-    throw new Error('API key output directory must be a real directory without symlinks');
+  const requestedDestination = resolve(output);
+  const canonicalParent = realpathSync(dirname(requestedDestination));
+  const parentStat = lstatSync(canonicalParent);
+  if (!parentStat.isDirectory()) {
+    throw new Error('API key output directory must be a directory');
   }
+  const destination = resolve(canonicalParent, basename(requestedDestination));
   try {
     lstatSync(destination);
     throw new Error(`Refusing to overwrite API key output: ${destination}`);
@@ -271,7 +304,10 @@ function prepareSecretFile(output: string): {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 
-  const temporary = resolve(parent, `.${basename(destination)}-${process.pid}-${randomUUID()}.tmp`);
+  const temporary = resolve(
+    canonicalParent,
+    `.${basename(destination)}-${process.pid}-${randomUUID()}.tmp`
+  );
   const descriptor = openSync(temporary, 'wx', 0o600);
   let open = true;
   let committed = false;
@@ -290,10 +326,18 @@ function prepareSecretFile(output: string): {
         committed = true;
       } catch (error) {
         if (open) {
-          closeSync(descriptor);
-          open = false;
+          try {
+            closeSync(descriptor);
+            open = false;
+          } catch {
+            // cleanup() retries the close without hiding the original save failure.
+          }
         }
-        rmSync(temporary, { force: true });
+        try {
+          rmSync(temporary, { force: true });
+        } catch {
+          // cleanup() retries removal and reports its failure to the caller.
+        }
         throw error;
       }
     },
@@ -306,4 +350,9 @@ function prepareSecretFile(output: string): {
       rmSync(temporary, { force: true });
     },
   };
+}
+
+function summarizeError(error: unknown, secret: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return secret.length === 0 ? message : message.split(secret).join('[REDACTED]');
 }
