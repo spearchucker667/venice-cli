@@ -267,15 +267,16 @@ export function registerChatCommand(program: Command): void {
         return;
       }
 
-      // Get prompt from args or stdin
+      // Get prompt from args and optionally stdin
       let prompt = promptParts.join(' ');
-      
-      if (!prompt && !process.stdin.isTTY) {
-        // Read from stdin
-        prompt = await readStdin();
+      let pipedInput = '';
+
+      if (!process.stdin.isTTY) {
+        pipedInput = await readStdin();
       }
 
-      if (!prompt) {
+      const userMessage = buildChatUserMessage(prompt, pipedInput);
+      if (!userMessage) {
         console.error(formatError('No prompt provided. Usage: venice chat "Your message"'));
         process.exit(1);
       }
@@ -288,11 +289,12 @@ export function registerChatCommand(program: Command): void {
       let useTEE = false;
       let e2eeContext: E2EEContext | undefined;
       let modelInfo: Model | undefined;
+      let catalog: Model[] = [];
 
       // Fetch model capabilities from API
       try {
-        const models = await listModels({ showSpinner: !options.quiet });
-        modelInfo = models.find((m) => m.id === model);
+        catalog = await listModels({ showSpinner: !options.quiet });
+        modelInfo = catalog.find((m) => m.id === model);
       } catch {
         // If we can't fetch models and user explicitly requested E2EE, fail
         if (options.e2ee === true) {
@@ -328,6 +330,23 @@ export function registerChatCommand(program: Command): void {
         }
       }
 
+      if (options.continue) {
+        const lastConv = getLastConversation();
+        if (lastConv) {
+          const currentPrivacy = useE2EE ? 'e2ee' : useTEE ? 'tee' : 'plain';
+          const continueError = continueConversationError(lastConv, {
+            model,
+            privacy: currentPrivacy,
+            lastModel: catalog.find((m) => m.id === lastConv.model),
+            catalogAvailable: catalog.length > 0,
+          });
+          if (continueError) {
+            console.error(formatError(continueError));
+            process.exit(1);
+          }
+        }
+      }
+
       // TEE-only mode: verify attestation without encryption
       if (useTEE && !useE2EE) {
         try {
@@ -358,12 +377,12 @@ export function registerChatCommand(program: Command): void {
       if (options.continue) {
         const lastConv = getLastConversation();
         if (lastConv) {
-          // Cast messages to proper type
           for (const msg of lastConv.messages) {
             messages.push(msg as Message);
           }
           if (format === 'pretty') {
             console.log(c.dim(`Continuing conversation (${lastConv.messages.length} previous messages)\n`));
+            console.log(c.dim('Note: --continue replays local history and is not covered by TEE/E2EE enclave guarantees.\n'));
           }
         }
       }
@@ -378,8 +397,8 @@ export function registerChatCommand(program: Command): void {
         }
       }
 
-      // Add user message
-      messages.push({ role: 'user', content: prompt });
+      // Add user message from stdin/args
+      messages.push(userMessage);
 
       // Get tool definitions
       const toolNames = options.tools?.split(',').map((t: string) => t.trim()) || [];
@@ -414,14 +433,16 @@ export function registerChatCommand(program: Command): void {
           await nonStreamChat(messages, model, tools, options.interactiveTools, format, veniceParams, e2eeContext, options.quiet);
         }
 
-        // Save to history (don't save encrypted content)
-        addConversation({
-          id: randomUUID(),
-          timestamp: new Date().toISOString(),
-          messages,
-          model,
-          character: options.character,
-        });
+        if (!useE2EE && !useTEE) {
+          addConversation({
+            id: randomUUID(),
+            timestamp: new Date().toISOString(),
+            messages,
+            model,
+            character: options.character,
+            privacy: 'plain',
+          });
+        }
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);
@@ -879,6 +900,20 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8').trim();
 }
 
+export function buildChatUserMessage(prompt: string, pipedInput?: string): Message | null {
+  if (pipedInput && prompt) {
+    return { role: 'user', content: `${pipedInput}\n\n${prompt}` };
+  }
+  if (pipedInput) {
+    return { role: 'user', content: pipedInput };
+  }
+  if (prompt) {
+    return { role: 'user', content: prompt };
+  }
+
+  return null;
+}
+
 // Character prompts
 const CHARACTER_PROMPTS: Record<string, string> = {
   pirate: 'You are a pirate captain. Respond in pirate speak with nautical terms, "arr"s, and maritime metaphors. Be adventurous and bold.',
@@ -904,4 +939,65 @@ function getCharacterPrompt(character: string): string | undefined {
 
 export function getAvailableCharacters(): string[] {
   return Object.keys(CHARACTER_PROMPTS);
+}
+
+export function modelImpliesPrivateHistory(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  return id.includes('e2ee') || id.startsWith('tee-') || id.includes('-tee');
+}
+
+export function continueConversationError(
+  lastConv: { model: string; privacy?: string },
+  current: {
+    model: string;
+    privacy: 'plain' | 'e2ee' | 'tee';
+    lastModel?: Model;
+    catalogAvailable?: boolean;
+  }
+): string | undefined {
+  const lastPrivate = lastConv.privacy !== undefined
+    ? lastConv.privacy === 'e2ee' || lastConv.privacy === 'tee'
+    : modelImpliesPrivateHistory(lastConv.model) ||
+      (current.lastModel ? isE2EEModel(current.lastModel) || isTEEModel(current.lastModel) : false);
+  const currentPrivate =
+    current.privacy === 'e2ee' ||
+    current.privacy === 'tee';
+
+  if (
+    lastConv.privacy === undefined &&
+    !modelImpliesPrivateHistory(lastConv.model) &&
+    (current.catalogAvailable === false || !current.lastModel)
+  ) {
+    return (
+      'Cannot continue this conversation because model capabilities could not be confirmed. ' +
+      'Retry when /models is reachable, or start a new chat.'
+    );
+  }
+
+  if (lastPrivate !== currentPrivate) {
+    return (
+      'Cannot continue a conversation across plaintext and E2EE/TEE sessions. ' +
+      'Start a new chat or match the previous privacy mode.'
+    );
+  }
+
+  if (lastPrivate && lastConv.model !== current.model) {
+    return (
+      `Cannot continue a private conversation with a different model ` +
+      `(was ${lastConv.model}, now ${current.model}).`
+    );
+  }
+
+  if (
+    (lastConv.privacy === 'e2ee' || lastConv.privacy === 'tee') &&
+    (current.privacy === 'e2ee' || current.privacy === 'tee') &&
+    lastConv.privacy !== current.privacy
+  ) {
+    return (
+      `Cannot continue a ${lastConv.privacy} conversation with a ${current.privacy} session. ` +
+      'Start a new chat or match the previous privacy mode.'
+    );
+  }
+
+  return undefined;
 }

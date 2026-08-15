@@ -25,13 +25,20 @@ npx veniceai-cli chat 'Hello, world!'
 
 2. **Configure the CLI**:
    ```bash
-   venice config set api_key YOUR_API_KEY
+   venice config set api_key
    ```
+
+   The CLI prompts for the key without displaying it. For non-interactive use,
+   pipe the key over standard input with `venice config set api_key --stdin`.
    
    Or use an environment variable:
    ```bash
    export VENICE_API_KEY=YOUR_API_KEY
    ```
+
+   Environment variables are convenient for CI and headless use, but can be
+   inherited by child processes or captured in diagnostic output. Scope them
+   to the process that needs them.
 
 3. **Start chatting**:
    ```bash
@@ -47,6 +54,7 @@ npx veniceai-cli chat 'Hello, world!'
 - 🖼️ **Image Generation** from text prompts
 - 🔊 **Text-to-Speech** with 35+ voices across languages
 - 🎤 **Speech-to-Text** transcription with timestamps
+- 🎵 **Music & Sound Effects Generation** with asynchronous job handling
 - 🎬 **Video Generation** (text-to-video, image-to-video)
 - 📐 **Embeddings** generation
 - 🔧 **Function Calling** with built-in tools
@@ -81,6 +89,9 @@ venice chat -t calculator,weather "What's 25 * 4.5?"
 # JSON output for scripting
 venice chat -f json "List 3 colors" | jq '.content'
 
+# Use piped context plus an instruction
+cat error.log | venice chat "find the root cause"
+
 # Disable streaming
 venice chat --no-stream "Quick question"
 
@@ -106,7 +117,7 @@ venice chat -m e2ee-qwen3-5-122b-a10b -q "This is encrypted but looks like norma
 | `-c, --character <name>` | Character persona |
 | `-t, --tools <tools>` | Comma-separated list of tools |
 | `--interactive-tools` | Approve each tool call |
-| `--continue` | Continue last conversation |
+| `--continue` | Continue last conversation (local history only; not covered by TEE/E2EE guarantees) |
 | `--no-stream` | Disable streaming output |
 | `--web-search` | Enable web search for current information |
 | `--no-thinking` | Disable reasoning on reasoning models |
@@ -252,6 +263,39 @@ venice video models
 - **Grok Imagine**: `grok-imagine-text-to-video`, `grok-imagine-image-to-video`
 - **LTX2**: `ltx2-fast-text-to-video`, `ltx2-fast-image-to-video`
 
+### Music & Sound Effects
+
+Generate songs, instrumental tracks, and sound effects with Venice's asynchronous audio pipeline.
+
+```bash
+# List current models and their capabilities
+venice music models
+
+# Get a price quote
+venice music quote -m elevenlabs-music -d 60
+
+# Queue instrumental music
+venice music generate -m elevenlabs-music -d 60 --instrumental \
+  "Lofi beat on a rainy night"
+
+# Generate a song using lyrics from a file
+venice music generate -m elevenlabs-music --lyrics lyrics.txt \
+  "A folk song about the sea"
+
+# Check once, or poll until complete
+venice music status <queue_id> -m elevenlabs-music
+venice music status <queue_id> -m elevenlabs-music --wait
+
+# Download the finished audio
+venice music retrieve <queue_id> -m elevenlabs-music -o song.mp3
+```
+
+`retrieve` removes the remote media after a successful local write. Pass `--keep`
+to retain it, or use `venice music complete <queue_id> -m <model>` to clean it
+up later. Optional generation fields are model-specific; inspect
+`venice music models --format json` before using lyrics, duration, or
+instrumental mode.
+
 ### TEE Attestation
 
 Venice supports Trusted Execution Environment (TEE) attestation for models running in secure enclaves. This provides cryptographic proof that your data is processed in a trusted environment.
@@ -289,7 +333,7 @@ venice models
 
 # Filter by type
 venice models -t image
-venice models -t audio
+venice models -t music
 
 # Show only privacy-preserving models
 venice models --privacy
@@ -312,6 +356,9 @@ venice embeddings "Text to embed"
 
 # Save to file
 venice embeddings -o vectors.json "Text to embed"
+
+# From stdin
+echo "Text to embed" | venice embeddings
 ```
 
 ### Configuration
@@ -323,8 +370,13 @@ venice config init
 # Show current config
 venice config show
 
-# Set values
-venice config set api_key YOUR_KEY
+# Set the API key using a hidden prompt
+venice config set api_key
+
+# Or read the API key from standard input
+printf '%s' "$VENICE_API_KEY" | venice config set api_key --stdin
+
+# Set non-secret values
 venice config set default_model kimi-k2-5
 venice config set default_voice af_sky
 
@@ -350,7 +402,13 @@ venice config path
 | `no_color` | Disable colored output |
 | `show_usage` | Show token usage after requests |
 
+On POSIX systems, the CLI restricts the config directory to `0700` and the
+config file to `0600`. Windows does not implement equivalent POSIX permission
+bits, so protection there depends on the user profile's inherited ACLs.
+
 ### Conversation History
+
+`--continue` replays **local** history from `~/.venice/history.json`. It is not covered by TEE or E2EE enclave guarantees. E2EE and TEE transcripts are not written to history, and `--continue` refuses to mix encrypted and plaintext sessions.
 
 ```bash
 # List recent conversations
