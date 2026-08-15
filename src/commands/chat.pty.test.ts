@@ -482,30 +482,32 @@ for (const [name, inputs] of [
   });
 }
 
-test('Ctrl-C aborts a stalled in-flight completion without saving or retrying', async () => {
-  const mock = startMockApi({ stallFirstCompletion: true });
-  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-cancel-turn-'));
-  try {
-    const port = await mock.listen();
-    const session = startPty(['chat', '--model', PLAIN_MODEL], homeDir, port);
-    await waitFor(session, (output) => occurrences(output, PROMPT) >= 1, 'cancellation prompt');
-    session.terminal.write('stall this turn\r');
-    await waitForCondition(() => mock.requests.length === 1, 'stalled completion request');
+for (const [name, input] of [['Ctrl-C', '\x03'], ['Ctrl-D', '\x04']] as const) {
+  test(`${name} aborts a stalled in-flight completion without saving or retrying`, async () => {
+    const mock = startMockApi({ stallFirstCompletion: true });
+    const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-cancel-turn-'));
+    try {
+      const port = await mock.listen();
+      const session = startPty(['chat', '--model', PLAIN_MODEL], homeDir, port);
+      await waitFor(session, (output) => occurrences(output, PROMPT) >= 1, 'cancellation prompt');
+      session.terminal.write('stall this turn\r');
+      await waitForCondition(() => mock.requests.length === 1, 'stalled completion request');
 
-    const startedAt = Date.now();
-    session.terminal.write('\x03');
-    const result = await waitForExit(session);
+      const startedAt = Date.now();
+      session.terminal.write(input);
+      const result = await waitForExit(session);
 
-    assert.equal(result.exitCode, 0, session.output);
-    assert.ok(Date.now() - startedAt < 2_000, `Cancellation was too slow:\n${session.output}`);
-    await waitForCondition(mock.completionWasCancelled, 'server-side connection close');
-    assert.equal(mock.requests.length, 1);
-    assert.deepEqual(mock.requests[0].messages, [
-      { role: 'user', content: 'stall this turn' },
-    ]);
-    assertNoHistory(homeDir);
-  } finally {
-    await closeServer(mock.server);
-    rmSync(homeDir, { recursive: true, force: true });
-  }
-});
+      assert.equal(result.exitCode, 0, session.output);
+      assert.ok(Date.now() - startedAt < 2_000, `Cancellation was too slow:\n${session.output}`);
+      await waitForCondition(mock.completionWasCancelled, 'server-side connection close');
+      assert.equal(mock.requests.length, 1);
+      assert.deepEqual(mock.requests[0].messages, [
+        { role: 'user', content: 'stall this turn' },
+      ]);
+      assertNoHistory(homeDir);
+    } finally {
+      await closeServer(mock.server);
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+}

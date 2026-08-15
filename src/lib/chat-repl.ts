@@ -33,15 +33,21 @@ export async function runChatRepl(options: {
 
   let closed = false;
   let activeTurn: AbortController | undefined;
+  const abortActiveTurn = () => {
+    const controller = activeTurn;
+    activeTurn = undefined;
+    controller?.abort();
+  };
   const onSigint = () => {
     options.output.write('\n');
     closed = true;
-    activeTurn?.abort();
+    abortActiveTurn();
     rl.close();
   };
   rl.on('SIGINT', onSigint);
   rl.on('close', () => {
     closed = true;
+    abortActiveTurn();
   });
   rl.prompt();
 

@@ -64,3 +64,37 @@ test('runChatRepl collects turns until exit without requiring a TTY', async () =
   assert.match(outputText, new RegExp(REPL_PROMPT));
   assert.match(outputText, new RegExp(REPL_HELP));
 });
+
+test('runChatRepl aborts the active turn when input closes', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let activeSignal: AbortSignal | undefined;
+  let abortEvents = 0;
+  let markTurnStarted: (() => void) | undefined;
+  const turnStarted = new Promise<void>((resolve) => {
+    markTurnStarted = resolve;
+  });
+
+  const done = runChatRepl({
+    input,
+    output,
+    onTurn: async (_line, signal) => {
+      activeSignal = signal;
+      markTurnStarted?.();
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => {
+          abortEvents++;
+          resolve();
+        }, { once: true });
+      });
+    },
+  });
+
+  input.write('stall\n');
+  await turnStarted;
+  input.end();
+  await done;
+
+  assert.equal(activeSignal?.aborted, true);
+  assert.equal(abortEvents, 1);
+});
