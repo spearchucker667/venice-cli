@@ -29,11 +29,24 @@ test('restoreCharacterSlug keeps catalog slugs that collide with old persona nam
   );
 });
 
+test('restoreCharacterSlug keeps catalog slugs that were combined with --system', () => {
+  assert.equal(
+    restoreCharacterSlug({
+      character: 'poet',
+      messages: [{ role: 'system', content: 'Keep answers short.' }, { role: 'user' }],
+    }),
+    'poet'
+  );
+});
+
 test('restoreCharacterSlug skips old local personas that already have a system prompt', () => {
   assert.equal(
     restoreCharacterSlug({
       character: 'pirate',
-      messages: [{ role: 'system' }, { role: 'user' }],
+      messages: [{
+        role: 'system',
+        content: 'You are a pirate captain. Respond in pirate speak with nautical terms, "arr"s, and maritime metaphors. Be adventurous and bold.',
+      }, { role: 'user' }],
     }),
     undefined
   );

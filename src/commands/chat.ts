@@ -331,8 +331,8 @@ export function registerChatCommand(program: Command): void {
 
       const lastConv = options.continue ? getLastConversation() : undefined;
       // Send -c/--character to the API as a catalog slug, including names that
-      // used to be local personas (poet, pirate, …). Only skip those names when
-      // restoring old local-persona history that already has a system prompt.
+      // used to be local personas (poet, pirate, …). Continue only skips those
+      // names when history still contains the old injected persona prompt.
       const historyCharacter = options.character
         ? String(options.character)
         : restoreCharacterSlug(lastConv);
@@ -907,30 +907,39 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8').trim();
 }
 
-const LEGACY_LOCAL_CHARACTERS = new Set([
-  'pirate',
-  'wizard',
-  'scientist',
-  'poet',
-  'coder',
-  'teacher',
-  'comedian',
-  'philosopher',
-]);
+const LEGACY_LOCAL_CHARACTER_PROMPTS: Record<string, string> = {
+  pirate: 'You are a pirate captain. Respond in pirate speak with nautical terms, "arr"s, and maritime metaphors. Be adventurous and bold.',
+  wizard: 'You are a wise wizard. Speak in mystical terms, reference ancient knowledge, and occasionally make cryptic prophecies. Use archaic language.',
+  scientist: 'You are a brilliant scientist. Explain things with precision, reference data and studies, and maintain intellectual rigor. Be curious and analytical.',
+  poet: 'You are a romantic poet. Express yourself with beautiful language, metaphors, and emotional depth. Find beauty in everything.',
+  coder: 'You are a senior software engineer. Be practical, reference best practices, and provide code examples when relevant. Value clean, maintainable solutions.',
+  teacher: 'You are a patient teacher. Explain concepts clearly, use examples, and check for understanding. Encourage learning and curiosity.',
+  comedian: 'You are a stand-up comedian. Find humor in everything, make jokes, use wordplay, and keep things light. But still be helpful!',
+  philosopher: 'You are a deep philosopher. Question assumptions, explore ideas from multiple angles, and ponder the nature of existence. Be thoughtful and profound.',
+};
 
 export function isLegacyLocalCharacter(character?: string): boolean {
-  return Boolean(character && LEGACY_LOCAL_CHARACTERS.has(character.toLowerCase()));
+  return Boolean(character && character.toLowerCase() in LEGACY_LOCAL_CHARACTER_PROMPTS);
+}
+
+function hasLegacyLocalPersonaPrompt(
+  character: string,
+  messages?: Array<{ role: string; content?: string }>
+): boolean {
+  const prompt = LEGACY_LOCAL_CHARACTER_PROMPTS[character.toLowerCase()];
+  if (!prompt) return false;
+  return Boolean(messages?.some((message) => message.role === 'system' && message.content === prompt));
 }
 
 export function restoreCharacterSlug(lastConv?: {
   character?: string;
-  messages?: Array<{ role: string }>;
+  messages?: Array<{ role: string; content?: string }>;
 }): string | undefined {
   if (!lastConv?.character) return undefined;
-  if (
-    isLegacyLocalCharacter(lastConv.character) &&
-    lastConv.messages?.some((message) => message.role === 'system')
-  ) {
+  // Old local personas stored the name plus an injected system prompt. Skip
+  // those so we do not send a leftover slug. A catalog character combined with
+  // --system still restores, because that system text is not the old prompt.
+  if (hasLegacyLocalPersonaPrompt(lastConv.character, lastConv.messages)) {
     return undefined;
   }
   return lastConv.character;
