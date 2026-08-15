@@ -366,6 +366,23 @@ _venice`;
 export function generateFishCompletion(): string {
   return `# Venice CLI fish completion
 
+# Test whether the first non-option token is the requested top-level command.
+function __venice_using_command
+    set -l tokens (commandline -xpc)
+    set -a tokens (commandline -ct)
+
+    for token in $tokens[2..-1]
+        if string match -q -- '-*' "$token"
+            continue
+        end
+
+        test "$token" = "$argv[1]"
+        return
+    end
+
+    return 1
+end
+
 # Main commands
 set -l commands chat search image upscale tts transcribe video models embeddings history usage config characters voices completions
 
@@ -381,9 +398,9 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a tts -d "Con
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a transcribe -d "Transcribe audio"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a video -d "AI video generation"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a models -d "List models"
-complete -c venice -n "__fish_seen_subcommand_from models; and not __fish_seen_subcommand_from video" -l privacy -d "Privacy-preserving models only"
-complete -c venice -n "__fish_seen_subcommand_from models; and not __fish_seen_subcommand_from video" -l tee -d "TEE-attestable models only"
-complete -c venice -n "__fish_seen_subcommand_from models; and not __fish_seen_subcommand_from video" -l e2ee -d "E2EE-capable models only"
+complete -c venice -n "__venice_using_command models" -l privacy -d "Privacy-preserving models only"
+complete -c venice -n "__venice_using_command models" -l tee -d "TEE-attestable models only"
+complete -c venice -n "__venice_using_command models" -l e2ee -d "E2EE-capable models only"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a embeddings -d "Generate embeddings"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a history -d "View history"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a usage -d "Show usage stats"
