@@ -92,6 +92,21 @@ venice chat -t calculator,weather "What's 25 * 4.5?"
 # JSON output for scripting
 venice chat -f json "List 3 colors" | jq '.content'
 
+# Request JSON object output (no schema)
+venice chat --json "extract the fields as JSON"
+
+# Structured JSON matching a schema file
+venice chat --json-schema schema.json "extract the fields"
+
+# Control reasoning effort on models that advertise it
+venice chat --reasoning-effort high "solve this"
+
+# xAI native search (web + X/Twitter) on supported Grok models
+venice chat --x-search "what is trending about venice ai"
+
+# Improve prompt-cache affinity across related requests
+venice chat --prompt-cache-key session-123 "continue with cached prefix"
+
 # Use piped context plus an instruction
 cat error.log | venice chat "find the root cause"
 
@@ -123,6 +138,12 @@ venice chat -m e2ee-qwen3-5-122b-a10b -q "This is encrypted but looks like norma
 | `--continue` | Continue last conversation (local history only; not covered by TEE/E2EE guarantees) |
 | `--no-stream` | Disable streaming output |
 | `--web-search` | Enable web search for current information |
+| `--x-search` | Enable xAI native search (web + X/Twitter) on supported Grok models |
+| `--json` | Request JSON object output without a schema |
+| `--json-schema <file>` | Request structured JSON matching a schema file |
+| `--reasoning-effort <level>` | Reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
+| `--prompt-cache-key <key>` | Route requests for better prompt-cache affinity |
+| `--prompt-cache-retention <mode>` | Prompt cache retention (`default`, `extended`, `24h`) |
 | `--no-thinking` | Disable reasoning on reasoning models |
 | `--strip-thinking` | Strip thinking blocks from response |
 | `--no-venice-prompt` | Disable Venice system prompts |
@@ -132,6 +153,17 @@ venice chat -m e2ee-qwen3-5-122b-a10b -q "This is encrypted but looks like norma
 | `--tee-verify` | Show TEE attestation details |
 | `-q, --quiet` | Hide E2EE/TEE status messages (show only response) |
 | `-f, --format <format>` | Output format (pretty\|json\|markdown\|raw) |
+
+Schema files are limited to 1 MiB and are compiled locally with strict JSON
+Schema validation before a completion request is sent. Draft 7, 2019-09, and
+2020-12 schemas are supported, including local `$ref` references and standard
+formats. Invalid schemas and unsupported keywords are rejected.
+
+Structured output, reasoning effort, and X search are fail-closed features:
+the selected model must be present in the model catalog and explicitly
+advertise the corresponding capability. They are unavailable when the catalog
+cannot be fetched. E2EE does not support structured output, reasoning effort,
+or prompt-cache key/retention options.
 
 ### Web Search
 

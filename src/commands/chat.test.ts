@@ -1,9 +1,9 @@
-import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -11,9 +11,11 @@ import {
   buildChatUserMessage,
   MAX_TOOL_ROUNDS,
   nonStreamChat,
+  requestedCapabilityError,
   streamChat,
 } from './chat.js';
 import { getToolDefinitions } from '../lib/tools.js';
+import { encryptMessage, generateEphemeralKeyPair } from '../lib/e2ee.js';
 import type { Message } from '../types/index.js';
 
 const cliPath = fileURLToPath(new URL('../index.js', import.meta.url));
@@ -23,7 +25,70 @@ interface ChatRequest {
   messages: Message[];
   tools?: Array<{ function: { name: string } }>;
   venice_parameters?: Record<string, unknown>;
+  reasoning_effort?: string;
+  prompt_cache_key?: string;
+  prompt_cache_retention?: string;
 }
+
+function runCli(args: string[], homeDir: string) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HOME: homeDir,
+      NO_COLOR: '1',
+    },
+  });
+}
+
+test('chat --help lists structured output, reasoning, and X search flags', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-help-'));
+
+  try {
+    const result = runCli(['chat', '--help'], homeDir);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /--json-schema/);
+    assert.match(result.stdout, /--json(?!-)/);
+    assert.match(result.stdout, /--reasoning-effort/);
+    assert.match(result.stdout, /--x-search/);
+    assert.match(result.stdout, /--prompt-cache-key/);
+    assert.match(result.stdout, /--prompt-cache-retention/);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('chat rejects combining --json and --json-schema', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-json-conflict-'));
+
+  try {
+    const schemaPath = join(homeDir, 'schema.json');
+    writeFileSync(schemaPath, JSON.stringify({ type: 'object' }));
+    const result = runCli(
+      ['chat', '--json', '--json-schema', schemaPath, 'extract the fields'],
+      homeDir
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}\n${result.stdout}`, /Cannot combine --json and --json-schema/i);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('chat --json-schema fails before the API when the file is missing', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-schema-'));
+
+  try {
+    const result = runCli(
+      ['chat', '--json-schema', join(homeDir, 'missing.json'), 'extract the fields'],
+      homeDir
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}\n${result.stdout}`, /not found/i);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
 
 test('chat preserves options and enforces the allowlist across tool rounds', async () => {
   const requests: ChatRequest[] = [];
@@ -32,7 +97,15 @@ test('chat preserves options and enforces the allowlist across tool rounds', asy
     if (request.method === 'GET' && request.url?.startsWith('/api/v1/models')) {
       response.setHeader('Content-Type', 'application/json');
       response.end(JSON.stringify({
-        data: [{ id: 'test-model', type: 'text' }],
+        data: [{
+          id: 'test-model',
+          type: 'text',
+          model_spec: {
+            capabilities: {
+              supportsReasoningEffort: true,
+            },
+          },
+        }],
       }));
       return;
     }
@@ -99,6 +172,12 @@ test('chat preserves options and enforces the allowlist across tool rounds', asy
           '--character',
           catalogCharacterSlug,
           '--web-search',
+          '--reasoning-effort',
+          'high',
+          '--prompt-cache-key',
+          'session-123',
+          '--prompt-cache-retention',
+          '24h',
           'Use two tools',
         ],
         {
@@ -134,6 +213,9 @@ test('chat preserves options and enforces the allowlist across tool rounds', asy
         request.venice_parameters?.character_slug,
         catalogCharacterSlug
       );
+      assert.equal(request.reasoning_effort, 'high');
+      assert.equal(request.prompt_cache_key, 'session-123');
+      assert.equal(request.prompt_cache_retention, '24h');
     }
 
     assert.equal(
@@ -153,14 +235,174 @@ test('chat preserves options and enforces the allowlist across tool rounds', asy
   }
 });
 
+test('chat --json-schema fails before the API when the file is invalid JSON', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-bad-schema-'));
+
+  try {
+    const schemaPath = join(homeDir, 'schema.json');
+    writeFileSync(schemaPath, '{not-json');
+    const result = runCli(['chat', '--json-schema', schemaPath, 'extract the fields'], homeDir);
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}\n${result.stdout}`, /Invalid JSON/i);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('chat --reasoning-effort rejects unknown values', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-effort-'));
+
+  try {
+    const result = runCli(['chat', '--reasoning-effort', 'ludicrous', 'solve this'], homeDir);
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}\n${result.stdout}`, /reasoning-effort|ludicrous/i);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('capability-gated options fail closed without an advertised model capability', () => {
+  const requested = {
+    model: 'test-model',
+    responseFormatRequested: true,
+    reasoningEffortRequested: false,
+    xSearchRequested: false,
+  };
+  assert.match(
+    requestedCapabilityError({ ...requested, catalogFailed: true }) || '',
+    /could not fetch.*catalog/i
+  );
+  assert.match(
+    requestedCapabilityError({ ...requested, catalogFailed: false }) || '',
+    /absent from the model catalog/i
+  );
+  assert.match(
+    requestedCapabilityError({
+      ...requested,
+      catalogFailed: false,
+      modelInfo: { id: 'test-model', type: 'text' },
+    }) || '',
+    /does not support structured output/i
+  );
+  assert.equal(
+    requestedCapabilityError({
+      ...requested,
+      catalogFailed: false,
+      modelInfo: {
+        id: 'test-model',
+        type: 'text',
+        model_spec: { capabilities: { supportsResponseSchema: true } },
+      },
+    }),
+    undefined
+  );
+});
+
+test('chat rejects --no-thinking with a non-none reasoning effort', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-conflict-'));
+
+  try {
+    const result = runCli(
+      ['chat', '--no-thinking', '--reasoning-effort', 'high', 'solve this'],
+      homeDir
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}\n${result.stdout}`, /Cannot combine --no-thinking/i);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('chat rejects prompt caching and reasoning with E2EE before completion', async () => {
+  let completionRequests = 0;
+  const requestUrls: string[] = [];
+  const server = createServer((request, response) => {
+    requestUrls.push(`${request.method} ${request.url}`);
+    if (request.method === 'GET' && request.url?.startsWith('/api/v1/models')) {
+      const requestedType = new URL(request.url, 'http://localhost').searchParams.get('type');
+      response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify({
+        data: !requestedType || requestedType === 'text' ? [{
+          id: 'e2ee-test-model',
+          type: 'text',
+          model_spec: {
+            capabilities: {
+              supportsE2EE: true,
+              supportsTeeAttestation: true,
+              supportsReasoningEffort: true,
+            },
+          },
+        }] : [],
+      }));
+      return;
+    }
+    if (request.method === 'POST' && request.url === '/api/v1/chat/completions') {
+      completionRequests++;
+    }
+    response.statusCode = 500;
+    response.end();
+  });
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-e2ee-options-'));
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [
+        cliPath,
+        'chat',
+        '--model',
+        'e2ee-test-model',
+        '--reasoning-effort',
+        'high',
+        '--prompt-cache-key',
+        'secret-cache',
+        'hello',
+      ], {
+        env: {
+          ...process.env,
+          HOME: homeDir,
+          NODE_ENV: 'test',
+          NO_COLOR: '1',
+          VENICE_API_KEY: 'test-key',
+          VENICE_API_BASE_URL: `http://127.0.0.1:${address.port}/api/v1`,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+      child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+      child.on('close', (status) => resolve({ status, stdout, stderr }));
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      `${result.stderr}\n${result.stdout}`,
+      /not supported with E2EE/i,
+      requestUrls.join('\n')
+    );
+    assert.equal(completionRequests, 0);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
 test('streaming chat preserves options and handles sequential tool rounds', async () => {
   const messages: Message[] = [{ role: 'user', content: 'Use two tools' }];
   const seenOptions: Array<{
     tools?: Array<{ function: { name: string } }>;
     venice_parameters?: Record<string, unknown>;
+    reasoning_effort?: string;
+    prompt_cache_key?: string;
+    prompt_cache_retention?: string;
   }> = [];
   let round = 0;
-  const completionStream: NonNullable<Parameters<typeof streamChat>[9]> =
+  const completionStream: NonNullable<NonNullable<Parameters<typeof streamChat>[5]>['completionStream']> =
     async function* (_messages, options) {
       seenOptions.push(options || {});
       round++;
@@ -208,13 +450,16 @@ test('streaming chat preserves options and handles sequential tool rounds', asyn
     false,
     'raw',
     {
-      enable_web_search: 'on',
-      character_slug: catalogCharacterSlug,
-    },
-    undefined,
-    true,
-    false,
-    completionStream
+      veniceParams: {
+        enable_web_search: 'on',
+        character_slug: catalogCharacterSlug,
+      },
+      quiet: true,
+      reasoningEffort: 'high',
+      promptCacheKey: 'session-123',
+      promptCacheRetention: '24h',
+      completionStream,
+    }
   );
 
   assert.equal(round, 3);
@@ -236,13 +481,167 @@ test('streaming chat preserves options and handles sequential tool rounds', asyn
       options.venice_parameters?.character_slug,
       catalogCharacterSlug
     );
+    assert.equal(options.reasoning_effort, 'high');
+    assert.equal(options.prompt_cache_key, 'session-123');
+    assert.equal(options.prompt_cache_retention, '24h');
   }
+});
+
+test('E2EE streaming strips server-side controls from the request', async () => {
+  let seenOptions: Record<string, unknown> | undefined;
+  const clientKeys = generateEphemeralKeyPair();
+  const encryptedContent = encryptMessage('normal-content', clientKeys.publicKeyHex);
+  const completionStream: NonNullable<NonNullable<Parameters<typeof streamChat>[5]>['completionStream']> =
+    async function* (_messages, options) {
+    seenOptions = options as unknown as Record<string, unknown>;
+    yield { reasoning_content: 'secret-reasoning', done: false };
+    yield { content: encryptedContent, done: false };
+    yield { done: true };
+  };
+  const output: string[] = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    output.push(chunk.toString());
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    await streamChat(
+      [],
+      'e2ee-test-model',
+      getToolDefinitions(['datetime']),
+      false,
+      'raw',
+      {
+        e2eeContext: {
+          privateKey: clientKeys.privateKey,
+          publicKeyHex: clientKeys.publicKeyHex,
+          modelPublicKey: '00',
+          attestation: {} as never,
+        },
+        quiet: true,
+        veniceParams: {
+          enable_web_search: 'on',
+          enable_x_search: true,
+          include_search_results_in_stream: true,
+          include_venice_system_prompt: true,
+          character_slug: catalogCharacterSlug,
+        },
+        reasoningEffort: 'high',
+        promptCacheKey: 'must-not-leak',
+        promptCacheRetention: '24h',
+        completionStream,
+      }
+    );
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+
+  assert.ok(seenOptions);
+  assert.equal(seenOptions.tools, undefined);
+  const params = seenOptions.venice_parameters as Record<string, unknown>;
+  assert.equal(params.enable_web_search, undefined);
+  assert.equal(params.enable_x_search, undefined);
+  assert.equal(params.include_search_results_in_stream, undefined);
+  assert.equal(params.include_venice_system_prompt, false);
+  assert.equal(params.character_slug, undefined);
+  assert.equal(seenOptions.reasoning_effort, undefined);
+  assert.equal(seenOptions.prompt_cache_key, undefined);
+  assert.equal(seenOptions.prompt_cache_retention, undefined);
+  assert.match(output.join(''), /^normal-content/);
+  assert.doesNotMatch(output.join(''), /secret-reasoning/);
+});
+
+test('structured non-streaming output stays valid JSON across tool rounds', async () => {
+  const seenOptions: Array<Record<string, unknown>> = [];
+  let round = 0;
+  const completion: NonNullable<NonNullable<Parameters<typeof nonStreamChat>[5]>['completion']> =
+    async (_messages, options) => {
+    seenOptions.push(options as unknown as Record<string, unknown>);
+    round++;
+    if (round === 1) {
+      return {
+        content: '',
+        tool_calls: [{
+          id: 'call-disabled',
+          type: 'function' as const,
+          function: { name: 'calculator', arguments: '{"expression":"2 + 2"}' },
+        }],
+        finish_reason: 'tool_calls',
+      };
+    }
+    return {
+      content: '{"answer":4}',
+      finish_reason: 'stop',
+    };
+  };
+  const output: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => output.push(args.join(' '));
+
+  try {
+    await nonStreamChat(
+      [{ role: 'user', content: 'Return JSON' }],
+      'test-model',
+      [],
+      false,
+      'raw',
+      {
+        responseFormat: { type: 'json_object' },
+        reasoningEffort: 'high',
+        promptCacheKey: 'session-123',
+        promptCacheRetention: '24h',
+        veniceParams: { enable_x_search: true },
+        completion,
+      }
+    );
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.deepEqual(JSON.parse(output.join('\n')), { answer: 4 });
+  assert.equal(seenOptions.length, 2);
+  for (const options of seenOptions) {
+    assert.deepEqual(options.response_format, { type: 'json_object' });
+    assert.equal(options.reasoning_effort, 'high');
+    assert.equal(options.prompt_cache_key, 'session-123');
+    assert.equal(options.prompt_cache_retention, '24h');
+    assert.deepEqual(options.venice_parameters, { enable_x_search: true });
+  }
+});
+
+test('direct non-streaming chat rejects an invalid schema before completion', async () => {
+  let completionCalled = false;
+  await assert.rejects(
+    nonStreamChat(
+      [{ role: 'user', content: 'Return JSON' }],
+      'test-model',
+      [],
+      false,
+      'raw',
+      {
+        responseFormat: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'response',
+            schema: { type: 'object', unsupportedKeyword: true },
+          },
+        },
+        completion: async () => {
+          completionCalled = true;
+          return { content: '{}', finish_reason: 'stop' };
+        },
+      }
+    ),
+    /Invalid or unsupported JSON schema.*unknown keyword/i
+  );
+  assert.equal(completionCalled, false);
 });
 
 test('non-streaming chat stops after the maximum tool rounds', async () => {
   const messages: Message[] = [{ role: 'user', content: 'Keep calling tools' }];
   let completionCalls = 0;
-  const completion: NonNullable<Parameters<typeof nonStreamChat>[8]> =
+  const completion: NonNullable<NonNullable<Parameters<typeof nonStreamChat>[5]>['completion']> =
     async () => {
       completionCalls++;
       return {
@@ -263,10 +662,7 @@ test('non-streaming chat stops after the maximum tool rounds', async () => {
       getToolDefinitions(['datetime']),
       false,
       'raw',
-      undefined,
-      undefined,
-      true,
-      completion
+      { quiet: true, completion }
     ),
     new RegExp(`limit of ${MAX_TOOL_ROUNDS} rounds`)
   );
@@ -276,7 +672,7 @@ test('non-streaming chat stops after the maximum tool rounds', async () => {
 test('streaming chat stops after the maximum tool rounds', async () => {
   const messages: Message[] = [{ role: 'user', content: 'Keep calling tools' }];
   let completionCalls = 0;
-  const completionStream: NonNullable<Parameters<typeof streamChat>[9]> =
+  const completionStream: NonNullable<NonNullable<Parameters<typeof streamChat>[5]>['completionStream']> =
     async function* () {
       completionCalls++;
       yield {
@@ -299,11 +695,7 @@ test('streaming chat stops after the maximum tool rounds', async () => {
       [],
       false,
       'raw',
-      undefined,
-      undefined,
-      true,
-      false,
-      completionStream
+      { quiet: true, completionStream }
     ),
     new RegExp(`limit of ${MAX_TOOL_ROUNDS} rounds`)
   );

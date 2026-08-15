@@ -127,6 +127,10 @@ export interface ModelCapabilities {
   privacy?: boolean;
   supportsTeeAttestation?: boolean;
   supportsE2EE?: boolean;
+  supportsResponseSchema?: boolean;
+  supportsReasoning?: boolean;
+  supportsReasoningEffort?: boolean;
+  supportsXSearch?: boolean;
 }
 
 export interface Model {
@@ -154,6 +158,15 @@ export const isE2EEModel = (model: Model): boolean =>
 
 export const isTEEModel = (model: Model): boolean =>
   model.model_spec?.capabilities?.supportsTeeAttestation === true;
+
+export const supportsResponseSchema = (model: Model): boolean =>
+  model.model_spec?.capabilities?.supportsResponseSchema === true;
+
+export const supportsReasoningEffort = (model: Model): boolean =>
+  model.model_spec?.capabilities?.supportsReasoningEffort === true;
+
+export const supportsXSearch = (model: Model): boolean =>
+  model.model_spec?.capabilities?.supportsXSearch === true;
 
 export interface CharacterStats {
   averageRating: number;
