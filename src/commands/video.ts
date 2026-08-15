@@ -344,8 +344,8 @@ export function registerVideoCommands(program: Command): void {
       const c = getChalk();
 
       try {
+        const shouldComplete = Boolean(options.complete || options.delete);
         const result = await retrieveVideo(queueId, options.model, {
-          deleteOnCompletion: Boolean(options.complete || options.delete),
           outputPath: options.output,
           maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
         });
@@ -375,6 +375,15 @@ export function registerVideoCommands(program: Command): void {
           });
         }
 
+        let deleted = false;
+        if (shouldComplete) {
+          const completion = await completeVideo(queueId, options.model);
+          if (!completion.success) {
+            throw new Error('Video cleanup did not succeed.');
+          }
+          deleted = true;
+        }
+
         if (format === 'json') {
           console.log(JSON.stringify({
             status: 'completed',
@@ -383,14 +392,14 @@ export function registerVideoCommands(program: Command): void {
             ...(result.kind === 'video'
               ? { bytes: result.bytesWritten, content_type: result.contentType }
               : {}),
-            ...(options.complete || options.delete ? { deleted: true } : {}),
+            ...(shouldComplete ? { deleted } : {}),
           }, null, 2));
           return;
         }
 
         console.log(formatSuccess(`Video saved to ${options.output}`));
         console.log(`${c.dim('Model:')} ${options.model}`);
-        if (options.complete || options.delete) {
+        if (deleted) {
           console.log(`${c.dim('Cleanup:')} media deleted after retrieval`);
         }
       } catch (error) {
@@ -504,7 +513,6 @@ export function registerVideoCommands(program: Command): void {
         }
 
         const result = await retrieveVideo(queued.queue_id, queued.model, {
-          deleteOnCompletion: Boolean(options.complete),
           outputPath: options.output,
           maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
         });
@@ -521,18 +529,30 @@ export function registerVideoCommands(program: Command): void {
           });
         }
 
+        let deleted = false;
+        if (options.complete) {
+          const completion = await completeVideo(queued.queue_id, queued.model);
+          if (!completion.success) {
+            throw new Error('Video cleanup did not succeed.');
+          }
+          deleted = true;
+        }
+
         if (format === 'json') {
           console.log(JSON.stringify({
             ...queued,
             output: options.output,
             upscale_factor: factor,
-            deleted: Boolean(options.complete),
+            deleted,
           }, null, 2));
         } else {
           console.log(formatSuccess(`Upscaled video saved to ${options.output}`));
           console.log(`${c.dim('Queue ID:')} ${queued.queue_id}`);
           console.log(`${c.dim('Model:')} ${queued.model}`);
           console.log(`${c.dim('Factor:')} ${factor}x`);
+          if (deleted) {
+            console.log(`${c.dim('Cleanup:')} media deleted after download`);
+          }
         }
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
@@ -553,17 +573,12 @@ export function registerVideoCommands(program: Command): void {
 
       try {
         const live = await listModels({ type: 'video', showSpinner: false });
-        if (live.length === 0) {
-          usedFallback = true;
-          models = FALLBACK_VIDEO_MODELS;
-        } else {
-          models = live.map((model: Model) => ({
-            id: model.id,
-            name: model.model_spec?.description,
-            type: videoModelKind(model.id),
-            description: model.model_spec?.description,
-          }));
-        }
+        models = live.map((model: Model) => ({
+          id: model.id,
+          name: model.model_spec?.description,
+          type: videoModelKind(model.id),
+          description: model.model_spec?.description,
+        }));
       } catch {
         usedFallback = true;
         models = FALLBACK_VIDEO_MODELS;
@@ -580,6 +595,9 @@ export function registerVideoCommands(program: Command): void {
       console.log(c.bold('Available Video Models\n'));
       if (usedFallback) {
         console.log(c.yellow('Live catalog unavailable; showing fallback models.\n'));
+      } else if (models.length === 0) {
+        console.log('No video models were returned by the live API.');
+        return;
       }
       const idWidth = Math.max(35, ...models.map((model) => model.id.length + 2));
       console.log(`${c.dim('ID'.padEnd(idWidth))} ${c.dim('Type')}`);

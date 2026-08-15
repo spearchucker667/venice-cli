@@ -1207,7 +1207,6 @@ async function retrieveVideoResponse(
   queueId: string,
   model: string,
   options: {
-    deleteOnCompletion?: boolean;
     spinnerText?: string;
     statusOnly?: boolean;
     outputPath?: string;
@@ -1215,10 +1214,13 @@ async function retrieveVideoResponse(
   } = {}
 ): Promise<VideoRetrieveResult> {
   const spinner = startSpinner(options.spinnerText || 'Checking video status...');
-  const body: Record<string, unknown> = { queue_id: queueId, model };
-  if (options.deleteOnCompletion !== undefined) {
-    body.delete_media_on_completion = options.deleteOnCompletion;
-  }
+  // Retrieval must never delete the remote media. Callers can explicitly
+  // complete the job only after the response is safely persisted locally.
+  const body: Record<string, unknown> = {
+    queue_id: queueId,
+    model,
+    delete_media_on_completion: false,
+  };
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
@@ -1526,13 +1528,11 @@ export async function retrieveVideo(
   queueId: string,
   model: string,
   options: {
-    deleteOnCompletion?: boolean;
     outputPath?: string;
     maxBytes?: number;
   } = {}
 ): Promise<VideoRetrieveResult> {
   return retrieveVideoResponse(queueId, model, {
-    deleteOnCompletion: options.deleteOnCompletion ?? false,
     spinnerText: 'Retrieving video...',
     outputPath: options.outputPath,
     maxBytes: options.maxBytes,
