@@ -24,12 +24,27 @@ export function ApprovalPrompt({ toolName, input, risk, onDecision }: ApprovalPr
     { key: 'no', label: 'No', value: { approved: false } },
   ];
 
+  const formatInput = (data: unknown) => {
+    try {
+      const str = JSON.stringify(data, null, 2);
+      const lines = str.split('\n');
+      if (lines.length > 10) {
+        return lines.slice(0, 10).join('\n') + '\n  ...';
+      }
+      return str;
+    } catch {
+      return '[object Object]';
+    }
+  };
+
   return (
-    <Box flexDirection="column" borderStyle="single" padding={1}>
+    <Box flexDirection="column" borderStyle="single" padding={1} borderColor={risk === 'execute' ? 'red' : 'yellow'}>
       <Text bold>Allow {toolName}?</Text>
       <Text dimColor>Risk: {risk}</Text>
-      <Text>{JSON.stringify(input)}</Text>
-      <SelectInput items={items} onSelect={(item) => onDecision(item.value)} />
+      <Text>{formatInput(input)}</Text>
+      <Box marginTop={1}>
+        <SelectInput items={items} onSelect={(item) => onDecision(item.value)} />
+      </Box>
     </Box>
   );
 }

@@ -43,3 +43,4 @@ coverage/
 # Local temporary artifacts
 tmp/
 .worktrees/
+.reference/

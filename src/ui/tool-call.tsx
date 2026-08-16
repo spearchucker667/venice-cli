@@ -12,12 +12,29 @@ export interface ToolCallEventProps {
 }
 
 export function ToolCallEvent({ toolName, input, ok, error }: ToolCallEventProps): JSX.Element {
+  const formatInput = (data: unknown) => {
+    try {
+      const str = JSON.stringify(data);
+      if (str.length > 80) {
+        return str.substring(0, 77) + '...';
+      }
+      return str;
+    } catch {
+      return '[object Object]';
+    }
+  };
+
+  const formatError = (err?: string) => {
+    if (!err) return 'failed';
+    return err.split('\n')[0];
+  };
+
   return (
     <Box flexDirection="column" paddingLeft={2}>
       <Text dimColor>• {toolName}</Text>
-      <Text dimColor>{JSON.stringify(input)}</Text>
+      <Text dimColor>{formatInput(input)}</Text>
       {ok === true && <Text color="green">✓ done</Text>}
-      {ok === false && <Text color="red">✗ {error || 'failed'}</Text>}
+      {ok === false && <Text color="red">✗ {formatError(error)}</Text>}
     </Box>
   );
 }

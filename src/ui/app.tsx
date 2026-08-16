@@ -45,6 +45,28 @@ interface PendingApproval {
 
 type PickerMode = 'normal' | 'model-picker' | 'session-picker';
 
+function useStdoutDimensions() {
+  const [dimensions, setDimensions] = useState({
+    columns: process.stdout.columns || 80,
+    rows: process.stdout.rows || 24,
+  });
+
+  useEffect(() => {
+    const handleResize = () => {
+      setDimensions({
+        columns: process.stdout.columns || 80,
+        rows: process.stdout.rows || 24,
+      });
+    };
+    process.stdout.on('resize', handleResize);
+    return () => {
+      process.stdout.off('resize', handleResize);
+    };
+  }, []);
+
+  return dimensions;
+}
+
 function minimalAgentState(workspaceRoot: string): AgentState {
   return {
     sessionId: 'tui',
@@ -78,9 +100,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
   const runtimeRef = useRef<AgentRuntime | null>(null);
   const permissionsRef = useRef<PermissionManager>(new PermissionManager(approvalMode));
 
-  const [messages, setMessages] = useState<TuiMessage[]>([
-    { id: 'welcome', role: 'system', content: 'Venice Agent — type /help for commands or enter a task.' },
-  ]);
+  const [messages, setMessages] = useState<TuiMessage[]>([]);
   const [status, setStatus] = useState<AgentStatus>('idle');
   const [isRunning, setIsRunning] = useState(false);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
@@ -298,8 +318,10 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     setPendingApproval(null);
   };
 
+  const { columns, rows } = useStdoutDimensions();
+
   return (
-    <Box flexDirection="column" height="100%">
+    <Box flexDirection="column" height={rows} width={columns}>
       <Transcript messages={messages} />
       {error && (
         <Box paddingX={1}>
