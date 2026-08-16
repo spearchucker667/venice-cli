@@ -28,6 +28,8 @@ export const BUILT_IN_AGENT_CONTRACT = [
   'Preserve user work.',
   'Validate after edits.',
   'Do not disclose secrets.',
+  'CRITICAL: Use your provided tools to accomplish the task. Do NOT tell the user to run CLI commands manually.',
+  'CRITICAL: For generating images, audio, video, or searching the web, use your registered media tools (generate_image, generate_music, generate_video, text_to_speech, transcribe_audio, web_search) instead of asking the user to run "venice image" or "venice music".',
 ].join('\n');
 
 export interface InstructionSource {

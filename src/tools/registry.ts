@@ -31,7 +31,7 @@ import { spawnAgentTool } from './agent-meta/spawn-agent.js';
 import { runValidationTool } from './validation/run.js';
 import { webSearchTool, webScrapeTool } from './venice/search.js';
 import { editImageTool, generateImageTool, removeBackgroundTool, upscaleImageTool } from './venice/image.js';
-import { textToSpeechTool, transcribeAudioTool } from './venice/audio.js';
+import { textToSpeechTool, transcribeAudioTool, generateMusicTool } from './venice/audio.js';
 import { generateVideoTool, imageToVideoTool } from './venice/video.js';
 
 export class ToolRegistry {
@@ -100,5 +100,6 @@ export function createDefaultRegistry(): ToolRegistry {
   registry.register(imageToVideoTool);
   registry.register(transcribeAudioTool);
   registry.register(textToSpeechTool);
+  registry.register(generateMusicTool);
   return registry;
 }

@@ -19,4 +19,5 @@ export interface TuiState {
   approvalMode: string;
   contextTokens: number;
   maxTokens: number;
+  gitBranch?: string;
 }

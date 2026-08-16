@@ -10,11 +10,14 @@ describe('Composer', () => {
   });
 
   it('submits trimmed text', () => {
+    let submitted = false;
     const { stdin, lastFrame } = render(<Composer onSubmit={(text) => {
       assert.strictEqual(text, 'hello');
+      submitted = true;
     }} />);
     stdin.write('hello');
-    stdin.write('\r');
     assert.ok(lastFrame()?.includes('hello'));
+    stdin.write('\r');
+    assert.ok(submitted);
   });
 });

@@ -12,9 +12,10 @@ export interface StatusBarProps {
 export function StatusBar({ state }: StatusBarProps): JSX.Element {
   const isUnknown = state.maxTokens === 0;
   const contextPct = !isUnknown ? Math.round((state.contextTokens / state.maxTokens) * 100) : 0;
+  const location = state.gitBranch ? `${state.workspaceRoot} (${state.gitBranch})` : state.workspaceRoot;
   return (
     <Box justifyContent="space-between" borderStyle="single" paddingX={1}>
-      <Text>{state.model} · {state.workspaceRoot}</Text>
+      <Text>{state.model} · {location}</Text>
       <Text>{state.status} · {state.approvalMode} · {state.contextTokens}/{isUnknown ? 'unknown' : state.maxTokens} {!isUnknown && `(${contextPct}%)`}</Text>
     </Box>
   );

@@ -62,6 +62,16 @@ function minimalAgentState(workspaceRoot: string): AgentState {
   };
 }
 
+import { execSync } from 'child_process';
+
+function getGitBranch(cwd: string): string | undefined {
+  try {
+    return execSync('git branch --show-current', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
 export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, initialObjective, onExit }: AppProps): JSX.Element {
   const { exit } = useApp();
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -77,6 +87,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
   const [error, setError] = useState<string | undefined>(undefined);
   const [currentModel, setCurrentModel] = useState(model);
   const [mode, setMode] = useState<PickerMode>('normal');
+  const [gitBranch] = useState(() => getGitBranch(workspaceRoot));
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
@@ -332,6 +343,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
           approvalMode,
           contextTokens: runtimeRef.current?.getContextManager().estimateTokens() ?? 0,
           maxTokens: runtimeRef.current?.getContextManager().getMaxTokens() ?? 0,
+          gitBranch,
         }}
       />
     </Box>
