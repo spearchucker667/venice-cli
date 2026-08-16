@@ -34,13 +34,13 @@ export function registerResponsesCommand(program: Command): void {
         }
 
         const body: Record<string, unknown> = {
-          messages: [{ role: 'user', content: prompt }],
+          input: [{ type: 'message', role: 'user', content: prompt }],
         };
 
         if (options.system) {
-          body.messages = [
-            { role: 'system', content: options.system },
-            { role: 'user', content: prompt }
+          body.input = [
+            { type: 'message', role: 'system', content: options.system },
+            { type: 'message', role: 'user', content: prompt }
           ];
         }
 

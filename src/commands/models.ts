@@ -2,7 +2,7 @@
  * Models Command - List and filter available models
  */
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { listModels, listModelTraits, listModelCompatibilityMappings } from '../lib/api.js';
 import {
   formatError,
@@ -15,7 +15,7 @@ export function registerModelsCommand(program: Command): void {
   const modelsCmd = program
     .command('models')
     .description('List available models')
-    .option('-t, --type <type>', 'Filter by type (all|text|image|tts|asr|music|embedding|video|upscale|inpaint)')
+    .addOption(new Option('-t, --type <type>', 'Filter by type').choices(['all', 'text', 'image', 'tts', 'asr', 'music', 'embedding', 'video', 'upscale', 'inpaint']))
     .option('-s, --search <query>', 'Search models by name')
     .option('--privacy', 'Show only privacy-preserving models')
     .option('-d, --details', 'Show detailed model specs and capabilities')
@@ -103,9 +103,9 @@ export function registerModelsCommand(program: Command): void {
               const spec = model.model_spec || {};
               const caps = spec.capabilities as Record<string, any> || {};
               const indent = '     ';
+              const maxWidth = Math.max(60, (process.stdout.columns || 80) - indent.length - 2);
               
               if (spec.description) {
-                const maxWidth = Math.max(60, (process.stdout.columns || 80) - indent.length - 2);
                 for (const line of wrapText(spec.description, maxWidth)) {
                   console.log(`${indent}${c.dim(line)}`);
                 }
@@ -117,9 +117,20 @@ export function registerModelsCommand(program: Command): void {
               if (caps.supportsWebSearch) details.push('WebSearch: Yes');
               if (caps.optimizedForCode) details.push('Code: Yes');
               if (caps.supportsFunctionCalling) details.push('Tools: Yes');
+              if (caps.supportsCustomDimensions) details.push('Custom Dimensions: Yes');
+              if (caps.embeddingDimensions) details.push(`Embedding Dims: ${caps.embeddingDimensions}`);
+              
+              if (spec.traits && spec.traits.length > 0) {
+                const traitNames = spec.traits.map((t: any) => typeof t === 'string' ? t : t.name).join(', ');
+                details.push(`Traits: ${traitNames}`);
+              }
               
               if (details.length > 0) {
-                console.log(`${indent}${c.green('↳')} ${c.dim(details.join(' • '))}`);
+                // Split long details lines
+                const detailsStr = details.join(' • ');
+                for (const line of wrapText(detailsStr, maxWidth - 2)) {
+                  console.log(`${indent}${c.green('↳')} ${c.dim(line)}`);
+                }
               }
             } else if (model.model_spec?.description) {
               const desc = model.model_spec.description;

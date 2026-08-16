@@ -1,5 +1,5 @@
 {
-  "name": "veniceai-cli",
+  "name": "@spearchucker667/venice-cli",
   "version": "2.1.0",
   "description": "Privacy-first AI agent and command-line toolkit powered by Venice",
   "type": "module",
@@ -12,9 +12,12 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "npm run build && npm run test:compiled",
-    "test:compiled": "node scripts/run-tests.mjs",
+    "test:compiled": "node scripts/run-tests.mjs --no-security",
+    "test:security": "node scripts/run-tests.mjs --security",
+    "api:contract": "node scripts/api-drift-check.mjs",
+    "completions:check": "node scripts/completions-check.mjs",
     "pack:check": "npm pack --dry-run --json",
-    "verify": "npm run lint && npm run build && npm run test:compiled && npm audit --omit=dev && npm run pack:check",
+    "verify": "npm run lint && npm run build && npm run test:compiled && npm run test:security && npm run completions:check && npm run api:contract && npm audit --omit=dev && npm run pack:check",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "clean": "node -e \"const fs = require('fs'); fs.rmSync('dist', { recursive: true, force: true });\"",
     "prepublishOnly": "npm run verify"
@@ -43,12 +46,14 @@
     "update-notifier": "^7.3.1"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.11.0",
     "@types/react": "^18.3.31",
     "@typescript-eslint/eslint-plugin": "^8.57.0",
     "@typescript-eslint/parser": "^8.57.0",
     "eslint": "^10.0.3",
     "ink-testing-library": "^4.0.0",
+    "js-yaml": "^5.3.0",
     "tsx": "^4.23.12",
     "typescript": "^5.3.0"
   },
@@ -73,10 +78,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/veniceai/venice-cli"
+    "url": "https://github.com/spearchucker667/venice-cli"
   },
   "bugs": {
-    "url": "https://github.com/veniceai/venice-cli/issues"
+    "url": "https://github.com/spearchucker667/venice-cli/issues"
   },
   "homepage": "https://venice.ai"
 }

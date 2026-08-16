@@ -17,7 +17,7 @@ export function registerEmbeddingsCommand(program: Command): void {
     .command('embeddings [text...]')
     .alias('embed')
     .description('Generate text embeddings')
-    .option('-m, --model <model>', 'Model to use', 'text-embedding-bge-m3')
+    .option('-m, --model <model>', 'Model to use')
     .option('-i, --input <text...>', 'Explicit inputs (preserves multiple inputs)')
     .option('-d, --dimensions <number>', 'Number of dimensions')
     .option('-e, --encoding-format <format>', 'Encoding format (float|base64)')

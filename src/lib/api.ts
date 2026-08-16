@@ -114,7 +114,7 @@ function getHeaders(
     if (apiKey) {
       headers.Authorization = `Bearer ${apiKey}`;
     } else if (x402) {
-      headers['X-Sign-In-With-X'] = x402;
+      headers['SIGN-IN-WITH-X'] = x402;
     } else {
       // Trigger the throw for missing auth
       requireApiKey();
@@ -235,10 +235,14 @@ export async function apiRequest<T>(
           );
           errorBody = errorBytes.toString('utf-8');
         } else {
-          // Preserve the existing JSON/stream behavior: only binary response
-          // bodies retain the request timeout while they are consumed.
+          // VC-AUD-037: Bounded error reader
+          const errorBytes = await readResponseBodyWithLimit(
+            response,
+            1024 * 1024, // 1MB max for error bodies
+            'API error response'
+          );
           clearTimeout(timeoutId);
-          errorBody = await response.text();
+          errorBody = errorBytes.toString('utf-8');
         }
         throw VeniceApiError.fromResponse(response, errorBody);
       }
@@ -287,12 +291,18 @@ export async function apiRequest<T>(
         return Uint8Array.from(bytes).buffer as T;
       }
 
+      // VC-AUD-037: Bounded JSON reader
+      const jsonBytes = await readResponseBodyWithLimit(
+        response,
+        50 * 1024 * 1024, // 50MB max for JSON
+        'API JSON response'
+      );
       clearTimeout(timeoutId);
       if (spinner) {
         stopSpinner(true);
         spinner = null;
       }
-      return await response.json() as T;
+      return JSON.parse(jsonBytes.toString('utf-8')) as T;
     } catch (error) {
       clearTimeout(timeoutId);
 
@@ -320,8 +330,12 @@ export async function apiRequest<T>(
           );
         }
 
+        // VC-AUD-038: Network Jitter + Retry-After backoff logic
+        const jitter = Math.random() * 200; // up to 200ms jitter
+        const backoff = (RETRY_DELAY_MS * Math.pow(2, attempt)) + jitter;
+
         if (error.isRateLimited()) {
-          const waitTime = error.retryAfter ? error.retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1) * 2;
+          const waitTime = error.retryAfter ? (error.retryAfter * 1000) + jitter : backoff;
           if (spinner) spinner.text = `Rate limited, waiting... (attempt ${attempt + 1}/${retries + 1})`;
           await sleep(waitTime);
           continue;
@@ -329,7 +343,7 @@ export async function apiRequest<T>(
 
         if (error.isRetryable() && attempt < retries) {
           if (spinner) spinner.text = `Retrying... (attempt ${attempt + 2}/${retries + 1})`;
-          await sleep(RETRY_DELAY_MS * (attempt + 1));
+          await sleep(backoff);
           continue;
         }
       } else if (error instanceof Error) {
@@ -343,7 +357,9 @@ export async function apiRequest<T>(
             );
           }
           if (spinner) spinner.text = `Connection error, retrying... (attempt ${attempt + 2}/${retries + 1})`;
-          await sleep(RETRY_DELAY_MS * (attempt + 1));
+          const jitter = Math.random() * 200;
+          const backoff = (RETRY_DELAY_MS * Math.pow(2, attempt)) + jitter;
+          await sleep(backoff);
           continue;
         }
         lastError = new VeniceApiError(error.message);
@@ -1190,7 +1206,7 @@ export async function generateEmbeddings(
     encoding_format?: 'float' | 'base64';
   } = {}
 ): Promise<{ embedding: number[]; index: number }[]> {
-  const model = options.model || 'text-embedding-bge-m3';
+  const model = options.model || 'text-embedding-3-small'; // fallback to standard
   const body: Record<string, unknown> = {
     model,
     input: Array.isArray(input) ? input : [input],

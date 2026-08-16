@@ -302,6 +302,15 @@ export function registerChatCommand(program: Command): void {
     .option('-q, --quiet', 'Hide E2EE/TEE status messages (show only response)')
     .option('-f, --format <format>', 'Output format (pretty|json|markdown|raw)')
     .option('--list-tools', 'List available tools')
+    .option('--parallel-tool-calls <bool>', 'Enable parallel tool calls')
+    .option('--max-completion-tokens <num>', 'Maximum completion tokens to generate', parseInt)
+    .option('--temperature <num>', 'Temperature (0.0 to 2.0)', parseFloat)
+    .option('--top-p <num>', 'Top-p sampling', parseFloat)
+    .option('--top-k <num>', 'Top-k sampling', parseInt)
+    .option('--min-p <num>', 'Min-p sampling', parseFloat)
+    .option('--seed <num>', 'Random seed', parseInt)
+    .option('--frequency-penalty <num>', 'Frequency penalty (-2.0 to 2.0)', parseFloat)
+    .option('--presence-penalty <num>', 'Presence penalty (-2.0 to 2.0)', parseFloat)
     .option('--image <path>', 'Attach an image file or URL (repeatable)', collectOptionValue, [])
     .option('--file <path>', 'Attach a document or source file (repeatable)', collectOptionValue, [])
     .option('--audio <path>', 'Attach an audio file or URL (repeatable)', collectOptionValue, [])
@@ -612,6 +621,15 @@ export function registerChatCommand(program: Command): void {
         reasoningEffort,
         promptCacheKey: options.promptCacheKey,
         promptCacheRetention,
+        parallelToolCalls: options.parallelToolCalls !== undefined ? options.parallelToolCalls !== 'false' : undefined,
+        maxCompletionTokens: options.maxCompletionTokens,
+        temperature: options.temperature,
+        topP: options.topP,
+        topK: options.topK,
+        minP: options.minP,
+        seed: options.seed,
+        frequencyPenalty: options.frequencyPenalty,
+        presencePenalty: options.presencePenalty,
       };
 
       try {
@@ -754,6 +772,15 @@ export interface ChatRunExtras {
   reasoningEffort?: ReasoningEffort;
   promptCacheKey?: string;
   promptCacheRetention?: PromptCacheRetention;
+  parallelToolCalls?: boolean;
+  maxCompletionTokens?: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  minP?: number;
+  seed?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
   completion?: ChatCompletionFn;
   completionStream?: ChatCompletionStreamFn;
 }
@@ -786,6 +813,33 @@ function buildRequestOptions(
   }
   if (extras.promptCacheRetention) {
     request.prompt_cache_retention = extras.promptCacheRetention;
+  }
+  if (extras.parallelToolCalls !== undefined) {
+    request.parallel_tool_calls = extras.parallelToolCalls;
+  }
+  if (extras.maxCompletionTokens !== undefined) {
+    request.max_completion_tokens = extras.maxCompletionTokens;
+  }
+  if (extras.temperature !== undefined) {
+    request.temperature = extras.temperature;
+  }
+  if (extras.topP !== undefined) {
+    request.top_p = extras.topP;
+  }
+  if (extras.topK !== undefined) {
+    request.top_k = extras.topK;
+  }
+  if (extras.minP !== undefined) {
+    request.min_p = extras.minP;
+  }
+  if (extras.seed !== undefined) {
+    request.seed = extras.seed;
+  }
+  if (extras.frequencyPenalty !== undefined) {
+    request.frequency_penalty = extras.frequencyPenalty;
+  }
+  if (extras.presencePenalty !== undefined) {
+    request.presence_penalty = extras.presencePenalty;
   }
 
   return request;

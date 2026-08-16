@@ -225,6 +225,8 @@ export interface ModelCapabilities {
   supportsAudioInput?: boolean;
   supportsVideoInput?: boolean;
   maxVideos?: number;
+  supportsCustomDimensions?: boolean;
+  embeddingDimensions?: number;
 }
 
 export interface Model {

@@ -4,21 +4,33 @@ import { spawn } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-async function discoverTests(directory) {
+async function discoverTests(directory, filterFn) {
   const entries = await readdir(directory, { withFileTypes: true });
   const tests = [];
   for (const entry of entries) {
     const entryPath = resolve(directory, entry.name);
     if (entry.isDirectory()) {
-      tests.push(...await discoverTests(entryPath));
+      tests.push(...await discoverTests(entryPath, filterFn));
     } else if (entry.isFile() && entry.name.endsWith('.test.js')) {
-      tests.push(entryPath);
+      if (!filterFn || filterFn(entryPath)) {
+        tests.push(entryPath);
+      }
     }
   }
   return tests;
 }
 
-const tests = (await discoverTests(resolve('dist'))).sort();
+const args = process.argv.slice(2);
+let tests;
+if (args[0] === '--security') {
+  tests = await discoverTests(resolve('dist'), p => p.includes('security.test.js'));
+} else if (args[0] === '--no-security') {
+  tests = await discoverTests(resolve('dist'), p => !p.includes('security.test.js'));
+} else {
+  tests = await discoverTests(resolve('dist'));
+}
+tests.sort();
+
 if (tests.length === 0) {
   console.error('No compiled test files found under dist.');
   process.exitCode = 1;

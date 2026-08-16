@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { SecretRedactor, collectKnownSecrets } from '../lib/redactor.js';
 import type { AgentEvent } from './events.js';
 import type { AgentState } from './types.js';
 
@@ -30,14 +31,27 @@ interface SessionFileOps {
 
 export class SessionManager {
   readonly root: string;
+  private readonly redactor: SecretRedactor;
 
   constructor(root = SESSIONS_ROOT, private readonly fileOps: SessionFileOps = fs) {
     this.root = root;
+    this.redactor = new SecretRedactor(collectKnownSecrets());
   }
 
   ensureDir(): void {
     if (!fs.existsSync(this.root)) {
       fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    } else {
+      // Validate permissions if it exists
+      try {
+        const stat = fs.statSync(this.root);
+        // Ensure not world readable/writable
+        if ((stat.mode & 0o077) !== 0) {
+          fs.chmodSync(this.root, 0o700);
+        }
+      } catch {
+        // Ignore chmod errors on unsupported platforms
+      }
     }
   }
 
@@ -48,13 +62,16 @@ export class SessionManager {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 
+    const redactedState = this.redactor.redact(state);
+    const redactedEvents = this.redactor.redact(events);
+
     const existing = this.readStored(path.join(dir, 'session.json'));
     const stored: StoredSession = {
-      sessionId: state.sessionId,
-      state,
+      sessionId: redactedState.sessionId,
+      state: redactedState,
       createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      events,
+      events: redactedEvents,
     };
 
     this.removeStaleTemps(dir);
@@ -62,8 +79,8 @@ export class SessionManager {
     // These files are convenient for inspection, but session.json is the canonical
     // commit record so an interruption cannot mix state and events generations.
     try {
-      this.writeAtomic(path.join(dir, 'messages.jsonl'), state.messages.map((m) => JSON.stringify(m)).join('\n') + '\n');
-      this.writeAtomic(path.join(dir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      this.writeAtomic(path.join(dir, 'messages.jsonl'), redactedState.messages.map((m) => JSON.stringify(m)).join('\n') + '\n');
+      this.writeAtomic(path.join(dir, 'events.jsonl'), redactedEvents.map((e) => JSON.stringify(e)).join('\n') + '\n');
     } catch {
       // A future save repairs projections from the canonical record.
     }
@@ -141,6 +158,16 @@ export class SessionManager {
       this.fileOps.closeSync(descriptor);
       descriptor = undefined;
       this.fileOps.renameSync(tmpPath, filePath);
+      
+      // POSIX directory fsync for metadata durability
+      try {
+        const dir = path.dirname(filePath);
+        const dirDescriptor = this.fileOps.openSync(dir, 'r');
+        this.fileOps.fsyncSync(dirDescriptor);
+        this.fileOps.closeSync(dirDescriptor);
+      } catch {
+        // Ignored; directory fsync is not supported on all platforms (e.g. Windows)
+      }
     } catch (error) {
       if (descriptor !== undefined) {
         try { this.fileOps.closeSync(descriptor); } catch { /* preserve original error */ }

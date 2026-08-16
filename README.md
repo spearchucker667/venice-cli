@@ -2,7 +2,7 @@
 
 > Privacy-first AI agent and command-line toolkit powered by Venice.
 
-[![npm version](https://badge.fury.io/js/veniceai-cli.svg)](https://www.npmjs.com/package/veniceai-cli)
+[![npm version](https://badge.fury.io/js/%40spearchucker667%2Fvenice-cli.svg)](https://www.npmjs.com/package/@spearchucker667/venice-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Work naturally with a workspace-aware agent, or use deterministic commands for chat, search, images, audio, video, and automation—all from your terminal.
@@ -10,13 +10,13 @@ Work naturally with a workspace-aware agent, or use deterministic commands for c
 ## Installation
 
 ```bash
-npm install -g veniceai-cli
+npm install -g @spearchucker667/venice-cli
 ```
 
 Or run it without installing:
 
 ```bash
-npx veniceai-cli
+npx @spearchucker667/venice-cli
 ```
 
 ## Quick Start

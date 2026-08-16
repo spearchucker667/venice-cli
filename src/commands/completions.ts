@@ -356,7 +356,7 @@ complete -F _venice_completion venice`;
 }
 
 function generateZshCompletion(program: Command): string {
-  const topLevelCommands = program.commands.map(cmd => cmd.name()).join(' ');
+
 
   return `#compdef venice
 
@@ -365,7 +365,12 @@ _venice() {
     
     local -a commands
     commands=(
-        ${topLevelCommands.split(' ').map(c => `'${c}'`).join('\n        ')}
+${program.commands
+  .filter(cmd => cmd.name() !== '__complete' && cmd.name() !== 'completions')
+  .map(cmd => `        '${cmd.name().split('|')[0]}:${cmd.description().replace(/'/g, "'\\''")}'`)
+  .join('\n')}
+        'completions:Shell completions'
+        '__complete:Internal completion helper'
     )
 
     local -a models
@@ -665,32 +670,12 @@ set -l commands ${topLevelCommands}
 complete -c venice -f
 
 # Main commands
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a chat -d "Chat with an AI model"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a search -d "Web search with optional AI synthesis"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a scrape -d "Scrape a public page to Markdown"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a parse -d "Extract text from a document"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image -d "Generate an image"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-edit -d "Edit a local image"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-multi-edit -d "Edit layered local images"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-bg-remove -d "Remove an image background"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a image-styles -d "List image style presets"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a upscale -d "Upscale an image"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a tts -d "Convert text to speech"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a transcribe -d "Transcribe audio"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a video -d "AI video generation"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a music -d "Generate music and sound effects"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a models -d "List models"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a embeddings -d "Generate embeddings"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a history -d "View history"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a usage -d "Show usage stats"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a billing -d "Show account billing"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a keys -d "Manage API keys"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a config -d "Manage config"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a characters -d "List API characters"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voices -d "List voices"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a voice -d "Create and manage cloned voices"
+${program.commands
+  .filter(cmd => cmd.name() !== '__complete' && cmd.name() !== 'completions')
+  .map(cmd => `complete -c venice -n "not __fish_seen_subcommand_from $commands" -a ${cmd.name().split('|')[0]} -d "${cmd.description()}"`)
+  .join('\n')}
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions -d "Shell completions"
-complete -c venice -n "not __fish_seen_subcommand_from $commands" -a rpc -d "Crypto JSON-RPC"
+complete -c venice -n "not __fish_seen_subcommand_from $commands" -a __complete -d "Internal completion helper"
 
 # Models
 set -l models (venice __complete models --type text 2>/dev/null)
