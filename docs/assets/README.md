@@ -88,13 +88,17 @@ Use `@file` to attach workspace context, `!command` to request an explicit shell
 A new interactive session opens with a compact Venice identity panel. It is intentionally terminal-native: the README and other visual surfaces use the approved Venice artwork, while the CLI uses a lightweight ASCII interpretation for the terminal greeting.
 
 ```text
-       \       /
-        \  /\ /
-         \ / /
-          X
-         / \
-      __/   \__
-     (__)   (__)
+        _/\_  _/\_
+          \    /
+           \  /
+            X
+           / \
+          /   \
+         /     \
+        /       \
+       /         \
+      /           \
+     (___)     (___)
 
 Venice CLI
 Private and uncensored AI.
@@ -144,7 +148,7 @@ venice agent \
   --max-turns 40
 
 # Machine-readable final state
-venice agent --no-interactive --json \
+venice agent --no-interactive --output-format json \
   --prompt "Review the current diff"
 ```
 
@@ -311,7 +315,7 @@ venice tts -v bf_emma -o greeting.mp3 \
 venice voices
 
 # STT
-venice transcribe -t recording.mp3
+venice transcribe recording.mp3
 
 # Music model catalog and quote
 venice music models
@@ -330,8 +334,7 @@ venice music generate -m elevenlabs-music \
 venice models
 venice models -t image
 venice models --privacy
-venice models --tee
-venice models --e2ee
+venice models -d        # detailed specs and capabilities (incl. secure-execution flags)
 venice models -s llama
 
 # Fetch a TEE attestation report
@@ -430,7 +433,7 @@ venice billing analytics --lookback 30d
 # API keys
 venice keys list
 venice keys create --name ci --usd-limit 25 \
-  --limit-period month --output ./ci.key
+  --limit-period MONTH --output ./ci.key
 venice keys rate-limits
 venice keys delete <key-id>
 

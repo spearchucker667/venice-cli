@@ -96,7 +96,7 @@ describe('registerExportCommand', () => {
     }
   });
 
-  it('treats --debug as a JSON debug export', () => {
+  it('treats --debug as a real debug zip archive (VC-KIMI-059)', () => {
     const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-export-debug-')));
     const manager = new SessionManager();
     try {
@@ -108,18 +108,54 @@ describe('registerExportCommand', () => {
         objective: 'debug objective',
         status: 'complete' as const,
         mode: { inputMode: 'agent' as const, operatingMode: 'agent' as const, permissionMode: 'suggest' as const },
+        messages: [{ role: 'user' as const, content: 'debug message' }],
+        todos: [], relevantFiles: [], changedFiles: [], toolHistory: [], skillSummaries: [], activeSkills: [],
+      };
+      manager.save(state, []);
+      const program = new Command();
+      registerExportCommand(program);
+      program.exitOverride();
+      const output = path.join(tmp, 'debug.zip');
+      program.parse(['node', 'venice', 'export', 'debug-1', '--workspace', tmp, '--debug', '-o', output]);
+
+      const bytes = fs.readFileSync(output);
+      // ZIP local-file-header magic, not raw JSON.
+      assert.strictEqual(bytes.readUInt32LE(0), 0x04034b50);
+
+      // The archive must round-trip through import.
+      const imported = new SessionImportService(new SessionManager(path.join(tmp, 'imported'))).importFile(output);
+      assert.strictEqual(imported.sessionId, 'debug-1');
+      assert.strictEqual(imported.state.objective, 'debug objective');
+      assert.strictEqual(imported.state.messages.length, 1);
+    } finally {
+      manager.delete('debug-1');
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('exports a debug-zip format explicitly', () => {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-export-zipfmt-')));
+    const manager = new SessionManager();
+    try {
+      const state = {
+        sessionId: 'zipfmt-1',
+        workspaceRoot: tmp,
+        workspace: { primaryRoot: tmp, additionalRoots: [] },
+        model: 'test',
+        objective: 'zip format',
+        status: 'complete' as const,
+        mode: { inputMode: 'agent' as const, operatingMode: 'agent' as const, permissionMode: 'suggest' as const },
         messages: [], todos: [], relevantFiles: [], changedFiles: [], toolHistory: [], skillSummaries: [], activeSkills: [],
       };
       manager.save(state, []);
       const program = new Command();
       registerExportCommand(program);
       program.exitOverride();
-      const output = path.join(tmp, 'debug.json');
-      program.parse(['node', 'venice', 'export', 'debug-1', '--workspace', tmp, '--debug', '-o', output]);
-      const parsed = JSON.parse(fs.readFileSync(output, 'utf-8')) as StoredSession;
-      assert.strictEqual(parsed.sessionId, 'debug-1');
+      const output = path.join(tmp, 'session.zip');
+      program.parse(['node', 'venice', 'export', 'zipfmt-1', '--workspace', tmp, '--format', 'debug-zip', '-o', output]);
+      assert.strictEqual(fs.readFileSync(output).readUInt32LE(0), 0x04034b50);
     } finally {
-      manager.delete('debug-1');
+      manager.delete('zipfmt-1');
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });

@@ -71,7 +71,10 @@ describe('SessionImportService', () => {
 
   it('imports under a new id with --fork and records the parent', () => {
     const service = new SessionImportService(manager);
-    const result = service.importData(makeStored({ state: makeState({ sessionId: 'fork-source' }) }), { fork: true });
+    const result = service.importData(
+      makeStored({ sessionId: 'fork-source', state: makeState({ sessionId: 'fork-source' }) }),
+      { fork: true }
+    );
     assert.strictEqual(result.importedAs, 'forked');
     assert.notStrictEqual(result.sessionId, 'fork-source');
     assert.strictEqual(result.state.parentSessionId, 'fork-source');
@@ -113,5 +116,39 @@ describe('SessionImportService', () => {
     const bad = path.join(tmp, 'bad.json');
     fs.writeFileSync(bad, '{ not json');
     assert.throws(() => service.importFile(bad), /Failed to parse session file/);
+  });
+
+  it('rejects future schema versions explicitly (VC-KIMI-062)', () => {
+    const service = new SessionImportService(manager);
+    assert.throws(
+      () => service.importData(makeStored({ schemaVersion: 99 })),
+      /Unsupported session schema version 99/
+    );
+  });
+
+  it('rejects an identity mismatch between the stored id and the state id (VC-KIMI-061)', () => {
+    const service = new SessionImportService(manager);
+    assert.throws(
+      () => service.importData(makeStored({ sessionId: 'top-level', state: makeState({ sessionId: 'inner-id' }) })),
+      /does not match the stored state/
+    );
+  });
+
+  it('repairs malformed arrays and defaults missing mode fields (VC-KIMI-061)', () => {
+    const service = new SessionImportService(manager);
+    const raw = makeStored({
+      sessionId: 'repair-1',
+      state: {
+        ...makeState({ sessionId: 'repair-1' }),
+        messages: 'not-an-array' as never,
+        toolHistory: null as never,
+        mode: { permissionMode: 'auto' } as never,
+      },
+    });
+    const result = service.importData(raw);
+    assert.deepStrictEqual(result.state.messages, []);
+    assert.deepStrictEqual(result.state.toolHistory, []);
+    assert.strictEqual(result.state.mode.permissionMode, 'auto');
+    assert.strictEqual(result.state.mode.inputMode, 'agent');
   });
 });

@@ -12,6 +12,9 @@ import type { AgentState } from './types.js';
 
 export const SESSIONS_ROOT = path.join(os.homedir(), '.venice', 'sessions');
 
+/** Current session schema version written by `save` (VC-KIMI-061/062). */
+export const SESSION_SCHEMA_VERSION = 2;
+
 export interface StoredSession {
   schemaVersion: number;
   sessionId: string;
@@ -70,7 +73,7 @@ export class SessionManager {
 
     const existing = this.readStored(path.join(dir, 'session.json'));
     const stored: StoredSession = {
-      schemaVersion: 2,
+      schemaVersion: SESSION_SCHEMA_VERSION,
       sessionId: redactedState.sessionId,
       state: redactedState,
       title: redactedState.title,

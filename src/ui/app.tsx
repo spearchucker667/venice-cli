@@ -14,6 +14,8 @@ import { PermissionManager } from '../agent/permissions.js';
 import type { ApprovalMode } from '../agent/permissions.js';
 import { Composer } from './composer.js';
 import { Transcript } from './transcript.js';
+import { Greeting } from './greeting.js';
+import { resolveGreetingPolicy } from './brand.js';
 import { StatusBar } from './status.js';
 import { ApprovalPrompt, type ApprovalDecision } from './approval.js';
 import { PlanApprovalPrompt } from './plan-approval.js';
@@ -115,6 +117,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
   const [inputMode, setInputMode] = useState<'agent' | 'shell'>('agent');
   const [operatingMode, setOperatingMode] = useState<'agent' | 'plan'>('agent');
   const [queuedCount, setQueuedCount] = useState(0);
+  const [greetingVisible, setGreetingVisible] = useState(true);
   const [gitBranch] = useState(() => getGitBranch(workspaceRoot));
 
   useInput((input, key) => {
@@ -457,6 +460,10 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     const trimmed = text.trim();
     if (!trimmed) return;
 
+    // The greeting is orientation for a new session; the first real user
+    // input dismisses it cleanly (it never enters transcript/session state).
+    setGreetingVisible(false);
+
     const slash = parseSlashCommand(trimmed);
     if (slash) {
       const handled = await handleSlashCommand(slash.command, slash.args, {
@@ -514,9 +521,33 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
   };
 
   const { columns, rows } = useStdoutDimensions();
+  // Terminal/environment state does not change during a process lifetime, so
+  // this is resolved once and cached rather than re-read on every render.
+  const greetingPolicy = resolveGreetingPolicy();
+
+  const showGreeting =
+    !initialObjective?.trim() &&
+    !resumeSessionId &&
+    greetingVisible &&
+    pickerMode === 'normal';
 
   return (
     <Box flexDirection="column" height={rows} width={columns}>
+      {showGreeting && (
+        <Greeting
+          columns={columns}
+          rows={rows}
+          model={currentModel}
+          workspaceRoot={workspaceRoot}
+          gitBranch={gitBranch}
+          agentMode={currentModelProfile?.mode ?? runtimeRef.current?.getState().agentMode ?? 'agent'}
+          inputMode={inputMode}
+          operatingMode={operatingMode}
+          approvalMode={currentApprovalMode}
+          animate={greetingPolicy.animate}
+          accentColor={greetingPolicy.accentColor}
+        />
+      )}
       <Transcript messages={messages} maxMessages={Math.max(3, rows - 8)} />
       {error && (
         <Box paddingX={1}>

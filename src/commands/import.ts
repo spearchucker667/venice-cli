@@ -9,7 +9,7 @@ import { formatError } from '../lib/output.js';
 export function registerImportCommand(program: Command): void {
   program
     .command('import <file>')
-    .description('Import a previously exported session (JSON)')
+    .description('Import a previously exported session (JSON or debug zip)')
     .option('--force', 'Overwrite an existing session with the same id')
     .option('--fork', 'Import under a new session id instead of the stored one')
     .action((file: string, options) => {
