@@ -13,16 +13,19 @@ import { getChalk } from '../lib/output.js';
 export interface RendererOptions {
   eventBus: EventBus;
   interactive?: boolean;
+  json?: boolean;
 }
 
 export class AgentRenderer {
   private readonly eventBus: EventBus;
   private readonly interactive: boolean;
+  private readonly json: boolean;
   private unsubscribe?: () => void;
 
   constructor(options: RendererOptions) {
     this.eventBus = options.eventBus;
     this.interactive = options.interactive ?? false;
+    this.json = options.json ?? false;
   }
 
   start(): void {
@@ -36,38 +39,39 @@ export class AgentRenderer {
 
   private render(event: AgentEvent): void {
     const c = getChalk();
+    const out = this.json ? console.error : console.log;
     switch (event.type) {
       case 'session_started':
-        console.log(c.bold(`▶ ${event.objective}`));
+        out(c.bold(`▶ ${event.objective}`));
         break;
       case 'model_request':
-        if (this.interactive) console.log(c.dim('  thinking…'));
+        if (this.interactive) out(c.dim('  thinking…'));
         break;
       case 'tool_requested':
-        console.log(c.cyan(`  • ${event.toolName}`));
+        out(c.cyan(`  • ${event.toolName}`));
         break;
       case 'tool_completed': {
         const ok = (event.result as { ok?: boolean })?.ok;
-        console.log(ok ? c.green('    ✓ done') : c.red('    ✗ failed'));
+        out(ok ? c.green('    ✓ done') : c.red('    ✗ failed'));
         break;
       }
       case 'subagent_started':
-        console.log(c.magenta(`  ↳ ${event.mode} subagent ${event.kind}: ${event.task}`));
+        out(c.magenta(`  ↳ ${event.mode} subagent ${event.kind}: ${event.task}`));
         break;
       case 'subagent_completed':
-        console.log(c.magenta(`    ↳ ${event.status} (${event.findings} findings, ${event.filesInspected} inspected, ${event.changedFiles} changed)`));
+        out(c.magenta(`    ↳ ${event.status} (${event.findings} findings, ${event.filesInspected} inspected, ${event.changedFiles} changed)`));
         break;
       case 'approval_requested':
-        console.log(c.yellow(`  ? approval required: ${event.toolName}`));
+        out(c.yellow(`  ? approval required: ${event.toolName}`));
         break;
       case 'file_changed':
-        console.log(c.blue(`  ~ ${event.path}`));
+        out(c.blue(`  ~ ${event.path}`));
         break;
       case 'context_compacted':
-        console.log(c.dim('  … context compacted'));
+        out(c.dim('  … context compacted'));
         break;
       case 'session_completed':
-        console.log(c.bold(`● ${event.status}`));
+        out(c.bold(`● ${event.status}`));
         break;
     }
   }

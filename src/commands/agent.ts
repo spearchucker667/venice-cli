@@ -13,7 +13,7 @@ import { McpManager } from '../mcp/manager.js';
 
 export function registerAgentCommand(program: Command): Command {
   const agent = program
-    .command('agent')
+    .command('agent', { isDefault: true })
     .description('Run the workspace-aware Venice agent')
     .option('-p, --prompt <prompt>', 'Single noninteractive prompt')
     .option('-m, --model <model>', 'Model to use')
@@ -70,7 +70,7 @@ export function registerAgentCommand(program: Command): Command {
       }
 
       const events = new EventBus();
-      const renderer = new AgentRenderer({ eventBus: events, interactive: false });
+      const renderer = new AgentRenderer({ eventBus: events, interactive: false, json: !!options.json });
       renderer.start();
 
       const runtime = new AgentRuntime({
@@ -101,8 +101,11 @@ export function registerAgentCommand(program: Command): Command {
             for (const file of result.state.changedFiles) console.log(`  ${file}`);
           }
         }
+        await mcpManager.stop();
         process.exit(result.state.status === 'complete' ? 0 : 1);
       } catch (error) {
+        renderer.stop();
+        await mcpManager.stop().catch(() => {});
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);
       }

@@ -32,6 +32,7 @@ import { registerAugmentCommands } from './commands/augment.js';
 import { registerAgentCommand } from './commands/agent.js';
 import { registerMcpCommand } from './commands/mcp.js';
 import { registerSkillsCommand } from './commands/skills.js';
+import { registerInitCommand } from './commands/init.js';
 import { formatError, getChalk } from './lib/output.js';
 import { getVersion } from './lib/version.js';
 
@@ -84,6 +85,9 @@ async function main() {
   registerAgentCommand(program);
   registerMcpCommand(program);
   registerSkillsCommand(program);
+  registerInitCommand(program);
+
+  // The agent command is now the default command (see registerAgentCommand)
 
   // Handle errors gracefully
   program.exitOverride();

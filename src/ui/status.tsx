@@ -10,11 +10,12 @@ export interface StatusBarProps {
 }
 
 export function StatusBar({ state }: StatusBarProps): JSX.Element {
-  const contextPct = state.maxTokens > 0 ? Math.round((state.contextTokens / state.maxTokens) * 100) : 0;
+  const isUnknown = state.maxTokens === 0;
+  const contextPct = !isUnknown ? Math.round((state.contextTokens / state.maxTokens) * 100) : 0;
   return (
     <Box justifyContent="space-between" borderStyle="single" paddingX={1}>
       <Text>{state.model} · {state.workspaceRoot}</Text>
-      <Text>{state.status} · {state.approvalMode} · {state.contextTokens}/{state.maxTokens} ({contextPct}%)</Text>
+      <Text>{state.status} · {state.approvalMode} · {state.contextTokens}/{isUnknown ? 'unknown' : state.maxTokens} {!isUnknown && `(${contextPct}%)`}</Text>
     </Box>
   );
 }

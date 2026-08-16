@@ -33,7 +33,7 @@ export class ContextManager {
 
   constructor(budget?: Partial<ContextBudget>) {
     this.budget = {
-      maxTokens: budget?.maxTokens ?? 128000,
+      maxTokens: budget?.maxTokens ?? 0,
       reservedCompletionTokens: budget?.reservedCompletionTokens ?? 16384,
       compactionThreshold: budget?.compactionThreshold ?? 0.75,
     };
@@ -46,6 +46,10 @@ export class ContextManager {
     if (Number.isInteger(limit) && limit > 0) {
       this.budget.maxTokens = limit;
     }
+  }
+
+  getMaxTokens(): number {
+    return this.budget.maxTokens;
   }
 
   setSystemContract(contract: string): void {

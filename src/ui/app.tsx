@@ -20,7 +20,7 @@ import { ApprovalPrompt, type ApprovalDecision } from './approval.js';
 import { mapEventToMessage } from './events.js';
 import { parseSlashCommand } from './slash-commands.js';
 import { handleSlashCommand } from './slash-handlers.js';
-import { resolveMentions } from './mentions.js';
+import { resolveMentions, readMentionedFiles } from './mentions.js';
 import type { TuiMessage } from './types.js';
 import { ModelPicker } from './model-picker.js';
 import { SessionPicker } from './session-picker.js';
@@ -78,16 +78,24 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
   const [currentModel, setCurrentModel] = useState(model);
   const [mode, setMode] = useState<PickerMode>('normal');
 
-  useInput((_input, key) => {
-    const k = key as { ctrl?: boolean; name?: string; escape?: boolean };
-    if (k.ctrl && k.name === 'c') {
-      abortControllerRef.current?.abort();
-      runtimeRef.current?.complete().catch(() => {});
-      exit();
-      onExit();
+  useInput((input, key) => {
+    if (key.ctrl && input === 'c') {
+      if (isRunning && runtimeRef.current) {
+        addEvent('Operation cancelled by user.');
+        setIsRunning(false);
+        abortControllerRef.current?.abort(new Error('Cancelled by user'));
+        const newController = new AbortController();
+        abortControllerRef.current = newController;
+        runtimeRef.current.updateSignal(newController.signal);
+        setStatus('cancelled');
+      } else {
+        runtimeRef.current?.complete().catch(() => {});
+        exit();
+        onExit();
+      }
       return;
     }
-    if (k.escape && mode !== 'normal') {
+    if (key.escape && mode !== 'normal') {
       setMode('normal');
     }
   });
@@ -205,13 +213,13 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     addEvent(`Resumed session ${sessionId}: ${stored.state.objective || 'No objective'}`);
   };
 
-  const handleSubmit = (text: string) => {
+  const handleSubmit = async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
     const slash = parseSlashCommand(trimmed);
     if (slash) {
-      handleSlashCommand(slash.command, slash.args, {
+      await handleSlashCommand(slash.command, slash.args, {
         exit: () => {
           runtimeRef.current?.complete().catch(() => {});
           exit();
@@ -227,6 +235,8 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
         showSessionPicker: () => setMode('session-picker'),
         resumeSession: handleResumeSession,
         listSessions: () => new SessionManager().list(workspaceRoot),
+        mcpManager,
+        getRuntime: () => runtimeRef.current ?? undefined,
       });
       return;
     }
@@ -245,8 +255,14 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     }
 
     const { text: resolvedText, mentions } = resolveMentions(trimmed);
+    let finalPrompt = resolvedText;
+
     if (mentions.length) {
       addEvent(`Attached files: ${mentions.join(', ')}`);
+      const fileContents = await readMentionedFiles(workspaceRoot, mentions);
+      if (fileContents) {
+        finalPrompt += `\n\n${fileContents}`;
+      }
     }
 
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'user', content: resolvedText }]);
@@ -254,7 +270,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     setError(undefined);
 
     runtimeRef.current
-      ?.sendUserMessage(resolvedText)
+      ?.sendUserMessage(finalPrompt)
       .then(() => {
         setStatus(runtimeRef.current?.getState().status ?? 'idle');
         setIsRunning(false);
@@ -314,8 +330,8 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
           model: currentModel,
           workspaceRoot,
           approvalMode,
-          contextTokens: 0,
-          maxTokens: 128000,
+          contextTokens: runtimeRef.current?.getContextManager().estimateTokens() ?? 0,
+          maxTokens: runtimeRef.current?.getContextManager().getMaxTokens() ?? 0,
         }}
       />
     </Box>

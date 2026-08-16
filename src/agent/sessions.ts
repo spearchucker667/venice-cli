@@ -46,13 +46,15 @@ export class SessionManager {
       updatedAt: new Date().toISOString(),
     };
 
-    fs.writeFileSync(path.join(dir, 'session.json'), JSON.stringify(stored, null, 2), { mode: 0o600 });
+    const writeAtomic = (filePath: string, data: string) => {
+      const tmpPath = `${filePath}.tmp.${Date.now()}`;
+      fs.writeFileSync(tmpPath, data, { mode: 0o600 });
+      fs.renameSync(tmpPath, filePath);
+    };
 
-    const messagesPath = path.join(dir, 'messages.jsonl');
-    fs.writeFileSync(messagesPath, state.messages.map((m) => JSON.stringify(m)).join('\n') + '\n', { mode: 0o600 });
-
-    const eventsPath = path.join(dir, 'events.jsonl');
-    fs.writeFileSync(eventsPath, events.map((e) => JSON.stringify(e)).join('\n') + '\n', { mode: 0o600 });
+    writeAtomic(path.join(dir, 'session.json'), JSON.stringify(stored, null, 2));
+    writeAtomic(path.join(dir, 'messages.jsonl'), state.messages.map((m) => JSON.stringify(m)).join('\n') + '\n');
+    writeAtomic(path.join(dir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
   }
 
   load(sessionId: string, workspaceRoot?: string): { state: AgentState; events: AgentEvent[] } | undefined {

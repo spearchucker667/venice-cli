@@ -61,7 +61,7 @@ export class AgentRuntime {
   private readonly events: EventBus;
   private readonly maxTurns: number;
   private readonly autoValidate: boolean;
-  private readonly signal?: AbortSignal;
+  private signal?: AbortSignal;
   private readonly mcpManager?: McpManager;
   private checkpoints: CheckpointManager;
   private readonly workspace: WorkspaceManager;
@@ -107,6 +107,10 @@ export class AgentRuntime {
     return this.state;
   }
 
+  getContextManager(): ContextManager {
+    return this.context;
+  }
+
   setApprovalCallback(callback: ApprovalCallback): void {
     this.permissions.setApprover(callback);
   }
@@ -114,6 +118,37 @@ export class AgentRuntime {
   setModel(model: string): void {
     this.state.model = model;
     this.modelClient.setModel(model);
+  }
+
+  updateSignal(signal: AbortSignal): void {
+    this.signal = signal;
+  }
+
+  resetSession(): void {
+    this.state.sessionId = randomUUID();
+    this.state.status = 'idle';
+    this.state.messages = [];
+    this.state.todos = [];
+    this.state.relevantFiles = [];
+    this.state.changedFiles = [];
+    this.state.toolHistory = [];
+    this.state.subagentReports = [];
+    this.state.lastValidation = undefined;
+    this.context.resetConversation();
+    this.workspace.replaceChangedFiles([]);
+    this.checkpoints = new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
+    this.sessionCompletedEmitted = false;
+  }
+
+  forceCompact(): void {
+    const summary = buildStructuredSummary(this.state);
+    this.context.compact(summary);
+    this.emit({
+      type: 'context_compacted',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      summary,
+    });
   }
 
   loadState(state: AgentState): void {
