@@ -21,9 +21,9 @@ export const editFileTool: AgentTool<{ path: string; oldString: string; newStrin
   },
   risk: 'write',
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     try {
-      const { absolute, relative } = workspace.resolve(input.path);
+      const { absolute, relative, root } = workspace.resolve(input.path);
       const content = fs.readFileSync(absolute, 'utf-8');
       if (!content.includes(input.oldString)) {
         return failure('STALE_CONTENT', `oldString not found in ${relative}; file may have changed`);
@@ -36,7 +36,7 @@ export const editFileTool: AgentTool<{ path: string; oldString: string; newStrin
         newContent,
       });
       fs.writeFileSync(absolute, newContent, 'utf-8');
-      workspace.markChanged(relative);
+      workspace.markChangedResolved({ absolute, relative, root });
       return success(
         { replacements: content.split(input.oldString).length - 1 },
         { affectedFiles: [relative] }

@@ -18,8 +18,12 @@ export function registerSkillsCommand(program: Command, globalDir = getGlobalSki
       const registry = new SkillRegistry(globalDir);
       registry.discover();
       const list = registry.list();
+      // Surface discovery errors instead of swallowing them (VC-KIMI-043).
+      for (const error of registry.getErrors()) {
+        console.error(formatError(error));
+      }
       if (options.json) {
-        console.log(JSON.stringify({ skills: list }, null, 2));
+        console.log(JSON.stringify({ skills: list, errors: registry.getErrors() }, null, 2));
       } else {
         if (list.length === 0) {
           console.log('No skills discovered.');

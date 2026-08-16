@@ -62,6 +62,44 @@ describe('WorkspaceManager', () => {
   });
 });
 
+describe('WorkspaceManager additional roots (VC-KIMI-044)', () => {
+  it('resolves absolute paths inside an additional root', () => {
+    const primary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-primary-'))) ;
+    const extra = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-extra-')));
+    fs.writeFileSync(path.join(extra, 'extra.txt'), 'extra');
+    const workspace = new WorkspaceManager(primary, [extra]);
+
+    const resolved = workspace.resolve(path.join(extra, 'extra.txt'));
+    assert.strictEqual(resolved.root, extra);
+    assert.strictEqual(resolved.relative, 'extra.txt');
+    assert.ok(workspace.isInsideWorkspace(path.join(extra, 'extra.txt')));
+  });
+
+  it('rejects absolute paths outside all roots', () => {
+    const primary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-primary-')));
+    const extra = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-extra-')));
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-outside-')));
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'secret');
+    const workspace = new WorkspaceManager(primary, [extra]);
+    assert.throws(() => workspace.resolve(path.join(outside, 'secret.txt')), /outside workspace/);
+  });
+
+  it('tracks changed files in additional roots by absolute path', () => {
+    const primary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-primary-')));
+    const extra = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-extra-')));
+    fs.writeFileSync(path.join(extra, 'extra.txt'), 'extra');
+    const workspace = new WorkspaceManager(primary, [extra]);
+
+    const resolved = workspace.resolve(path.join(extra, 'extra.txt'));
+    workspace.markChangedResolved(resolved);
+    assert.ok(workspace.changedFiles.some((f) => path.isAbsolute(f)));
+
+    const primaryResolved = workspace.resolve('src/app.ts');
+    workspace.markChangedResolved(primaryResolved);
+    assert.ok(workspace.changedFiles.includes('src/app.ts'));
+  });
+});
+
 describe('detectGitRoot', () => {
   it('finds git root', () => {
     const root = detectGitRoot(process.cwd());

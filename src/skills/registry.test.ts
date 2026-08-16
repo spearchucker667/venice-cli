@@ -53,6 +53,61 @@ describe('SkillRegistry', () => {
   });
 });
 
+describe('SkillRegistry discovery errors (VC-KIMI-043)', () => {
+  it('surfaces invalid skill manifests instead of swallowing them', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-invalid-'));
+    const badSkill = path.join(dir, 'broken');
+    fs.mkdirSync(badSkill, { recursive: true });
+    fs.writeFileSync(path.join(badSkill, 'SKILL.md'), '---\nname: broken\n---\n\nNo description.\n');
+
+    const registry = new SkillRegistry(dir);
+    registry.discover();
+    assert.strictEqual(registry.list().length, 0);
+    assert.strictEqual(registry.getErrors().length, 1);
+    assert.match(registry.getErrors()[0], /invalid skill manifest/);
+  });
+
+  it('surfaces unreadable skill files', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-unreadable-'));
+    const skillDir = path.join(dir, 'secret');
+    fs.mkdirSync(skillDir, { recursive: true });
+    const skillPath = path.join(skillDir, 'SKILL.md');
+    fs.writeFileSync(skillPath, '---\nname: secret\ndescription: x\n---\n\nBody\n');
+    fs.chmodSync(skillPath, 0o000);
+
+    const registry = new SkillRegistry(dir);
+    try {
+      registry.discover();
+      assert.strictEqual(registry.getErrors().length, 1);
+      assert.match(registry.getErrors()[0], /failed to parse skill/);
+    } finally {
+      fs.chmodSync(skillPath, 0o600);
+    }
+  });
+
+  it('ignores directories without a SKILL.md', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-empty-'));
+    fs.mkdirSync(path.join(dir, 'not-a-skill'), { recursive: true });
+    const registry = new SkillRegistry(dir);
+    registry.discover();
+    assert.strictEqual(registry.getErrors().length, 0);
+  });
+
+  it('discovers skills from extra directories', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-extra-'));
+    const extra = path.join(dir, 'extra');
+    fs.mkdirSync(path.join(extra, 'toolkit'), { recursive: true });
+    fs.writeFileSync(
+      path.join(extra, 'toolkit', 'SKILL.md'),
+      '---\nname: extra-toolkit\ndescription: Extra skill.\n---\n\nBody\n'
+    );
+    const registry = new SkillRegistry(dir, undefined, [extra]);
+    registry.discover();
+    const names = registry.list().map((s) => s.name);
+    assert.ok(names.includes('extra-toolkit'));
+  });
+});
+
 describe('getGlobalSkillsDir', () => {
   it('returns ~/.config/venice/skills', () => {
     const dir = getGlobalSkillsDir();

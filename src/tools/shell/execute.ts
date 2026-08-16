@@ -1,11 +1,15 @@
 /**
- * shell tool — execute a controlled shell command inside the workspace.
+ * shell tool — execute a shell command starting in the workspace.
+ *
+ * The shell only constrains the starting cwd; it runs with the user's OS
+ * account privileges and is not filesystem-sandboxed (VC-KIMI-056).
  */
 
 import { spawn } from 'node:child_process';
 import type { AgentTool } from '../types.js';
 import { success, failure } from '../result.js';
 import { WorkspaceManager } from '../../agent/workspace.js';
+import { terminateProcessTree, forceKillProcessTree } from '../../lib/process-tree.js';
 
 export interface ShellInput {
   command: string;
@@ -21,6 +25,49 @@ export interface ShellOutput {
   stderr: string;
   durationMs: number;
   timedOut: boolean;
+}
+
+/**
+ * Bounded accumulation of child process text output (VC-KIMI-019).
+ *
+ * Keeps the head, a bounded tail, the total bytes seen, and a truncation flag,
+ * so a noisy or malicious command cannot grow process memory unboundedly.
+ */
+export class BoundedTextBuffer {
+  private static readonly MAX_HEAD_CHARS = 50000;
+  private static readonly MAX_TAIL_CHARS = 5000;
+
+  private head = '';
+  private tail = '';
+  private totalBytes = 0;
+  private truncated = false;
+
+  append(chunk: string): void {
+    if (!chunk) return;
+    this.totalBytes += Buffer.byteLength(chunk, 'utf-8');
+
+    if (this.head.length < BoundedTextBuffer.MAX_HEAD_CHARS) {
+      const space = BoundedTextBuffer.MAX_HEAD_CHARS - this.head.length;
+      this.head += chunk.slice(0, space);
+      const overflow = chunk.slice(space);
+      if (overflow) {
+        this.truncated = true;
+        this.tail = (this.tail + overflow).slice(-BoundedTextBuffer.MAX_TAIL_CHARS);
+      }
+    } else {
+      this.truncated = true;
+      this.tail = (this.tail + chunk).slice(-BoundedTextBuffer.MAX_TAIL_CHARS);
+    }
+  }
+
+  get isTruncated(): boolean {
+    return this.truncated;
+  }
+
+  toString(): string {
+    if (!this.truncated) return this.head;
+    return `${this.head}\n… [output truncated: ${this.totalBytes} bytes total] …\n${this.tail}`;
+  }
 }
 
 export function buildShellEnv(cwd: string): NodeJS.ProcessEnv {
@@ -52,7 +99,7 @@ export function buildShellEnv(cwd: string): NodeJS.ProcessEnv {
 
 export const shellTool: AgentTool<ShellInput, ShellOutput> = {
   name: 'shell',
-  description: 'Execute a shell command inside the workspace.',
+  description: 'Executes a shell command starting in the workspace. The shell runs with your OS account privileges and is not filesystem-sandboxed.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -87,7 +134,7 @@ export const shellTool: AgentTool<ShellInput, ShellOutput> = {
     return 'execute';
   },
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     const cwd = input.cwd ? workspace.resolve(input.cwd).absolute : workspace.workspaceRoot;
     const timeoutMs = input.timeoutMs ?? 120000;
     const start = Date.now();
@@ -98,33 +145,19 @@ export const shellTool: AgentTool<ShellInput, ShellOutput> = {
       // Run detached on non-Windows to allow killing the entire process group
       const child = spawn(shell, args, { cwd, env: buildShellEnv(cwd), detached: process.platform !== 'win32' });
 
-      let stdout = '';
-      let stderr = '';
+      const stdoutBuffer = new BoundedTextBuffer();
+      const stderrBuffer = new BoundedTextBuffer();
       let timedOut = false;
 
       const timeout = setTimeout(() => {
         timedOut = true;
-        if (process.platform === 'win32') {
-          child.kill('SIGTERM');
-          setTimeout(() => child.kill('SIGKILL'), 5000);
-        } else if (child.pid) {
-          try {
-            process.kill(-child.pid, 'SIGTERM');
-            setTimeout(() => {
-              try {
-                process.kill(-child.pid!, 'SIGKILL');
-              } catch {
-                // ignore
-              }
-            }, 5000);
-          } catch {
-            // ignore
-          }
-        }
+        // Kill the whole descendant tree on every platform (VC-KIMI-055).
+        terminateProcessTree(child);
+        setTimeout(() => forceKillProcessTree(child), 5000);
       }, timeoutMs);
 
-      child.stdout.on('data', (data) => { stdout += data.toString(); });
-      child.stderr.on('data', (data) => { stderr += data.toString(); });
+      child.stdout.on('data', (data) => { stdoutBuffer.append(data.toString()); });
+      child.stderr.on('data', (data) => { stderrBuffer.append(data.toString()); });
 
       child.on('close', (exitCode) => {
         clearTimeout(timeout);
@@ -132,8 +165,8 @@ export const shellTool: AgentTool<ShellInput, ShellOutput> = {
           command: input.command,
           cwd,
           exitCode,
-          stdout: stdout.slice(0, 50000),
-          stderr: stderr.slice(0, 50000),
+          stdout: stdoutBuffer.toString(),
+          stderr: stderrBuffer.toString(),
           durationMs: Date.now() - start,
           timedOut,
         };

@@ -19,7 +19,7 @@ export const readManyFilesTool: AgentTool<{ paths: string[] }, Record<string, st
   },
   risk: 'read',
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     const contents: Record<string, string> = {};
     for (const p of input.paths) {
       try {

@@ -1,7 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { handleSlashCommand } from './slash-handlers.js';
+import { handleSlashCommand, SLASH_HANDLERS } from './slash-handlers.js';
+import { SLASH_COMMANDS, getSlashCommandBase } from './slash-commands.js';
 import type { TuiMessage } from './types.js';
+import type { AgentRuntime } from '../agent/runtime.js';
 
 describe('handleSlashCommand', () => {
   const makeContext = () => {
@@ -151,5 +153,43 @@ describe('handleSlashCommand', () => {
 
     await handleSlashCommand('new', '', context);
     assert.ok(messages().some((m) => m.content.includes('Started fresh conversation context')));
+  });
+
+  it('keeps slash metadata and handlers in sync (VC-KIMI-048)', () => {
+    const handlerKeys = new Set(Object.keys(SLASH_HANDLERS));
+    const metadataBases = new Set(SLASH_COMMANDS.map((c) => getSlashCommandBase(c.name)));
+    for (const cmd of SLASH_COMMANDS) {
+      assert.ok(handlerKeys.has(getSlashCommandBase(cmd.name)), `metadata command /${cmd.name} has no handler`);
+    }
+    for (const key of handlerKeys) {
+      assert.ok(metadataBases.has(key), `handler /${key} is missing from metadata`);
+    }
+  });
+
+  it('returns false for unknown commands so they can be sent to the model (VC-KIMI-047)', async () => {
+    const { context, messages } = makeContext();
+    const handled = await handleSlashCommand('frobnicate', '', context);
+    assert.strictEqual(handled, false);
+    assert.strictEqual(messages().length, 0, 'no event emitted for unknown command');
+  });
+
+  it('rejects idle-only commands while the agent is running (VC-KIMI-046)', async () => {
+    const { context, messages } = makeContext();
+    const running = { ...context, status: 'thinking' as const };
+    const handled = await handleSlashCommand('compact', '', running);
+    assert.strictEqual(handled, true);
+    assert.ok(messages().some((m) => m.content.includes('only available while the agent is idle')));
+  });
+
+  it('passes a /compact hint to the runtime (VC-KIMI-049)', async () => {
+    let captured: string | undefined;
+    const { context, messages } = makeContext();
+    const withRuntime = {
+      ...context,
+      getRuntime: () => ({ forceCompact: (hint?: string) => { captured = hint; } }) as unknown as AgentRuntime,
+    };
+    await handleSlashCommand('compact', 'focus on the parser', withRuntime);
+    assert.strictEqual(captured, 'focus on the parser');
+    assert.ok(messages().some((m) => m.content.includes('Context compacted with hint: focus on the parser')));
   });
 });

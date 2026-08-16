@@ -10,6 +10,8 @@ import type { RiskLevel } from '../agent/permissions.js';
 
 export interface ToolContext {
   workspaceRoot: string;
+  /** Optional additional roots (Kimi-style --add-dir) for the path authority. */
+  workspace?: { primaryRoot: string; additionalRoots: string[] };
   sessionId: string;
   objective: string;
   runtimeState: Readonly<AgentState>;

@@ -21,6 +21,9 @@ export interface TuiState {
   inputMode?: 'agent' | 'shell';
   operatingMode?: 'agent' | 'plan';
   workspaceRoot: string;
+  additionalRoots?: string[];
+  /** Number of user messages waiting to run after the current turn (VC-KIMI-053). */
+  queuedCount?: number;
   approvalMode: string;
   contextTokens: number;
   maxTokens: number;

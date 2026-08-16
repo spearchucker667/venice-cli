@@ -29,6 +29,29 @@ export function toStreamJson(event: AgentEvent): StreamJsonEvent | undefined {
         timestamp: event.timestamp,
         content: event.content,
       };
+    case 'message_queued':
+      return {
+        type: 'message.queued',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+        content: event.content,
+        queueLength: event.queueLength,
+      };
+    case 'message_queued_consumed':
+      return {
+        type: 'message.queued_consumed',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+        content: event.content,
+        remaining: event.remaining,
+      };
+    case 'message_injected':
+      return {
+        type: 'message.injected',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+        content: event.content,
+      };
     case 'tool_requested':
       return {
         type: 'tool.requested',
@@ -90,6 +113,13 @@ export function toStreamJson(event: AgentEvent): StreamJsonEvent | undefined {
         type: 'plan.exit.denied',
         schemaVersion: STREAM_JSON_VERSION,
         timestamp: event.timestamp,
+      };
+    case 'user_question_requested':
+      return {
+        type: 'user.question_requested',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+        request: event.request,
       };
     default:
       return undefined;

@@ -19,7 +19,7 @@ export const readFileTool: AgentTool<{ path: string }, string> = {
   },
   risk: 'read',
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     try {
       const { absolute, relative } = workspace.resolve(input.path);
       if (workspace.isBinaryFile(absolute)) {

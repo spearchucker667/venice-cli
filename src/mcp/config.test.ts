@@ -50,4 +50,65 @@ describe('MCP config', () => {
     assert.strictEqual(config.mcpServers.echo.command, 'node');
     assert.deepStrictEqual(config.mcpServers.echo.args, ['server.js']);
   });
+
+  it('surfaces malformed JSON through the warn callback instead of silently dropping servers', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-malformed-'));
+    const file = path.join(dir, 'mcp.json');
+    fs.writeFileSync(file, '{ not valid json');
+    const warnings: string[] = [];
+    const config = loadMcpConfig(file, undefined, { warn: (m) => warnings.push(m) });
+    assert.deepStrictEqual(config, { mcpServers: {} });
+    assert.strictEqual(warnings.length, 1);
+    assert.match(warnings[0], /MCP config error/);
+  });
+
+  it('surfaces a missing mcpServers object', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-shape-'));
+    const file = path.join(dir, 'mcp.json');
+    fs.writeFileSync(file, JSON.stringify({ servers: [] }));
+    const warnings: string[] = [];
+    const config = loadMcpConfig(file, undefined, { warn: (m) => warnings.push(m) });
+    assert.deepStrictEqual(config, { mcpServers: {} });
+    assert.strictEqual(warnings.length, 1);
+    assert.match(warnings[0], /mcpServers/);
+  });
+
+  it('rejects a symbolic-link config on load', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-symlink-load-'));
+    const target = path.join(dir, 'target.json');
+    const link = path.join(dir, 'mcp.json');
+    fs.writeFileSync(target, JSON.stringify({ mcpServers: { a: { command: 'echo' } } }));
+    fs.symlinkSync(target, link);
+    const warnings: string[] = [];
+    const config = loadMcpConfig(link, undefined, { warn: (m) => warnings.push(m) });
+    assert.deepStrictEqual(config, { mcpServers: {} });
+    assert.strictEqual(warnings.length, 1);
+    assert.match(warnings[0], /symbolic link/);
+  });
+
+  it('rejects saving over a symbolic-link path', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-symlink-save-'));
+    const target = path.join(dir, 'target.json');
+    const link = path.join(dir, 'mcp.json');
+    fs.writeFileSync(target, '{}');
+    fs.symlinkSync(target, link);
+    assert.throws(
+      () => saveMcpConfig({ mcpServers: { a: { command: 'echo' } } }, link),
+      /not a regular file/
+    );
+  });
+
+  it(
+    'saves with atomic write and 0600 permissions',
+    { skip: process.platform === 'win32' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-perms-'));
+      const file = path.join(dir, 'mcp.json');
+      saveMcpConfig({ mcpServers: { a: { command: 'echo' } } }, file);
+      const stat = fs.statSync(file);
+      assert.strictEqual(stat.mode & 0o777, 0o600);
+      const leftovers = fs.readdirSync(dir).filter((name) => name.startsWith('.mcp-'));
+      assert.deepStrictEqual(leftovers, []);
+    }
+  );
 });

@@ -1,7 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
-import { shellTool, buildShellEnv } from './execute.js';
+import * as path from 'node:path';
+import { shellTool, buildShellEnv, BoundedTextBuffer } from './execute.js';
 import type { RiskLevel } from '../../agent/permissions.js';
 
 describe('shell tool', () => {
@@ -10,6 +12,12 @@ describe('shell tool', () => {
     sessionId: 's1',
     objective: 'test',
     runtimeState: {} as any,
+  });
+
+  it('does not describe itself as filesystem-sandboxed (VC-KIMI-056)', () => {
+    assert.ok(!/inside the workspace/i.test(shellTool.description), 'description must not imply a sandbox');
+    assert.match(shellTool.description, /not filesystem-sandboxed/);
+    assert.match(shellTool.description, /OS account privileges/);
   });
 
   it('runs a successful command', async () => {
@@ -30,6 +38,34 @@ describe('shell tool', () => {
     const result = await shellTool.execute({ command: 'sleep 10', timeoutMs: 100 }, context(os.tmpdir()));
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.data?.timedOut, true);
+  });
+
+  it('kills the whole descendant tree on timeout (VC-KIMI-055)', { skip: process.platform === 'win32' }, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'venice-shell-tree-'));
+    const pidFile = path.join(root, 'grandchild.pid');
+    try {
+      const result = await shellTool.execute({
+        command: `bash -c '(sleep 30) & echo $! > ${pidFile}; sleep 30'`,
+        timeoutMs: 150,
+      }, context(root));
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.data?.timedOut, true);
+
+      // Give the graceful SIGTERM -> SIGKILL escalation time to reap the
+      // backgrounded grandchild.
+      await new Promise((r) => setTimeout(r, 400));
+      const pid = Number.parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+      assert.ok(Number.isInteger(pid) && pid > 0, 'grandchild pid was captured');
+      let alive = true;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        alive = false;
+      }
+      assert.strictEqual(alive, false, 'backgrounded grandchild must be killed with the tree');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -54,6 +90,38 @@ describe('shell risk classification (VC-KIMI-057)', () => {
     assert.strictEqual(risk('npm publish'), 'external_side_effect');
     assert.strictEqual(risk('ssh deploy@host'), 'external_side_effect');
     assert.strictEqual(risk('sudo apt update'), 'external_side_effect');
+  });
+});
+
+describe('BoundedTextBuffer (VC-KIMI-019)', () => {
+  it('returns small output unchanged', () => {
+    const buffer = new BoundedTextBuffer();
+    buffer.append('hello world');
+    assert.strictEqual(buffer.isTruncated, false);
+    assert.strictEqual(buffer.toString(), 'hello world');
+  });
+
+  it('keeps a bounded head plus tail and marks truncation', () => {
+    const buffer = new BoundedTextBuffer();
+    buffer.append('a'.repeat(60000));
+    assert.strictEqual(buffer.isTruncated, true);
+    const text = buffer.toString();
+    assert.ok(text.includes('[output truncated'));
+    // head is capped at 50000 chars
+    assert.ok(text.startsWith('a'.repeat(50000)));
+    // tail holds the final overflow characters
+    assert.ok(text.endsWith('a'.repeat(5000)));
+    // total stays far below the full input size
+    assert.ok(text.length < 60000);
+  });
+
+  it('accumulates across many chunks without unbounded growth', () => {
+    const buffer = new BoundedTextBuffer();
+    for (let i = 0; i < 1000; i++) {
+      buffer.append('chunk-' + i + '\n');
+    }
+    const text = buffer.toString();
+    assert.ok(text.length < 60000);
   });
 });
 

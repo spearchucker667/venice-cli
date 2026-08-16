@@ -5,14 +5,14 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentState, AgentMessage, PlanArtifact, SubagentResult, ToolResult } from './types.js';
+import type { AgentState, AgentMessage, PlanArtifact, SubagentResult, ToolResult, UserQuestionRequest } from './types.js';
 import type { AgentEvent } from './events.js';
 import { EventBus } from './events.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { createDefaultRegistry } from '../tools/registry.js';
 import type { ToolContext } from '../tools/types.js';
 import { PermissionManager } from './permissions.js';
-import type { ApprovalCallback, ApprovalMode, PlanApprovalCallback } from './permissions.js';
+import type { ApprovalCallback, ApprovalMode, PlanApprovalCallback, UserQuestionCallback } from './permissions.js';
 import { ContextManager, buildStructuredSummary } from './context.js';
 import { SessionManager } from './sessions.js';
 import { VeniceModelClient } from './model-client.js';
@@ -56,6 +56,8 @@ export interface AgentRuntimeOptions {
   eventBus?: EventBus;
   signal?: AbortSignal;
   mcpManager?: McpManager;
+  skillsDirs?: string[];
+  additionalRoots?: string[];
 }
 
 export interface AgentRuntimeResult {
@@ -77,18 +79,32 @@ export class AgentRuntime {
   private signal?: AbortSignal;
   private readonly mcpManager?: McpManager;
   private checkpoints: CheckpointManager;
-  private readonly workspace: WorkspaceManager;
+  private workspace: WorkspaceManager;
   private readonly skills: SkillRegistry;
   private readonly redactor = new SecretRedactor(collectKnownSecrets());
   private sessionCompletedEmitted = false;
   private started = false;
   private persistDirty = false;
+  // Messages queued/injected while a turn is running (VC-KIMI-053). The
+  // runtime owns these — the UI must not mutate model context directly.
+  private queuedMessages: string[] = [];
+  private injectedMessages: string[] = [];
+  private turnInProgress = false;
 
   constructor(options: AgentRuntimeOptions) {
+    // Merge CLI --add-dir roots with any persisted/explicit workspace roots,
+    // de-duplicated (VC-KIMI-044).
+    const additionalRoots = Array.from(new Set([
+      ...(options.workspace?.additionalRoots ?? []),
+      ...(options.additionalRoots ?? []),
+    ]));
     this.state = {
       sessionId: options.sessionId || randomUUID(),
       workspaceRoot: options.workspaceRoot,
-      workspace: options.workspace ?? { primaryRoot: options.workspaceRoot, additionalRoots: [] },
+      workspace: {
+        primaryRoot: options.workspace?.primaryRoot ?? options.workspaceRoot,
+        additionalRoots,
+      },
       model: options.model || getDefaultModel(),
       agentMode: 'agent',
       objective: options.objective,
@@ -116,9 +132,13 @@ export class AgentRuntime {
     this.autoValidate = options.autoValidate ?? true;
     this.signal = options.signal;
     this.mcpManager = options.mcpManager;
-    this.workspace = new WorkspaceManager(this.state.workspaceRoot);
+    this.workspace = new WorkspaceManager(this.state.workspaceRoot, this.state.workspace.additionalRoots);
     this.checkpoints = options.checkpointManager || new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
-    this.skills = new SkillRegistry(getGlobalSkillsDir(), getProjectSkillsDir(this.state.workspaceRoot));
+    this.skills = new SkillRegistry(
+      getGlobalSkillsDir(),
+      getProjectSkillsDir(this.state.workspaceRoot),
+      options.skillsDirs ?? []
+    );
     this.skills.discover();
     this.state.skillSummaries = this.skills.list();
 
@@ -127,6 +147,57 @@ export class AgentRuntime {
 
   getState(): Readonly<AgentState> {
     return this.state;
+  }
+
+  /** Skill discovery errors, surfaced rather than swallowed (VC-KIMI-043). */
+  getSkillErrors(): string[] {
+    return this.skills.getErrors();
+  }
+
+  /**
+   * Queue a user message to run after the current turn completes (Enter while
+   * busy). Returns the new queue length. The runtime owns the queue and
+   * drains it sequentially — the UI never mutates model context concurrently
+   * (VC-KIMI-053).
+   */
+  queueUserMessage(content: string): number {
+    const trimmed = content.trim();
+    if (!trimmed) return this.queuedMessages.length;
+    this.queuedMessages.push(trimmed);
+    this.emit({
+      type: 'message_queued',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      content: trimmed,
+      queueLength: this.queuedMessages.length,
+    });
+    return this.queuedMessages.length;
+  }
+
+  /**
+   * Inject a user message into the current turn after the next tool boundary
+   * (Ctrl-S). No-op when there is no active turn to inject into.
+   */
+  injectUserMessage(content: string): void {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    if (!this.turnInProgress) {
+      // No active turn to inject into — fall back to queuing (VC-KIMI-053).
+      this.queueUserMessage(trimmed);
+      return;
+    }
+    this.injectedMessages.push(trimmed);
+    this.emit({
+      type: 'message_injected',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      content: trimmed,
+    });
+  }
+
+  /** Number of messages waiting to run after the current turn (VC-KIMI-053). */
+  getQueuedMessageCount(): number {
+    return this.queuedMessages.length;
   }
 
   getContextManager(): ContextManager {
@@ -252,6 +323,11 @@ export class AgentRuntime {
     this.permissions.setPlanApprover(callback);
   }
 
+  /** Install the structured-question collector (VC-KIMI-058). */
+  setUserQuestionHandler(handler: UserQuestionCallback): void {
+    this.permissions.setUserQuestionHandler(handler);
+  }
+
   setModel(model: string): void {
     this.state.model = model;
     this.modelClient.setModel(model);
@@ -342,8 +418,14 @@ export class AgentRuntime {
     });
   }
 
-  forceCompact(): void {
+  /**
+   * Compact the conversation context. An optional hint (from `/compact
+   * <hint>`) is preserved in the summary as guidance for the continuation
+   * (VC-KIMI-049).
+   */
+  forceCompact(hint?: string): void {
     const summary = buildStructuredSummary(this.state);
+    if (hint) summary.hint = hint;
     this.context.compact(summary);
     this.emit({
       type: 'context_compacted',
@@ -359,11 +441,20 @@ export class AgentRuntime {
    * session (VC-KIMI-004).
    */
   loadState(state: AgentState, overrides?: ResumeOverrides): void {
-    const resumedWorkspace = new WorkspaceManager(state.workspaceRoot);
+    const resumedWorkspace = new WorkspaceManager(
+      state.workspaceRoot,
+      state.workspace?.additionalRoots ?? []
+    );
     if (resumedWorkspace.workspaceRoot !== this.workspace.workspaceRoot) {
       throw new Error('Cannot resume a session from a different workspace');
     }
     Object.assign(this.state, state);
+    // Rebuild the path authority with the persisted additional roots so
+    // resumed sessions honor them (VC-KIMI-044).
+    this.workspace = new WorkspaceManager(
+      this.state.workspaceRoot,
+      this.state.workspace.additionalRoots
+    );
     if (overrides?.objective !== undefined) {
       this.state.objective = overrides.objective;
     }
@@ -438,7 +529,21 @@ export class AgentRuntime {
     }] : []);
     this.addUserMessage(content);
     try {
-      const finalMessage = await this.processTurns();
+      let finalMessage = await this.processTurns();
+      // Drain any messages queued while this turn was running (VC-KIMI-053).
+      // Each queued message starts a fresh turn with its own turn budget.
+      while (this.queuedMessages.length > 0) {
+        const next = this.queuedMessages.shift()!;
+        this.emit({
+          type: 'message_queued_consumed',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          content: next,
+          remaining: this.queuedMessages.length,
+        });
+        this.addUserMessage(next);
+        finalMessage = await this.processTurns();
+      }
       this.persist();
       return finalMessage;
     } finally {
@@ -508,6 +613,7 @@ export class AgentRuntime {
   }
 
   private async processTurns(): Promise<string> {
+    this.turnInProgress = true;
     let turns = 0;
     let finalMessage = '';
 
@@ -527,6 +633,13 @@ export class AgentRuntime {
             eventId: randomUUID(),
             summary,
           });
+        }
+
+        // Consume an injected message at this tool boundary — i.e., right
+        // before the next model request (VC-KIMI-053).
+        if (this.injectedMessages.length > 0) {
+          const injected = this.injectedMessages.shift()!;
+          this.addUserMessage(injected);
         }
 
         this.state.status = 'thinking';
@@ -573,6 +686,13 @@ export class AgentRuntime {
     } catch (error) {
       this.state.status = 'failed';
       finalMessage = `Agent failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.turnInProgress = false;
+      // Preserve injections that arrived after the turn limit was reached by
+      // rolling them into the queue so they still run (VC-KIMI-053).
+      if (this.injectedMessages.length > 0) {
+        this.queuedMessages.unshift(...this.injectedMessages.splice(0));
+      }
     }
 
     return finalMessage;
@@ -675,12 +795,18 @@ export class AgentRuntime {
   async executeDirectTool(
     toolName: string,
     input: unknown,
-    _options: { source?: string } = {}
+    options: { source?: string } = {}
   ): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string }; approved: boolean }> {
     await this.start();
     const previousStatus = this.state.status;
     try {
-      const { result, approved } = await this.runTool(toolName, input, randomUUID());
+      // The source is recorded in the session trace so direct (UI-initiated)
+      // calls are distinguishable from agent tool calls (VC-KIMI-054).
+      const { result, approved } = await this.runTool(toolName, input, randomUUID(), options.source);
+      // Direct calls happen outside the agent turn loop, so persist
+      // immediately to make the trace durable without waiting for the next
+      // turn or a clean shutdown.
+      this.persist();
       return { ok: result.ok, data: result.data, error: result.error, approved };
     } finally {
       this.state.status = previousStatus;
@@ -698,7 +824,8 @@ export class AgentRuntime {
   private async runTool(
     toolName: string,
     input: unknown,
-    toolCallId: string
+    toolCallId: string,
+    source?: string
   ): Promise<{ result: ToolResult<unknown>; approved: boolean; changedFiles: boolean }> {
     const tool = this.registry.get(toolName);
     const start = Date.now();
@@ -716,7 +843,7 @@ export class AgentRuntime {
         ok: false,
         error: { code: 'UNKNOWN_TOOL', message: `Tool not found: ${toolName}` },
       };
-      this.recordToolCall(toolCallId, toolName, input, result, false, 0);
+      this.recordToolCall(toolCallId, toolName, input, result, false, 0, source);
       return { result, approved: false, changedFiles: false };
     }
 
@@ -727,7 +854,7 @@ export class AgentRuntime {
         ok: false,
         error: { code: 'PLAN_MODE_DENIED', message: `${toolName} is unavailable in plan mode` },
       };
-      this.recordToolCall(toolCallId, toolName, input, result, false, 0);
+      this.recordToolCall(toolCallId, toolName, input, result, false, 0, source);
       return { result, approved: false, changedFiles: false };
     }
 
@@ -748,7 +875,7 @@ export class AgentRuntime {
           ok: false,
           error: { code: 'PERMISSION_DENIED', message: `Approval denied for ${toolName}` },
         };
-        this.recordToolCall(toolCallId, toolName, input, result, false, Date.now() - start);
+        this.recordToolCall(toolCallId, toolName, input, result, false, Date.now() - start, source);
         return { result, approved: false, changedFiles: false };
       }
       if (decision.scope) {
@@ -804,6 +931,45 @@ export class AgentRuntime {
     }
 
     this.state.changedFiles = this.workspace.changedFiles;
+
+    // Structured user questions (VC-KIMI-058): ask_user emits a question, and
+    // the runtime collects a real answer through the installed handler before
+    // returning it to the model. Without a handler the call fails with
+    // INTERACTION_REQUIRED instead of echoing the question back.
+    if (toolName === 'ask_user' && result.ok) {
+      const question = result.data as { question: string; options?: string[]; multiSelect?: boolean };
+      const request: UserQuestionRequest = {
+        id: randomUUID(),
+        questions: [{
+          prompt: question.question,
+          options: question.options,
+          multiSelect: question.multiSelect,
+        }],
+      };
+      this.emit({
+        type: 'user_question_requested',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        request,
+      });
+      const response = await this.permissions.requestUserAnswer(request);
+      if (!response) {
+        result = {
+          ok: false,
+          error: { code: 'INTERACTION_REQUIRED', message: 'User interaction is required but no answer collector is available' },
+        };
+      } else {
+        result = {
+          ok: true,
+          data: {
+            question: question.question,
+            options: question.options,
+            multiSelect: question.multiSelect,
+            answers: response.answers,
+          },
+        };
+      }
+    }
 
     if (toolName === 'todo_write' && result.ok && Array.isArray(result.data)) {
       this.state.todos = result.data;
@@ -900,7 +1066,7 @@ export class AgentRuntime {
     this.context.setWorkingMemory(this.state);
 
     const durationMs = Date.now() - start;
-    this.recordToolCall(toolCallId, toolName, input, result, approved, durationMs);
+    this.recordToolCall(toolCallId, toolName, input, result, approved, durationMs, source);
     return { result, approved, changedFiles: changedFilesThisCall };
   }
 
@@ -910,7 +1076,8 @@ export class AgentRuntime {
     input: unknown,
     result: ToolResult<unknown>,
     approved: boolean,
-    durationMs: number
+    durationMs: number,
+    source?: string
   ): void {
     const safeInput = this.redactor.redact(input);
     const safeResult = this.redactor.redact(result) as ToolResult<unknown>;
@@ -932,6 +1099,7 @@ export class AgentRuntime {
       approved,
       durationMs,
       timestamp: new Date().toISOString(),
+      ...(source ? { source } : {}),
     });
     this.addToolResult(id, safeResult);
   }
@@ -947,6 +1115,10 @@ export class AgentRuntime {
   private buildToolContext(): ToolContext {
     return {
       workspaceRoot: this.state.workspaceRoot,
+      workspace: {
+        primaryRoot: this.state.workspace.primaryRoot,
+        additionalRoots: this.state.workspace.additionalRoots,
+      },
       sessionId: this.state.sessionId,
       objective: this.state.objective,
       runtimeState: this.state,

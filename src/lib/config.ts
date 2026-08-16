@@ -245,7 +245,14 @@ export function getOutputFormat(): string {
 }
 
 export function isColorEnabled(): boolean {
-  const config = loadConfig();
+  // Color detection must never crash on a malformed or symlinked config —
+  // those conditions are diagnosed by `venice doctor config` instead.
+  let config: VeniceConfig;
+  try {
+    config = loadConfig();
+  } catch {
+    config = {};
+  }
   // Disable color if no_color is set or NO_COLOR env is set or not a TTY
   if (config.no_color) return false;
   if (process.env.NO_COLOR) return false;

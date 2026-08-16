@@ -48,6 +48,8 @@ export interface ToolInvocation {
   approved: boolean;
   durationMs: number;
   timestamp: string;
+  /** Origin of the invocation (e.g. `shell-mode`) for direct tool calls (VC-KIMI-054). */
+  source?: string;
 }
 
 export interface ValidationResult {
@@ -92,6 +94,25 @@ export interface PlanArtifact {
   updatedAt: string;
 }
 
+/** A single structured question asked of the user (VC-KIMI-058). */
+export interface UserQuestion {
+  prompt: string;
+  options?: string[];
+  multiSelect?: boolean;
+}
+
+/** A runtime interaction request emitted when a tool needs real user input. */
+export interface UserQuestionRequest {
+  id: string;
+  questions: UserQuestion[];
+}
+
+/** The collected answers, one entry per question (multi-select joined). */
+export interface UserQuestionResponse {
+  id: string;
+  answers: string[];
+}
+
 export interface AgentState {
   sessionId: string;
   workspaceRoot: string;
@@ -132,6 +153,8 @@ export interface AgentState {
 
 export interface StructuredSummary {
   objective: string;
+  /** Optional guidance supplied via `/compact <hint>` (VC-KIMI-049). */
+  hint?: string;
   completedWork: string[];
   remainingWork: string[];
   decisions: string[];

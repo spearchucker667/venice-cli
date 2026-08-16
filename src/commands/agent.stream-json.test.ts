@@ -74,6 +74,44 @@ describe('stream-json protocol', () => {
     assert.strictEqual((toStreamJson(updated) as { plan?: unknown }).plan, plan);
   });
 
+  it('maps queued/injected message events (VC-KIMI-053)', () => {
+    const queued: AgentEvent = {
+      type: 'message_queued',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: '11',
+      content: 'next',
+      queueLength: 2,
+    };
+    const consumed: AgentEvent = {
+      type: 'message_queued_consumed',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: '12',
+      content: 'next',
+      remaining: 1,
+    };
+    const injected: AgentEvent = {
+      type: 'message_injected',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: '13',
+      content: 'note',
+    };
+    assert.strictEqual(toStreamJson(queued)?.type, 'message.queued');
+    assert.strictEqual(toStreamJson(consumed)?.type, 'message.queued_consumed');
+    assert.strictEqual(toStreamJson(injected)?.type, 'message.injected');
+  });
+
+  it('maps a user-question interaction request (VC-KIMI-058)', () => {
+    const event: AgentEvent = {
+      type: 'user_question_requested',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: '14',
+      request: { id: 'q1', questions: [{ prompt: 'Which?', options: ['A', 'B'] }] },
+    };
+    const out = toStreamJson(event);
+    assert.strictEqual(out?.type, 'user.question_requested');
+    assert.deepStrictEqual((out as { request?: unknown }).request, event.request);
+  });
+
   it('returns undefined for unmapped event types', () => {
     const event: AgentEvent = {
       type: 'model_request',

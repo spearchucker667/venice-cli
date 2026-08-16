@@ -20,9 +20,9 @@ export const applyPatchTool: AgentTool<{ path: string; patch: string }, { applie
   },
   risk: 'write',
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     try {
-      const { absolute, relative } = workspace.resolve(input.path);
+      const { absolute, relative, root } = workspace.resolve(input.path);
       const original = fs.readFileSync(absolute, 'utf-8');
       const lines = original.split('\n');
       const patchLines = input.patch.split('\n');
@@ -72,7 +72,7 @@ export const applyPatchTool: AgentTool<{ path: string; patch: string }, { applie
         newContent,
       });
       fs.writeFileSync(absolute, newContent, 'utf-8');
-      workspace.markChanged(relative);
+      workspace.markChangedResolved({ absolute, relative, root });
       return success({ applied: true }, { affectedFiles: [relative] });
     } catch (error) {
       return failure('PATCH_ERROR', error instanceof Error ? error.message : String(error));

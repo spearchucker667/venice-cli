@@ -64,22 +64,20 @@ export function parseSkillMarkdown(filePath: string): Skill | undefined {
     return undefined;
   }
 
-  try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const { metadata, body } = parseFrontmatter(content);
+  // Read errors propagate so discovery can surface them instead of swallowing
+  // them (VC-KIMI-043).
+  const content = fs.readFileSync(filePath, 'utf-8');
+  const { metadata, body } = parseFrontmatter(content);
 
-    if (!metadata.name || !metadata.description) {
-      return undefined;
-    }
-
-    return {
-      name: metadata.name,
-      description: metadata.description,
-      tools: Array.isArray(metadata.tools) ? metadata.tools : [],
-      source: filePath,
-      content: body,
-    };
-  } catch {
+  if (!metadata.name || !metadata.description) {
     return undefined;
   }
+
+  return {
+    name: metadata.name,
+    description: metadata.description,
+    tools: Array.isArray(metadata.tools) ? metadata.tools : [],
+    source: filePath,
+    content: body,
+  };
 }

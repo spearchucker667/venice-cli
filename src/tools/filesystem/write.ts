@@ -21,9 +21,9 @@ export const writeFileTool: AgentTool<{ path: string; content: string }, { bytes
   },
   risk: 'write',
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     try {
-      const { absolute, relative } = workspace.resolve(input.path);
+      const { absolute, relative, root } = workspace.resolve(input.path);
       const originalContent = fs.existsSync(absolute) ? fs.readFileSync(absolute, 'utf-8') : null;
       fs.mkdirSync(path.dirname(absolute), { recursive: true });
       fs.writeFileSync(absolute, input.content, 'utf-8');
@@ -33,7 +33,7 @@ export const writeFileTool: AgentTool<{ path: string; content: string }, { bytes
         originalContent,
         newContent: input.content,
       });
-      workspace.markChanged(relative);
+      workspace.markChangedResolved({ absolute, relative, root });
       return success({ bytesWritten: Buffer.byteLength(input.content, 'utf-8') }, { affectedFiles: [relative] });
     } catch (error) {
       return failure('WRITE_ERROR', error instanceof Error ? error.message : String(error));

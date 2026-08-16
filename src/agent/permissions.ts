@@ -40,6 +40,15 @@ export type ApprovalCallback = (
 export type PlanApprovalCallback = (plan: import('./types.js').PlanArtifact) => Promise<boolean>;
 
 /**
+ * Handler that actually collects a structured answer from the user for an
+ * `ask_user` interaction (VC-KIMI-058). Returns `undefined` when no collector
+ * is available, which the runtime reports as INTERACTION_REQUIRED.
+ */
+export type UserQuestionCallback = (
+  request: import('./types.js').UserQuestionRequest
+) => Promise<import('./types.js').UserQuestionResponse | undefined>;
+
+/**
  * Relative severity of each risk level. A grant issued for a given risk may
  * only cover future requests at the same or a lower severity.
  */
@@ -61,6 +70,7 @@ export class PermissionManager {
   private readonly grants: ApprovalScope[] = [];
   private approver?: ApprovalCallback;
   private planApprover?: PlanApprovalCallback;
+  private userQuestionHandler?: UserQuestionCallback;
 
   constructor(mode: ApprovalMode = 'suggest') {
     this.mode = mode;
@@ -73,6 +83,19 @@ export class PermissionManager {
   /** Install the plan-exit approval handler (TUI renders the plan). */
   setPlanApprover(approver: PlanApprovalCallback): void {
     this.planApprover = approver;
+  }
+
+  /** Install the structured-question collector (TUI renders the prompt). */
+  setUserQuestionHandler(handler: UserQuestionCallback): void {
+    this.userQuestionHandler = handler;
+  }
+
+  /** Collect an answer; returns undefined when no collector is installed. */
+  async requestUserAnswer(request: import('./types.js').UserQuestionRequest): Promise<import('./types.js').UserQuestionResponse | undefined> {
+    if (this.userQuestionHandler) {
+      return await this.userQuestionHandler(request);
+    }
+    return undefined;
   }
 
   /**

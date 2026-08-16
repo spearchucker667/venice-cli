@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { AgentRuntime, detectWorkspaceRoot } from './runtime.js';
+import { SessionManager } from './sessions.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { readFileTool } from '../tools/filesystem/read.js';
 import { writeFileTool } from '../tools/filesystem/write.js';
@@ -40,6 +41,16 @@ class MockModelClient extends VeniceModelClient {
 
   async getModelProfile(): Promise<ModelProfile | undefined> {
     return undefined;
+  }
+}
+
+/** Records the messages seen on each `complete` call. */
+class RecordingModelClient extends MockModelClient {
+  readonly seenMessages: AgentMessage[][] = [];
+
+  async complete(messages: AgentMessage[], tools: ToolDefinition[] = []): Promise<ModelResponse> {
+    this.seenMessages.push(messages);
+    return super.complete(messages, tools);
   }
 }
 
@@ -699,5 +710,237 @@ describe('AgentRuntime', () => {
     const second = await runtime.complete();
     const secondCompletedCount = second.events.filter((e) => e.type === 'session_completed').length;
     assert.strictEqual(secondCompletedCount, 1);
+  });
+
+  it('merges --add-dir roots into the workspace authority and de-duplicates', () => {
+    const extra = path.join(tmp, 'extra');
+    fs.mkdirSync(extra, { recursive: true });
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Multi-root test',
+      approvalMode: 'auto-edit',
+      additionalRoots: [extra, extra],
+      modelClient: new MockModelClient([]),
+    });
+    const workspace = runtime.getState().workspace;
+    assert.strictEqual(workspace.primaryRoot, tmp);
+    assert.deepStrictEqual(workspace.additionalRoots, [extra]);
+    assert.ok(Array.isArray(runtime.getSkillErrors()));
+  });
+
+  it('records a /compact hint in the emitted summary (VC-KIMI-049)', () => {
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Compact hint test',
+      approvalMode: 'auto-edit',
+      modelClient: new MockModelClient([]),
+    });
+    runtime.forceCompact('keep the parser in mind');
+    const manager = runtime.getContextManager();
+    const system = String(manager.buildMessages()[0].content);
+    assert.ok(system.includes('Continuation hint: keep the parser in mind'));
+  });
+
+  it('records and persists direct shell calls with their source (VC-KIMI-054)', async () => {
+    const sessionsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'venice-sessions-'));
+    const sessions = new SessionManager(sessionsRoot);
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Direct shell trace',
+      approvalMode: 'yolo',
+      modelClient: new MockModelClient([]),
+      sessionManager: sessions,
+    });
+    try {
+      const result = await runtime.executeDirectTool('shell', { command: 'echo direct' }, { source: 'shell-mode' });
+      assert.strictEqual(result.ok, true);
+
+      const history = runtime.getState().toolHistory;
+      assert.strictEqual(history.length, 1);
+      assert.strictEqual(history[0].toolName, 'shell');
+      assert.strictEqual(history[0].source, 'shell-mode');
+
+      // executeDirectTool persists immediately, so the trace survives without
+      // a subsequent turn or clean shutdown.
+      const loaded = sessions.load(runtime.getState().sessionId);
+      assert.ok(loaded, 'direct tool call must be persisted');
+      assert.strictEqual(loaded.state.toolHistory[0]?.source, 'shell-mode');
+    } finally {
+      fs.rmSync(sessionsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('drains messages queued around a turn (VC-KIMI-053)', async () => {
+    const client = new MockModelClient([
+      { content: 'first', finishReason: 'stop' },
+      { content: 'queued', finishReason: 'stop' },
+    ]);
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Queue drain',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: client,
+    });
+    runtime.queueUserMessage('queued message');
+    const final = await runtime.sendUserMessage('first');
+    assert.strictEqual(final, 'queued');
+    assert.strictEqual(runtime.getQueuedMessageCount(), 0);
+    const userMessages = runtime.getState().messages.filter((m) => m.role === 'user').map((m) => m.content);
+    assert.deepStrictEqual(userMessages, ['first', 'queued message']);
+  });
+
+  it('accepts a message queued while a turn is running (VC-KIMI-053)', async () => {
+    const client = new MockModelClient([
+      { content: 'first', finishReason: 'stop' },
+      { content: 'queued', finishReason: 'stop' },
+    ]);
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Queue while running',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: client,
+    });
+    let queued = false;
+    const originalComplete = client.complete.bind(client);
+    client.complete = async (messages: AgentMessage[], tools: ToolDefinition[] = []) => {
+      const result = await originalComplete(messages, tools);
+      if (!queued) {
+        queued = true;
+        runtime.queueUserMessage('queued while running');
+      }
+      return result;
+    };
+    const final = await runtime.sendUserMessage('first');
+    assert.strictEqual(final, 'queued');
+    assert.strictEqual(runtime.getQueuedMessageCount(), 0);
+    const userMessages = runtime.getState().messages.filter((m) => m.role === 'user').map((m) => m.content);
+    assert.deepStrictEqual(userMessages, ['first', 'queued while running']);
+  });
+
+  it('injects a message into the current turn after a tool boundary (VC-KIMI-053)', async () => {
+    const registry = new ToolRegistry();
+    registry.register(readFileTool);
+
+    const client = new RecordingModelClient([
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'read_file', arguments: JSON.stringify({ path: 'package.json' }) },
+          },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'after injection', finishReason: 'stop' },
+    ]);
+
+    let runtime: AgentRuntime | undefined;
+    let injected = false;
+    const originalComplete = client.complete.bind(client);
+    client.complete = async (messages: AgentMessage[], tools: ToolDefinition[] = []) => {
+      const result = await originalComplete(messages, tools);
+      if (!injected) {
+        injected = true;
+        runtime?.injectUserMessage('injected note');
+      }
+      return result;
+    };
+
+    runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Inject into turn',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: client,
+      toolRegistry: registry,
+    });
+    // Prevent the test-only default budget (maxTokens 0) from compacting the
+    // conversation between the two model requests.
+    runtime.getContextManager().setModelContextLimit(128000);
+
+    await runtime.sendUserMessage('start');
+
+    // The second model request must include the injected user message.
+    const secondRequestUsers = client.seenMessages[1]?.filter((m) => m.role === 'user').map((m) => m.content);
+    assert.deepStrictEqual(secondRequestUsers, ['start', 'injected note']);
+  });
+
+  it('queues an injection that arrives with no active turn (VC-KIMI-053)', () => {
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Idle injection',
+      approvalMode: 'auto-edit',
+      modelClient: new MockModelClient([]),
+    });
+    runtime.injectUserMessage('idle note');
+    assert.strictEqual(runtime.getQueuedMessageCount(), 1, 'idle injection falls back to the queue');
+  });
+
+  it('collects a real answer for ask_user (VC-KIMI-058)', async () => {
+    const client = new MockModelClient([
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'ask_user', arguments: JSON.stringify({ question: 'Which?', options: ['A', 'B'] }) },
+          },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'got the answer', finishReason: 'stop' },
+    ]);
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Ask',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: client,
+    });
+    runtime.setUserQuestionHandler(async (request) => ({ id: request.id, answers: ['A'] }));
+
+    const final = await runtime.sendUserMessage('ask the user');
+    assert.strictEqual(final, 'got the answer');
+
+    const ask = runtime.getState().toolHistory.find((t) => t.toolName === 'ask_user');
+    assert.ok(ask, 'ask_user call is traced');
+    assert.strictEqual(ask.result.ok, true);
+    assert.deepStrictEqual((ask.result.data as { answers?: string[] }).answers, ['A']);
+  });
+
+  it('reports INTERACTION_REQUIRED for ask_user with no collector (VC-KIMI-058)', async () => {
+    const client = new MockModelClient([
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'ask_user', arguments: JSON.stringify({ question: 'Which?' }) },
+          },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'fallback', finishReason: 'stop' },
+    ]);
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Ask',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: client,
+    });
+
+    await runtime.sendUserMessage('ask');
+
+    const ask = runtime.getState().toolHistory.find((t) => t.toolName === 'ask_user');
+    assert.ok(ask);
+    assert.strictEqual(ask.result.ok, false);
+    assert.strictEqual(ask.result.error?.code, 'INTERACTION_REQUIRED');
   });
 });

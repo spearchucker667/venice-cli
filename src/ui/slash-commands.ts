@@ -21,6 +21,42 @@ export function parseSlashCommand(input: string): SlashCommand | undefined {
   return { command: command.toLowerCase(), args: rest.join(' ').trim() };
 }
 
+/**
+ * The canonical base command name for a (possibly sub-command) definition,
+ * e.g. `plan view` -> `plan`. Handlers are keyed by base command.
+ */
+export function getSlashCommandBase(name: string): string {
+  return name.split(' ')[0].toLowerCase();
+}
+
+/**
+ * Statuses during which the agent is actively running a turn. Commands that
+ * require an idle agent (availability: 'idle') are unavailable while running.
+ */
+export function isBusyStatus(status: string): boolean {
+  return status === 'thinking' || status === 'awaiting_approval' || status === 'executing_tool' || status === 'verifying';
+}
+
+/**
+ * Find the metadata entry for a parsed command token. Matches the base entry
+ * (e.g. `plan`) or, when absent, the first sub-command variant (e.g. `plan on`).
+ */
+export function findSlashCommandDefinition(command: string): SlashCommandDefinition | undefined {
+  const base = getSlashCommandBase(command);
+  return (
+    SLASH_COMMANDS.find((c) => c.name === command) ??
+    SLASH_COMMANDS.find((c) => getSlashCommandBase(c.name) === base)
+  );
+}
+
+/**
+ * Enforce the `availability` metadata (VC-KIMI-046): an `idle`-only command
+ * must be rejected while the agent is running a turn.
+ */
+export function isSlashCommandAvailable(definition: SlashCommandDefinition, status: string): boolean {
+  return definition.availability !== 'idle' || !isBusyStatus(status);
+}
+
 export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: 'help', description: 'Show help and examples', availability: 'always' },
   { name: 'help all', aliases: [], description: 'List all slash commands', availability: 'always' },

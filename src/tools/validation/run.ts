@@ -21,7 +21,7 @@ export const runValidationTool: AgentTool<{ command: string; cwd?: string; timeo
   },
   risk: 'execute',
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     const cwd = input.cwd ? workspace.resolve(input.cwd).absolute : workspace.workspaceRoot;
 
     const result = await shellTool.execute({ command: input.command, cwd, timeoutMs: input.timeoutMs }, context);

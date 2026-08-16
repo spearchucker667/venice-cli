@@ -1,11 +1,29 @@
 import { Command } from 'commander';
 import * as fs from 'node:fs';
-import type { McpServerConfig } from '../mcp/config.js';
-import { loadMcpConfig, saveMcpConfig, getMcpConfigPath, getWorkspaceMcpConfigPath } from '../mcp/config.js';
+import type { McpConfig, McpServerConfig } from '../mcp/config.js';
+import {
+  loadMcpConfig,
+  loadMcpConfigStrict,
+  saveMcpConfig,
+  getMcpConfigPath,
+  getWorkspaceMcpConfigPath,
+} from '../mcp/config.js';
 import { McpManager } from '../mcp/manager.js';
+import { McpStdioClient } from '../mcp/client.js';
+import { isSupportedProtocolVersion } from '../mcp/protocol.js';
 import { WorkspaceTrustStore, hashMcpConfigBytes, resolveProjectMcpTrust, defaultConfirmTrust } from '../mcp/trust.js';
 import { detectWorkspaceRoot } from '../agent/runtime.js';
 import { formatError, getChalk } from '../lib/output.js';
+
+function loadStrictForMutation(configPath: string): McpConfig {
+  // Refuse to overwrite a malformed/symlinked config (VC-KIMI-038).
+  try {
+    return loadMcpConfigStrict(configPath);
+  } catch (error) {
+    console.error(formatError(error instanceof Error ? error.message : String(error)));
+    process.exit(1);
+  }
+}
 
 export function registerMcpCommand(program: Command, configPath = getMcpConfigPath()): void {
   const mcp = program.command('mcp').description('Manage MCP servers for the Venice agent');
@@ -62,7 +80,7 @@ export function registerMcpCommand(program: Command, configPath = getMcpConfigPa
     .requiredOption('--command <command>', 'Server command')
     .option('--args <args...>', 'Command arguments')
     .action((name: string, options) => {
-      const config = loadMcpConfig(configPath);
+      const config = loadStrictForMutation(configPath);
       const server: McpServerConfig = { command: options.command };
       if (options.args) server.args = options.args;
       config.mcpServers[name] = server;
@@ -74,7 +92,7 @@ export function registerMcpCommand(program: Command, configPath = getMcpConfigPa
     .command('remove <name>')
     .description('Remove an MCP server from global config')
     .action((name: string) => {
-      const config = loadMcpConfig(configPath);
+      const config = loadStrictForMutation(configPath);
       if (!config.mcpServers[name]) {
         console.error(formatError(`Unknown MCP server: ${name}`));
         process.exit(1);
@@ -88,7 +106,7 @@ export function registerMcpCommand(program: Command, configPath = getMcpConfigPa
     .command('enable <name>')
     .description('Enable an MCP server')
     .action((name: string) => {
-      const config = loadMcpConfig(configPath);
+      const config = loadStrictForMutation(configPath);
       if (!config.mcpServers[name]) {
         console.error(formatError(`Unknown MCP server: ${name}`));
         process.exit(1);
@@ -102,7 +120,7 @@ export function registerMcpCommand(program: Command, configPath = getMcpConfigPa
     .command('disable <name>')
     .description('Disable an MCP server')
     .action((name: string) => {
-      const config = loadMcpConfig(configPath);
+      const config = loadStrictForMutation(configPath);
       if (!config.mcpServers[name]) {
         console.error(formatError(`Unknown MCP server: ${name}`));
         process.exit(1);
@@ -110,6 +128,41 @@ export function registerMcpCommand(program: Command, configPath = getMcpConfigPa
       config.mcpServers[name].disabled = true;
       saveMcpConfig(config, configPath);
       console.log(`Disabled MCP server '${name}'.`);
+    });
+
+  mcp
+    .command('version <name>')
+    .description('Probe an MCP server and report its negotiated protocol version and capabilities')
+    .action(async (name: string) => {
+      const config = loadStrictForMutation(configPath);
+      const server = config.mcpServers[name];
+      if (!server) {
+        console.error(formatError(`Unknown MCP server: ${name}`));
+        process.exit(1);
+      }
+
+      const client = new McpStdioClient(server);
+      try {
+        await client.start();
+        const version = client.getNegotiatedProtocolVersion();
+        console.log(
+          JSON.stringify(
+            {
+              name,
+              protocolVersion: version,
+              supported: version ? isSupportedProtocolVersion(version) : false,
+              capabilities: client.getServerCapabilities() ?? {},
+            },
+            null,
+            2
+          )
+        );
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      } finally {
+        await client.stop();
+      }
     });
 
   mcp

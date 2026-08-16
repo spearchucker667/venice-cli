@@ -90,7 +90,7 @@ export const writePlanTool: AgentTool<WritePlanInput, { plan: PlanArtifact }> = 
   risk: 'write',
   planSafe: true,
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     const existing = (context.runtimeState as Readonly<AgentState>).plan;
 
     const requested =

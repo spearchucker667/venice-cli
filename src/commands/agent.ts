@@ -19,7 +19,9 @@ export function registerAgentCommand(program: Command): Command {
     .description('Run the workspace-aware Venice agent')
     .option('-p, --prompt <prompt>', 'Single noninteractive prompt')
     .option('-m, --model <model>', 'Model to use')
-    .option('-a, --approval <mode>', 'Approval mode (suggest|auto-edit|auto|yolo)', 'suggest')
+    .option('-a, --approval <mode>', 'Approval mode (suggest|auto-edit|auto|yolo; default: suggest interactive, auto-edit noninteractive)')
+    .option('--auto', 'Shorthand for --approval auto (auto-approves workspace edits and ordinary dev commands, incl. headless shell)')
+    .option('--yolo', 'Shorthand for --approval yolo (autonomous execution; still prompts for destructive commands)')
     .option('--plan', 'Start in plan mode (read-only)', false)
     .option('--continue', 'Resume the most recent session in this workspace', false)
     .option('--session [sessionId]', 'Resume a session by id, or open the session picker if no id is given')
@@ -29,13 +31,24 @@ export function registerAgentCommand(program: Command): Command {
     .option('--json', 'Output final result as JSON (deprecated: use --output-format json)')
     .option('--interactive', 'Render live progress (default when stdin is a TTY and --json is not used)')
     .option('--no-interactive', 'Force plain output even in a TTY')
+    .option('--skills-dir <dir>', 'Additional skills directory (repeatable)', (value: string, previous: string[]) => [...previous, value], [] as string[])
+    .option('--add-dir <dir>', 'Add an additional workspace root the agent may read and edit (repeatable)', (value: string, previous: string[]) => [...previous, value], [] as string[])
     .action(async (options) => {
       const c = getChalk();
-      const approvalMode = validateApprovalMode(options.approval);
-      if (!approvalMode) {
+      const explicitApproval = options.approval !== undefined
+        ? validateApprovalMode(String(options.approval))
+        : undefined;
+      if (options.approval !== undefined && !explicitApproval) {
         console.error(formatError(`Invalid approval mode: ${options.approval}`));
         process.exit(2);
       }
+      // --yolo and --auto are shorthands; --yolo wins over --auto, and both
+      // win over --approval.
+      const requestedApproval = options.yolo
+        ? 'yolo'
+        : options.auto
+          ? 'auto'
+          : explicitApproval;
 
       const cwd = options.cwd ? String(options.cwd) : process.cwd();
       const workspaceRoot = detectWorkspaceRoot(cwd);
@@ -46,6 +59,11 @@ export function registerAgentCommand(program: Command): Command {
       }
 
       const interactive = options.interactive ?? (process.stdin.isTTY && process.stdout.isTTY && !options.json && options.outputFormat !== 'stream-json');
+
+      // Headless `-p` defaults to auto-edit so normal workspace edits can
+      // proceed without a human approver; shell/network still prompt (and fail
+      // closed with no approver). Interactive keeps `suggest` (VC-KIMI-017).
+      const approvalMode = resolveApprovalMode(requestedApproval, interactive);
 
       const outputFormat = options.json ? 'json' : options.outputFormat;
       if (!['text', 'stream-json', 'json'].includes(outputFormat)) {
@@ -109,6 +127,8 @@ export function registerAgentCommand(program: Command): Command {
           mcpManager,
           initialObjective: objective?.trim(),
           resumeSessionId,
+          skillsDirs: options.skillsDir,
+          additionalRoots: options.addDir,
         });
         process.exit(0);
       }
@@ -126,7 +146,18 @@ export function registerAgentCommand(program: Command): Command {
         maxTurns,
         eventBus: events,
         mcpManager,
+        skillsDirs: options.skillsDir,
+        additionalRoots: options.addDir,
       });
+
+      // Broken skills must be visible during normal headless use, not only
+      // via doctor/skills (VC-KIMI-043).
+      const skillErrors = runtime.getSkillErrors();
+      if (skillErrors.length > 0) {
+        console.error(formatError(
+          `${skillErrors.length} skill discovery error${skillErrors.length === 1 ? '' : 's'}:\n${skillErrors.map((e) => `  - ${e}`).join('\n')}`
+        ));
+      }
 
       if (resumeSessionId) {
         const stored = new SessionManager().load(resumeSessionId, workspaceRoot);
@@ -181,6 +212,22 @@ function validateApprovalMode(mode: string): 'suggest' | 'auto-edit' | 'auto' | 
     return mode as 'suggest' | 'auto-edit' | 'auto' | 'yolo';
   }
   return undefined;
+}
+
+/**
+ * Resolve the effective approval mode.
+ *
+ * Interactive runs default to `suggest`; noninteractive (`-p`/stdin) runs
+ * default to `auto-edit` so workspace file edits can proceed without a human
+ * approver (shell/network still fail closed). An explicit `--approval` always
+ * wins (VC-KIMI-017).
+ */
+export function resolveApprovalMode(
+  requested: 'suggest' | 'auto-edit' | 'auto' | 'yolo' | undefined,
+  interactive: boolean
+): 'suggest' | 'auto-edit' | 'auto' | 'yolo' {
+  if (requested) return requested;
+  return interactive ? 'suggest' : 'auto-edit';
 }
 
 function readStdin(): Promise<string> {

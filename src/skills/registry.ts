@@ -22,34 +22,57 @@ export function getProjectSkillsDir(workspaceRoot: string): string {
 export class SkillRegistry {
   private readonly globalDir: string;
   private readonly projectDir: string;
+  private readonly extraDirs: string[];
   private readonly skills = new Map<string, Skill>();
+  private readonly errors: string[] = [];
 
-  constructor(globalDir = getGlobalSkillsDir(), projectDir?: string) {
+  constructor(globalDir = getGlobalSkillsDir(), projectDir?: string, extraDirs: string[] = []) {
     this.globalDir = globalDir;
     this.projectDir = projectDir || '';
+    this.extraDirs = extraDirs;
   }
 
   discover(): void {
     this.skills.clear();
-    for (const dir of [this.globalDir, this.projectDir]) {
+    this.errors.length = 0;
+    for (const dir of [this.globalDir, this.projectDir, ...this.extraDirs]) {
+      if (!dir || !fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) {
+        continue;
+      }
+
+      let entries: fs.Dirent[];
       try {
-        if (!dir || !fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) {
-          continue;
-        }
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          if (!entry.isDirectory()) {
-            continue;
-          }
-          const skillPath = path.join(dir, entry.name, 'SKILL.md');
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch (error) {
+        this.errors.push(
+          `cannot read skills directory ${dir}: ${error instanceof Error ? error.message : String(error)}`
+        );
+        continue;
+      }
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const skillPath = path.join(dir, entry.name, 'SKILL.md');
+        if (!fs.existsSync(skillPath)) continue; // not a skill directory
+        try {
           const skill = parseSkillMarkdown(skillPath);
           if (skill) {
             this.skills.set(skill.name, skill);
+          } else {
+            this.errors.push(`invalid skill manifest (missing name or description): ${skillPath}`);
           }
+        } catch (error) {
+          this.errors.push(
+            `failed to parse skill ${skillPath}: ${error instanceof Error ? error.message : String(error)}`
+          );
         }
-      } catch {
-        // Handle capability discovery failures gracefully
       }
     }
+  }
+
+  /** Discovery errors, surfaced rather than swallowed (VC-KIMI-043). */
+  getErrors(): string[] {
+    return [...this.errors];
   }
 
   list(): SkillSummary[] {

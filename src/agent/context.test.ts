@@ -74,6 +74,26 @@ describe('ContextManager', () => {
     assert.strictEqual(messages.length, 1);
   });
 
+  it('preserves a continuation hint in the compacted summary (VC-KIMI-049)', () => {
+    const ctx = new ContextManager();
+    ctx.addConversationMessage({ role: 'user', content: 'Hello' });
+    ctx.compact({
+      objective: 'test',
+      hint: 'focus on the parser',
+      completedWork: [],
+      remainingWork: [],
+      decisions: [],
+      discoveries: [],
+      filesRead: [],
+      filesChanged: [],
+      commandsRun: [],
+      failures: [],
+      importantConstraints: [],
+    });
+    const system = String(ctx.buildMessages()[0].content);
+    assert.ok(system.includes('Continuation hint: focus on the parser'));
+  });
+
   it('accepts model context limit', () => {
     const ctx = new ContextManager();
     ctx.setModelContextLimit(32000);

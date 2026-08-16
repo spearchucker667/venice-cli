@@ -178,6 +178,7 @@ export class ContextManager {
   private renderSummary(summary: StructuredSummary): string {
     const lines = ['Summary of earlier work:'];
     lines.push(`Objective: ${summary.objective}`);
+    if (summary.hint) lines.push(`Continuation hint: ${summary.hint}`);
     if (summary.completedWork.length) lines.push('Completed:', ...summary.completedWork.map((s) => `- ${s}`));
     if (summary.remainingWork.length) lines.push('Remaining:', ...summary.remainingWork.map((s) => `- ${s}`));
     if (summary.decisions.length) lines.push('Decisions:', ...summary.decisions.map((s) => `- ${s}`));

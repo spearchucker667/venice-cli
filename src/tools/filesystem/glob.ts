@@ -54,10 +54,17 @@ export const globTool: AgentTool<{ pattern: string }, string[]> = {
   },
   risk: 'read',
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     try {
-      const results = globSync(workspace.workspaceRoot, input.pattern);
-      return success(results);
+      const results: string[] = [];
+      for (const root of workspace.roots) {
+        for (const match of globSync(root, input.pattern)) {
+          results.push(
+            root === workspace.workspaceRoot ? match : toWorkspacePath(path.join(root, match))
+          );
+        }
+      }
+      return success([...new Set(results)].sort());
     } catch (error) {
       return { ok: false, error: { code: 'GLOB_ERROR', message: error instanceof Error ? error.message : String(error) } };
     }

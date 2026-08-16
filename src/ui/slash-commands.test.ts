@@ -1,6 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseSlashCommand, SLASH_COMMANDS, findSlashCommands } from './slash-commands.js';
+import {
+  parseSlashCommand,
+  SLASH_COMMANDS,
+  findSlashCommands,
+  findSlashCommandDefinition,
+  getSlashCommandBase,
+  isSlashCommandAvailable,
+  isBusyStatus,
+} from './slash-commands.js';
 
 describe('parseSlashCommand', () => {
   it('parses /quit', () => {
@@ -42,5 +50,33 @@ describe('parseSlashCommand', () => {
     assert.ok(findSlashCommands('/quit').some((c) => c.name === 'quit'));
     assert.ok(findSlashCommands('/toggle').some((c) => c.name.includes('plan')));
     assert.strictEqual(findSlashCommands('help').length, 0);
+  });
+
+  it('derives base command names from sub-command definitions', () => {
+    assert.strictEqual(getSlashCommandBase('plan'), 'plan');
+    assert.strictEqual(getSlashCommandBase('plan view'), 'plan');
+    assert.strictEqual(getSlashCommandBase('export-debug-zip'), 'export-debug-zip');
+  });
+
+  it('finds the metadata entry for a parsed command token', () => {
+    assert.strictEqual(findSlashCommandDefinition('plan')?.name, 'plan');
+    assert.strictEqual(findSlashCommandDefinition('compact')?.availability, 'idle');
+    assert.strictEqual(findSlashCommandDefinition('does-not-exist'), undefined);
+  });
+
+  it('classifies running statuses as busy', () => {
+    assert.ok(isBusyStatus('thinking'));
+    assert.ok(isBusyStatus('executing_tool'));
+    assert.ok(!isBusyStatus('idle'));
+    assert.ok(!isBusyStatus('complete'));
+  });
+
+  it('enforces idle-only availability metadata (VC-KIMI-046)', () => {
+    const compact = findSlashCommandDefinition('compact')!;
+    assert.ok(isSlashCommandAvailable(compact, 'idle'));
+    assert.ok(!isSlashCommandAvailable(compact, 'thinking'));
+
+    const status = findSlashCommandDefinition('status')!;
+    assert.ok(isSlashCommandAvailable(status, 'thinking'));
   });
 });

@@ -32,14 +32,20 @@ describe('PermissionManager', () => {
     assert.strictEqual(await pm.isApproved('run_validation', { command: 'npm test' }, 'execute'), false);
   });
 
-  it('does not auto-approve shell in auto mode', async () => {
+  it('does not auto-approve shell external side effects in auto mode', async () => {
     const pm = new PermissionManager('auto');
-    assert.strictEqual(await pm.isApproved('shell', { command: 'echo hi' }, 'external_side_effect'), false);
+    assert.strictEqual(await pm.isApproved('shell', { command: 'curl https://example.com' }, 'external_side_effect'), false);
   });
 
   it('does not auto-approve mcp tools in auto mode', async () => {
     const pm = new PermissionManager('auto');
     assert.strictEqual(await pm.isApproved('mcp:github:create_issue', { title: 'x' }, 'external_side_effect'), false);
+  });
+
+  it('auto mode auto-approves ordinary shell commands classified as execute (VC-KIMI-057)', async () => {
+    const pm = new PermissionManager('auto');
+    assert.strictEqual(await pm.isApproved('shell', { command: 'npm test' }, 'execute'), true);
+    assert.strictEqual(await pm.isApproved('shell', { command: 'git status' }, 'execute'), true);
   });
 
   it('auto mode still auto-approves ordinary execute tools', async () => {

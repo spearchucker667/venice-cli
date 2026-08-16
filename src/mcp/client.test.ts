@@ -52,6 +52,19 @@ describe('McpStdioClient', () => {
     await client.stop();
   });
 
+  it('rejects unbounded output without newlines and stops the server', async () => {
+    // Writes more than MAX_FRAME_BYTES without ever emitting a newline. The
+    // generous timeout keeps the 8 MiB write from racing the initialize
+    // timeout under parallel test load.
+    const script = `process.stdin.once('data',()=>{process.stdout.write('a'.repeat(8*1024*1024+100));}); setInterval(()=>{},1000);`;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 15000, requestTimeoutMs: 15000, stopGraceMs: 20 }
+    );
+    await assert.rejects(() => client.start(), /frame limit/);
+    await client.stop();
+  });
+
   it('rejects pending requests when a running server exits', async () => {
     const script = jsonRpcScript(`if(request.method==='tools/call'){process.exit(7);}`);
     const client = new McpStdioClient(
@@ -83,6 +96,40 @@ describe('McpStdioClient', () => {
     controller.abort();
     await assert.rejects(() => request, /cancelled/);
     await cancelledClient.stop();
+  });
+
+  it('rejects an unsupported negotiated protocol version', async () => {
+    const script = `
+      process.stdin.once('data',(chunk)=>{
+        const req=JSON.parse(chunk.toString().trim());
+        const result={protocolVersion:'2030-01-01',capabilities:{},serverInfo:{name:'t',version:'1'}};
+        process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:req.id,result})+'\\n');
+      });
+      setInterval(()=>{},1000);
+    `;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 1000, requestTimeoutMs: 1000, stopGraceMs: 20 }
+    );
+    await assert.rejects(() => client.start(), /unsupported protocol version/);
+    await client.stop();
+  });
+
+  it('accepts a server that omits its protocol version', async () => {
+    const script = `
+      process.stdin.once('data',(chunk)=>{
+        const req=JSON.parse(chunk.toString().trim());
+        const result={capabilities:{},serverInfo:{name:'t',version:'1'}};
+        process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:req.id,result})+'\\n');
+      });
+      setInterval(()=>{},1000);
+    `;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 1000, requestTimeoutMs: 1000, stopGraceMs: 20 }
+    );
+    await client.start();
+    await client.stop();
   });
 
   it('does not leave its child running after stop', async () => {

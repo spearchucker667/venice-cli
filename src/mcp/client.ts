@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { McpServerConfig } from './config.js';
 import { buildMcpEnv } from './env.js';
+import { getVersion } from '../lib/version.js';
+import { MCP_PROTOCOL_VERSION, isSupportedProtocolVersion } from './protocol.js';
+import { terminateProcessTree, forceKillProcessTree } from '../lib/process-tree.js';
 
 export interface McpTool {
   name: string;
@@ -23,12 +26,17 @@ export interface McpClientOptions {
 }
 
 export class McpStdioClient {
+  /** Bounds a single newline-delimited frame (VC-KIMI-020). */
+  static readonly MAX_FRAME_BYTES = 8 * 1024 * 1024;
+
   private readonly config: McpServerConfig;
   private process?: ChildProcess;
   private buffer = '';
   private requestId = 0;
   private readonly pending = new Map<string | number, PendingRequest>();
   private initialized = false;
+  private negotiatedProtocolVersion?: string;
+  private serverCapabilities?: unknown;
   private readonly startTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private readonly stopGraceMs: number;
@@ -49,7 +57,13 @@ export class McpStdioClient {
       // parent environment (see src/mcp/env.ts). Only allowlisted variables
       // and explicitly declared config env entries are propagated.
       const env = buildMcpEnv(this.config.env);
-      this.process = spawn(this.config.command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      // Detached on POSIX so stop() can terminate the whole process group
+      // rather than only the direct child (VC-KIMI-042).
+      this.process = spawn(this.config.command, args, {
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      });
 
       const startupTimer = setTimeout(() => {
         this.stop().catch(() => {});
@@ -82,6 +96,20 @@ export class McpStdioClient {
 
       this.process.stdout?.on('data', (chunk: Buffer) => {
         this.buffer += chunk.toString('utf-8');
+        // A server that writes without ever emitting a newline must not grow
+        // memory unboundedly (VC-KIMI-020). Reject pending work, stop the
+        // server, and never persist the raw content.
+        if (
+          !this.buffer.includes('\n') &&
+          Buffer.byteLength(this.buffer, 'utf-8') > McpStdioClient.MAX_FRAME_BYTES
+        ) {
+          this.buffer = '';
+          this.rejectPending(new Error(
+            `MCP server exceeded the ${McpStdioClient.MAX_FRAME_BYTES / (1024 * 1024)} MiB frame limit without emitting a newline`
+          ));
+          this.stop().catch(() => {});
+          return;
+        }
         this.flushLines();
       });
 
@@ -94,11 +122,22 @@ export class McpStdioClient {
       });
 
       this.sendRequest('initialize', {
-        protocolVersion: '2024-11-05',
+        protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: 'venice-cli', version: '2.1.0' },
+        clientInfo: { name: 'venice-cli', version: getVersion() },
       }, undefined, this.startTimeoutMs)
-        .then(async () => {
+        .then(async (result) => {
+          // The server responds with the protocol version it will use; it must
+          // be one we support (VC-KIMI-041).
+          const response = result as
+            | { protocolVersion?: string; capabilities?: unknown; serverInfo?: unknown }
+            | undefined;
+          const negotiated = response?.protocolVersion;
+          if (negotiated && !isSupportedProtocolVersion(negotiated)) {
+            throw new Error(`MCP server selected unsupported protocol version: ${negotiated}`);
+          }
+          this.negotiatedProtocolVersion = negotiated ?? MCP_PROTOCOL_VERSION;
+          this.serverCapabilities = response?.capabilities;
           this.initialized = true;
           clearTimeout(startupTimer);
           await this.sendNotification('initialized', {});
@@ -118,10 +157,10 @@ export class McpStdioClient {
     this.process = undefined;
     if (child && child.exitCode === null) {
       const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-      child.kill('SIGTERM');
+      terminateProcessTree(child);
       await Promise.race([exited, delay(this.stopGraceMs)]);
       if (child.exitCode === null) {
-        child.kill('SIGKILL');
+        forceKillProcessTree(child);
         await Promise.race([exited, delay(this.stopGraceMs)]);
       }
     }
@@ -147,13 +186,28 @@ export class McpStdioClient {
     return this.process?.pid;
   }
 
+  getNegotiatedProtocolVersion(): string | undefined {
+    return this.negotiatedProtocolVersion;
+  }
+
+  getServerCapabilities(): unknown {
+    return this.serverCapabilities;
+  }
+
   private flushLines(): void {
     while (true) {
       const newlineIndex = this.buffer.indexOf('\n');
       if (newlineIndex === -1) break;
-      const line = this.buffer.slice(0, newlineIndex).trim();
+      const rawLine = this.buffer.slice(0, newlineIndex);
       this.buffer = this.buffer.slice(newlineIndex + 1);
+      const line = rawLine.trim();
       if (!line) continue;
+      if (Buffer.byteLength(line, 'utf-8') > McpStdioClient.MAX_FRAME_BYTES) {
+        this.buffer = '';
+        this.rejectPending(new Error('MCP server emitted an oversized frame'));
+        this.stop().catch(() => {});
+        return;
+      }
       try {
         const message = JSON.parse(line) as {
           id?: string | number;
@@ -238,3 +292,5 @@ export class McpStdioClient {
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
+
+

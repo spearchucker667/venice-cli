@@ -21,7 +21,7 @@ export const grepTool: AgentTool<{ pattern: string; paths?: string[] }, Array<{ 
   },
   risk: 'read',
   async execute(input, context) {
-    const workspace = new WorkspaceManager(context.workspaceRoot);
+    const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     let regex: RegExp;
     try {
       regex = new RegExp(input.pattern, 'g');
@@ -30,7 +30,7 @@ export const grepTool: AgentTool<{ pattern: string; paths?: string[] }, Array<{ 
     }
 
     const results: Array<{ file: string; line: number; text: string }> = [];
-    const searchRoots = input.paths?.length ? input.paths : ['.'];
+    const searchRoots = input.paths?.length ? input.paths : workspace.roots;
 
     function searchFile(absolute: string, relative: string): void {
       if (workspace.isBinaryFile(absolute)) return;
@@ -44,28 +44,33 @@ export const grepTool: AgentTool<{ pattern: string; paths?: string[] }, Array<{ 
       }
     }
 
-    function walk(current: string): void {
+    function walk(current: string, baseRoot: string): void {
       for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
         const absolute = path.join(current, entry.name);
-        const relative = toWorkspacePath(path.relative(workspace.workspaceRoot, absolute));
+        const display = baseRoot === workspace.workspaceRoot
+          ? toWorkspacePath(path.relative(baseRoot, absolute))
+          : toWorkspacePath(absolute);
         if (entry.name.startsWith('.') && entry.isDirectory()) continue;
         if (entry.name === 'node_modules' || entry.name === 'dist') continue;
         if (entry.isDirectory()) {
-          walk(absolute);
+          walk(absolute, baseRoot);
         } else {
-          searchFile(absolute, relative);
+          searchFile(absolute, display);
         }
       }
     }
 
     try {
       for (const root of searchRoots) {
-        const { absolute } = workspace.resolve(root);
-        const stat = fs.statSync(absolute);
+        const resolved = workspace.resolve(root);
+        const stat = fs.statSync(resolved.absolute);
         if (stat.isDirectory()) {
-          walk(absolute);
+          walk(resolved.absolute, resolved.root);
         } else {
-          searchFile(absolute, toWorkspacePath(path.relative(workspace.workspaceRoot, absolute)));
+          const display = resolved.root === workspace.workspaceRoot
+            ? resolved.relative
+            : toWorkspacePath(resolved.absolute);
+          searchFile(resolved.absolute, display);
         }
       }
       return success(results, { truncated: results.length > 100 });

@@ -7,6 +7,9 @@ import type { RuntimeModeState } from './mode.js';
 export type AgentEvent =
   | { type: 'session_started'; timestamp: string; eventId: string; sessionId: string; objective: string }
   | { type: 'user_message'; timestamp: string; eventId: string; content: string }
+  | { type: 'message_queued'; timestamp: string; eventId: string; content: string; queueLength: number }
+  | { type: 'message_queued_consumed'; timestamp: string; eventId: string; content: string; remaining: number }
+  | { type: 'message_injected'; timestamp: string; eventId: string; content: string }
   | { type: 'model_request'; timestamp: string; eventId: string; messageCount: number }
   | { type: 'model_profile_updated'; timestamp: string; eventId: string; profile: import('./model-profile.js').ModelProfile }
   | { type: 'assistant_delta'; timestamp: string; eventId: string; content?: string; toolCalls?: unknown[] }
@@ -32,7 +35,8 @@ export type AgentEvent =
   | { type: 'plan_cleared'; timestamp: string; eventId: string }
   | { type: 'plan_exit_requested'; timestamp: string; eventId: string; plan: import('./types.js').PlanArtifact }
   | { type: 'plan_exit_approved'; timestamp: string; eventId: string }
-  | { type: 'plan_exit_denied'; timestamp: string; eventId: string };
+  | { type: 'plan_exit_denied'; timestamp: string; eventId: string }
+  | { type: 'user_question_requested'; timestamp: string; eventId: string; request: import('./types.js').UserQuestionRequest };
 
 export class EventBus {
   private listeners: Array<(event: AgentEvent) => void> = [];

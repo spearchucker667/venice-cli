@@ -17,6 +17,7 @@ import { Transcript } from './transcript.js';
 import { StatusBar } from './status.js';
 import { ApprovalPrompt, type ApprovalDecision } from './approval.js';
 import { PlanApprovalPrompt } from './plan-approval.js';
+import { UserQuestionPrompt } from './user-question.js';
 import { mapEventToMessage } from './events.js';
 import { parseSlashCommand } from './slash-commands.js';
 import { handleSlashCommand } from './slash-handlers.js';
@@ -27,7 +28,7 @@ import { SessionPicker } from './session-picker.js';
 import { SessionManager } from '../agent/sessions.js';
 import type { ModelProfile } from '../agent/model-profile.js';
 import type { RuntimeModeState } from '../agent/mode.js';
-import type { PlanArtifact } from '../agent/types.js';
+import type { PlanArtifact, UserQuestionRequest, UserQuestionResponse } from '../agent/types.js';
 
 export interface AppProps {
   workspaceRoot: string;
@@ -38,6 +39,8 @@ export interface AppProps {
   mcpManager?: McpManager;
   initialObjective?: string;
   resumeSessionId?: string;
+  skillsDirs?: string[];
+  additionalRoots?: string[];
   onExit: () => void;
 }
 
@@ -51,6 +54,11 @@ interface PendingApproval {
 interface PendingPlanApproval {
   plan: PlanArtifact;
   resolve: (approved: boolean) => void;
+}
+
+interface PendingUserQuestion {
+  request: UserQuestionRequest;
+  resolve: (response: UserQuestionResponse | undefined) => void;
 }
 
 type PickerMode = 'normal' | 'model-picker' | 'session-picker';
@@ -87,7 +95,7 @@ function getGitBranch(cwd: string): string | undefined {
   }
 }
 
-export function App({ workspaceRoot, model, approvalMode, mode: initialMode, maxTurns, mcpManager, initialObjective, resumeSessionId, onExit }: AppProps): JSX.Element {
+export function App({ workspaceRoot, model, approvalMode, mode: initialMode, maxTurns, mcpManager, initialObjective, resumeSessionId, skillsDirs, additionalRoots, onExit }: AppProps): JSX.Element {
   const { exit } = useApp();
   const abortControllerRef = useRef<AbortController | null>(null);
   const runtimeRef = useRef<AgentRuntime | null>(null);
@@ -98,6 +106,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
   const [isRunning, setIsRunning] = useState(false);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [pendingPlanApproval, setPendingPlanApproval] = useState<PendingPlanApproval | null>(null);
+  const [pendingUserQuestion, setPendingUserQuestion] = useState<PendingUserQuestion | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
   const [currentModel, setCurrentModel] = useState(model);
   const [currentModelProfile, setCurrentModelProfile] = useState<ModelProfile | undefined>();
@@ -105,6 +114,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
   const [pickerMode, setPickerMode] = useState<PickerMode>('normal');
   const [inputMode, setInputMode] = useState<'agent' | 'shell'>('agent');
   const [operatingMode, setOperatingMode] = useState<'agent' | 'plan'>('agent');
+  const [queuedCount, setQueuedCount] = useState(0);
   const [gitBranch] = useState(() => getGitBranch(workspaceRoot));
 
   useInput((input, key) => {
@@ -164,6 +174,14 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     });
   });
 
+  // Structured ask_user questions collect a real answer from the TUI
+  // (VC-KIMI-058); resolving undefined reports INTERACTION_REQUIRED.
+  permissionsRef.current.setUserQuestionHandler((request) => {
+    return new Promise<UserQuestionResponse | undefined>((resolve) => {
+      setPendingUserQuestion({ request, resolve });
+    });
+  });
+
   useEffect(() => {
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -184,6 +202,8 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       if (event.type === 'approval_requested') setStatus('awaiting_approval');
       if (event.type === 'tool_started') setStatus('executing_tool');
       if (event.type === 'validation_started') setStatus('verifying');
+      if (event.type === 'message_queued') setQueuedCount(event.queueLength);
+      if (event.type === 'message_queued_consumed') setQueuedCount(event.remaining);
       const mapped = mapEventToMessage(event);
       if (mapped) {
         setMessages((prev) => {
@@ -210,11 +230,27 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       mcpManager,
       signal: controller.signal,
       permissionManager: permissionsRef.current,
+      skillsDirs,
+      additionalRoots,
     });
     setInputMode(runtime.getMode().inputMode);
     setOperatingMode(runtime.getMode().operatingMode);
     setCurrentApprovalMode(runtime.getMode().permissionMode);
     runtimeRef.current = runtime;
+
+    // Broken skills must be visible during normal use, not only via
+    // doctor/skills (VC-KIMI-043). Surface a single consolidated warning.
+    const skillErrors = runtime.getSkillErrors();
+    if (skillErrors.length > 0) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: 'skills-warning',
+          role: 'event',
+          content: `⚠ ${skillErrors.length} skill discovery error${skillErrors.length === 1 ? '' : 's'}:\n${skillErrors.map((e) => `  • ${e}`).join('\n')}`,
+        },
+      ]);
+    }
 
     if (resumeSessionId) {
       const stored = new SessionManager().load(resumeSessionId, workspaceRoot);
@@ -281,9 +317,15 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
         }
         return null;
       });
+      setPendingUserQuestion((current) => {
+        if (current) {
+          current.resolve(undefined);
+        }
+        return null;
+      });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceRoot, model, approvalMode, maxTurns, mcpManager]);
+  }, [workspaceRoot, model, approvalMode, maxTurns, mcpManager, skillsDirs, additionalRoots]);
 
   const addEvent = (content: string) => {
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'event', content }]);
@@ -366,54 +408,17 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     ]);
   };
 
-  const handleSubmit = async (text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-
-    const slash = parseSlashCommand(trimmed);
-    if (slash) {
-      await handleSlashCommand(slash.command, slash.args, {
-        exit: () => {
-          runtimeRef.current?.complete().catch(() => {});
-          exit();
-          onExit();
-        },
-        setMessages,
-        status,
-        model: currentModel,
-        approvalMode: currentApprovalMode,
-        setApprovalMode: setCurrentApprovalMode,
-        workspaceRoot,
-        setModel: handleSetModel,
-        showModelPicker: () => setPickerMode('model-picker'),
-        showSessionPicker: () => setPickerMode('session-picker'),
-        resumeSession: handleResumeSession,
-        listSessions: () => new SessionManager().list(workspaceRoot),
-        mcpManager,
-        getRuntime: () => runtimeRef.current ?? undefined,
-      });
-      return;
-    }
-
-    if (inputMode === 'shell') {
-      handleShellPassthrough(trimmed).catch((err) => addEvent(String(err)));
-      return;
-    }
-
-    if (trimmed.startsWith('!')) {
-      const command = trimmed.slice(1).trim();
-      if (command) {
-        handleShellPassthrough(command).catch((err) => addEvent(String(err)));
-      }
-      return;
-    }
+  const submitToModel = async (rawText: string) => {
+    const { text: resolvedText, mentions } = resolveMentions(rawText);
 
     if (isRunning) {
-      addEvent('Wait for the current task to finish, or press Ctrl+C to cancel.');
+      // Queue instead of rejecting (VC-KIMI-053): Enter while busy appends
+      // the next user message, which runs after the current turn completes.
+      setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'user', content: resolvedText }]);
+      runtimeRef.current?.queueUserMessage(resolvedText);
       return;
     }
 
-    const { text: resolvedText, mentions } = resolveMentions(trimmed);
     let attachedContext: string | undefined;
 
     if (mentions.length) {
@@ -436,6 +441,66 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
         setStatus('failed');
         setIsRunning(false);
       });
+  };
+
+  const handleInject = (rawText: string): boolean => {
+    const trimmed = rawText.trim();
+    if (!trimmed || !isRunning) return false;
+    // Inject into the current turn after the next tool boundary (VC-KIMI-053).
+    const { text } = resolveMentions(trimmed);
+    setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'user', content: `↳ ${text}` }]);
+    runtimeRef.current?.injectUserMessage(text);
+    return true;
+  };
+
+  const handleSubmit = async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    const slash = parseSlashCommand(trimmed);
+    if (slash) {
+      const handled = await handleSlashCommand(slash.command, slash.args, {
+        exit: () => {
+          runtimeRef.current?.complete().catch(() => {});
+          exit();
+          onExit();
+        },
+        setMessages,
+        status,
+        model: currentModel,
+        approvalMode: currentApprovalMode,
+        setApprovalMode: setCurrentApprovalMode,
+        workspaceRoot,
+        setModel: handleSetModel,
+        showModelPicker: () => setPickerMode('model-picker'),
+        showSessionPicker: () => setPickerMode('session-picker'),
+        resumeSession: handleResumeSession,
+        listSessions: () => new SessionManager().list(workspaceRoot),
+        mcpManager,
+        getRuntime: () => runtimeRef.current ?? undefined,
+      });
+      if (!handled) {
+        // Unknown /foo is sent to the model verbatim rather than rejected
+        // (VC-KIMI-047).
+        await submitToModel(trimmed);
+      }
+      return;
+    }
+
+    if (inputMode === 'shell') {
+      handleShellPassthrough(trimmed).catch((err) => addEvent(String(err)));
+      return;
+    }
+
+    if (trimmed.startsWith('!')) {
+      const command = trimmed.slice(1).trim();
+      if (command) {
+        handleShellPassthrough(command).catch((err) => addEvent(String(err)));
+      }
+      return;
+    }
+
+    await submitToModel(trimmed);
   };
 
   const handleApprovalDecision = (decision: ApprovalDecision) => {
@@ -494,12 +559,22 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       {pendingPlanApproval && pickerMode === 'normal' && (
         <PlanApprovalPrompt plan={pendingPlanApproval.plan} onDecision={handlePlanApprovalDecision} />
       )}
+      {pendingUserQuestion && pickerMode === 'normal' && (
+        <UserQuestionPrompt
+          request={pendingUserQuestion.request}
+          onSubmit={(response) => {
+            pendingUserQuestion.resolve(response);
+            setPendingUserQuestion(null);
+          }}
+        />
+      )}
       <Composer
         onSubmit={handleSubmit}
+        onInject={handleInject}
         workspaceRoot={workspaceRoot}
         inputMode={inputMode}
         operatingMode={operatingMode}
-        disabled={pendingApproval !== null || pendingPlanApproval !== null || pickerMode !== 'normal'}
+        disabled={pendingApproval !== null || pendingPlanApproval !== null || pendingUserQuestion !== null || pickerMode !== 'normal'}
         maxSuggestions={Math.max(3, Math.min(8, rows - 11))}
         columns={columns}
       />
@@ -514,6 +589,8 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
           inputMode,
           operatingMode,
           workspaceRoot,
+          additionalRoots: runtimeRef.current?.getState().workspace.additionalRoots ?? additionalRoots ?? [],
+          queuedCount,
           approvalMode: currentApprovalMode,
           contextTokens: runtimeRef.current?.getContextManager().estimateTokens() ?? 0,
           maxTokens: runtimeRef.current?.getContextManager().getMaxTokens() ?? 0,
