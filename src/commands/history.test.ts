@@ -11,7 +11,7 @@ const configModuleUrl = new URL('../lib/config.js', import.meta.url).href;
 function runNode(home: string, args: string[]): string {
   const result = spawnSync(process.execPath, args, {
     cwd: process.cwd(),
-    env: { ...process.env, HOME: home, NO_COLOR: '1' },
+    env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, NO_COLOR: '1' },
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);

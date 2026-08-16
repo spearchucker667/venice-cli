@@ -154,7 +154,7 @@ test('parseDocument rejects empty and malformed JSON responses clearly', async (
   }
 });
 
-test('parseDocument sanitizes hostile multipart filenames', async () => {
+test('parseDocument sanitizes hostile multipart filenames', { skip: process.platform === 'win32' }, async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.VENICE_API_KEY;
   const document = createDocument('report"\r\nX-Injected: yes.txt');

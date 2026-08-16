@@ -37,6 +37,9 @@ function runCli(
       env: {
         ...process.env,
         HOME: homeDir,
+        USERPROFILE: homeDir,
+        APPDATA: homeDir,
+        LOCALAPPDATA: homeDir,
         NODE_ENV: 'test',
         NO_COLOR: '1',
         VENICE_API_BASE_URL: apiBaseUrl,
@@ -220,7 +223,7 @@ test('keys create defaults to a bounded inference credential', async () => {
     assert.doesNotMatch(result.stdout, /venice-secret-once/);
     assert.doesNotMatch(result.stderr, /venice-secret-once/);
     assert.equal(readFileSync(secretFile, 'utf8'), 'venice-secret-once\n');
-    assert.equal(statSync(secretFile).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal(statSync(secretFile).mode & 0o777, 0o600);
   });
 
   assert.deepEqual(JSON.parse(requestBody), {
@@ -258,7 +261,7 @@ test('keys create succeeds and warns when its published temporary duplicate rema
 
       assert.equal(result.status, 0, result.stderr);
       assert.equal(readFileSync(secretFile, 'utf8'), 'venice-secret-once\n');
-      assert.equal(statSync(secretFile).mode & 0o777, 0o600);
+      if (process.platform !== 'win32') assert.equal(statSync(secretFile).mode & 0o777, 0o600);
       assert.doesNotMatch(result.stdout, /venice-secret-once/);
       assert.doesNotMatch(result.stderr, /venice-secret-once/);
 
@@ -267,7 +270,7 @@ test('keys create succeeds and warns when its published temporary duplicate rema
       assert.ok(temporary);
       const temporaryPath = join(homeDir, temporary);
       assert.equal(readFileSync(temporaryPath, 'utf8'), 'venice-secret-once\n');
-      assert.equal(statSync(temporaryPath).mode & 0o777, 0o600);
+      if (process.platform !== 'win32') assert.equal(statSync(temporaryPath).mode & 0o777, 0o600);
       assert.ok(result.stderr.includes(realpathSync(temporaryPath)));
       assert.match(result.stderr, /0600 temporary duplicate remains/);
       assert.match(result.stderr, /Remove this temporary file/);
@@ -455,7 +458,7 @@ test('keys create canonicalizes a symlinked output directory', async () => {
     assert.equal(result.status, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).secretFile, realpathSync(canonicalFile));
     assert.equal(readFileSync(canonicalFile, 'utf8'), 'venice-secret-once\n');
-    assert.equal(statSync(canonicalFile).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal(statSync(canonicalFile).mode & 0o777, 0o600);
   });
 });
 

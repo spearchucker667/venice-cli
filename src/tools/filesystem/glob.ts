@@ -6,7 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTool } from '../types.js';
 import { success } from '../result.js';
-import { WorkspaceManager } from '../../agent/workspace.js';
+import { WorkspaceManager, toWorkspacePath } from '../../agent/workspace.js';
 
 function globSync(root: string, pattern: string): string[] {
   const parts = pattern.split('/').filter(Boolean);
@@ -14,7 +14,7 @@ function globSync(root: string, pattern: string): string[] {
 
   function walk(current: string, index: number): void {
     if (index >= parts.length) {
-      results.push(path.relative(root, current));
+      results.push(toWorkspacePath(path.relative(root, current)));
       return;
     }
     const part = parts[index];
@@ -31,7 +31,7 @@ function globSync(root: string, pattern: string): string[] {
         if (regex.test(entry.name)) {
           const next = path.join(current, entry.name);
           if (index === parts.length - 1) {
-            results.push(path.relative(root, next));
+            results.push(toWorkspacePath(path.relative(root, next)));
           } else if (entry.isDirectory()) {
             walk(next, index + 1);
           }

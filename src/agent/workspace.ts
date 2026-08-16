@@ -14,6 +14,10 @@ export function isPathInside(root: string, candidate: string): boolean {
   );
 }
 
+export function toWorkspacePath(value: string): string {
+  return value.split(path.sep).join('/');
+}
+
 export class WorkspaceManager {
   private readonly root: string;
   private readonly changed = new Set<string>();
@@ -57,7 +61,7 @@ export class WorkspaceManager {
       }
     }
 
-    const relative = path.relative(this.root, absolute);
+    const relative = toWorkspacePath(path.relative(this.root, absolute));
 
     if (!isPathInside(this.root, absolute)) {
       throw new Error(`Path outside workspace: ${inputPath}`);
@@ -78,7 +82,7 @@ export class WorkspaceManager {
   }
 
   markChanged(relativePath: string): void {
-    this.changed.add(path.normalize(relativePath));
+    this.changed.add(toWorkspacePath(path.normalize(relativePath)));
   }
 
   replaceChangedFiles(relativePaths: string[]): void {

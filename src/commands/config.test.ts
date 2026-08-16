@@ -23,6 +23,9 @@ function runCli(args: string[], homeDir: string, input?: string) {
     env: {
       ...process.env,
       HOME: homeDir,
+      USERPROFILE: homeDir,
+      APPDATA: homeDir,
+      LOCALAPPDATA: homeDir,
       NO_COLOR: '1',
     },
   });

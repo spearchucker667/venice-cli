@@ -6,7 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTool } from '../types.js';
 import { success, failure } from '../result.js';
-import { WorkspaceManager } from '../../agent/workspace.js';
+import { WorkspaceManager, toWorkspacePath } from '../../agent/workspace.js';
 
 export const findTool: AgentTool<{ pattern?: string; path?: string }, string[]> = {
   name: 'find',
@@ -27,7 +27,7 @@ export const findTool: AgentTool<{ pattern?: string; path?: string }, string[]> 
     function walk(current: string): void {
       for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
         const absolute = path.join(current, entry.name);
-        const relative = path.relative(workspace.workspaceRoot, absolute);
+        const relative = toWorkspacePath(path.relative(workspace.workspaceRoot, absolute));
         if (entry.name.startsWith('.') && entry.isDirectory()) continue;
         if (entry.name === 'node_modules' || entry.name === 'dist') continue;
         if (entry.isDirectory()) {
