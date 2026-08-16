@@ -223,7 +223,10 @@ export function buildStructuredSummary(state: AgentState): StructuredSummary {
   return {
     objective: state.objective,
     completedWork: state.todos.filter((t) => t.status === 'completed').map((t) => t.content),
-    remainingWork: state.todos.filter((t) => t.status !== 'completed').map((t) => t.content),
+    remainingWork: [
+      ...state.todos.filter((t) => t.status !== 'completed').map((t) => t.content),
+      ...(state.plan ? state.plan.steps.map((step) => `Plan step: ${step.text}`) : []),
+    ],
     decisions: [],
     discoveries: state.relevantFiles.map((f) => `Relevant file: ${f}`),
     filesRead: state.toolHistory.filter((t) => t.toolName === 'read_file').map((t) => String((t.input as { path?: string })?.path || '')),

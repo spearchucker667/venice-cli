@@ -83,6 +83,9 @@ export class AgentRenderer {
       case 'session_completed':
         out(c.bold(`● ${event.status}`));
         break;
+      case 'session_persist_failed':
+        out(c.red(`⚠ Session save failed: ${event.message}`));
+        break;
     }
   }
 }

@@ -50,6 +50,30 @@ describe('stream-json protocol', () => {
     assert.strictEqual(toStreamJson(completed)?.type, 'tool.completed');
   });
 
+  it('maps plan lifecycle events', () => {
+    const plan = {
+      summary: 'Refactor auth',
+      steps: [{ id: '1', text: 'Centralize headers' }],
+      filePath: '/ws/PLAN.md',
+      updatedAt: '2026-08-16T00:00:00Z',
+    };
+    const updated: AgentEvent = {
+      type: 'plan_updated',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: '9',
+      plan,
+    };
+    const requested: AgentEvent = {
+      type: 'plan_exit_requested',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: '10',
+      plan,
+    };
+    assert.strictEqual(toStreamJson(updated)?.type, 'plan.updated');
+    assert.strictEqual(toStreamJson(requested)?.type, 'plan.exit.requested');
+    assert.strictEqual((toStreamJson(updated) as { plan?: unknown }).plan, plan);
+  });
+
   it('returns undefined for unmapped event types', () => {
     const event: AgentEvent = {
       type: 'model_request',

@@ -4,7 +4,13 @@
  * Handles all API communication with retry logic and error handling.
  */
 
-import { requireApiKey, trackUsage, getApiKey, getSignInWithX } from './config.js';
+import {
+  trackUsage,
+  getVeniceAuth,
+  requireAuth,
+  applyVeniceAuth,
+  DEFAULT_MODELS,
+} from './config.js';
 import { startSpinner, stopSpinner } from './output.js';
 import { getVersion } from './version.js';
 import { Readable } from 'stream';
@@ -43,6 +49,7 @@ const VENICE_API =
     : 'https://api.venice.ai/api/v1';
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
+const MAX_RETRY_AFTER_SECONDS = 300;
 const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes default timeout
 const DOCUMENT_PARSE_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_DOCUMENT_PARSE_RESPONSE_BYTES = 50 * 1024 * 1024;
@@ -64,12 +71,7 @@ export class VeniceApiError extends Error {
 
   static fromResponse(response: Response, body: string): VeniceApiError {
     const status = response.status;
-    let retryAfter: number | undefined;
-    const retryAfterHeader = response.headers.get('retry-after');
-    if (retryAfterHeader) {
-      const parsed = parseInt(retryAfterHeader, 10);
-      if (!isNaN(parsed)) retryAfter = parsed;
-    }
+    const retryAfter = parseRetryAfterHeader(response.headers.get('retry-after'));
     
     try {
       const json = JSON.parse(body);
@@ -96,7 +98,11 @@ export class VeniceApiError extends Error {
   }
 }
 
-function getHeaders(
+/**
+ * Shared auth header builder. Every direct API path must route through this so
+ * api-key and x402 authentication behave identically (VC-KIMI-016).
+ */
+export function getHeaders(
   authenticated = true,
   contentType = 'application/json'
 ): Record<string, string> {
@@ -107,20 +113,37 @@ function getHeaders(
     headers['Content-Type'] = contentType;
   }
   if (authenticated) {
-    // Priority: 1. API Key, 2. x402 Wallet Auth
-    const apiKey = getApiKey();
-    const x402 = getSignInWithX();
-    
-    if (apiKey) {
-      headers.Authorization = `Bearer ${apiKey}`;
-    } else if (x402) {
-      headers['SIGN-IN-WITH-X'] = x402;
-    } else {
+    const auth = getVeniceAuth();
+    if (!auth) {
       // Trigger the throw for missing auth
-      requireApiKey();
+      requireAuth();
+    } else {
+      applyVeniceAuth(headers, auth);
     }
   }
   return headers;
+}
+
+function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (trimmed === '') return undefined;
+
+  // delta-seconds (integer or decimal)
+  if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+    const seconds = parseFloat(trimmed);
+    if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+    return Math.min(Math.ceil(seconds), MAX_RETRY_AFTER_SECONDS);
+  }
+
+  // HTTP-date form
+  const date = Date.parse(trimmed);
+  if (!Number.isNaN(date)) {
+    const deltaSeconds = Math.ceil((date - Date.now()) / 1000);
+    return Math.max(0, Math.min(deltaSeconds, MAX_RETRY_AFTER_SECONDS));
+  }
+
+  return undefined;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -334,7 +357,8 @@ export async function apiRequest<T>(
         const jitter = Math.random() * 200; // up to 200ms jitter
         const backoff = (RETRY_DELAY_MS * Math.pow(2, attempt)) + jitter;
 
-        if (error.isRateLimited()) {
+        // VC-KIMI-032: the final attempt must not sleep before failing.
+        if (error.isRateLimited() && attempt < retries) {
           const waitTime = error.retryAfter ? (error.retryAfter * 1000) + jitter : backoff;
           if (spinner) spinner.text = `Rate limited, waiting... (attempt ${attempt + 1}/${retries + 1})`;
           await sleep(waitTime);
@@ -409,7 +433,7 @@ export function buildChatCompletionBody(
   stream: boolean
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
-    model: options.model || 'kimi-k2-5',
+    model: options.model || DEFAULT_MODELS.chat,
     messages,
     stream,
   };
@@ -478,7 +502,7 @@ export async function chatCompletion(
   if (usage) {
     trackUsage({
       command: 'chat',
-      model: options.model || 'kimi-k2-5',
+      model: options.model || DEFAULT_MODELS.chat,
       ...usage,
     });
   }
@@ -547,7 +571,7 @@ export async function* chatCompletionStream(
             if (totalUsage) {
               trackUsage({
                 command: 'chat',
-                model: options.model || 'kimi-k2-5',
+                model: options.model || DEFAULT_MODELS.chat,
                 ...totalUsage,
               });
             }
@@ -585,10 +609,11 @@ export async function* chatCompletionStream(
               yield { finish_reason: choice.finish_reason, done: false, completionId };
             }
           } catch {
-            if (data.includes('"error"')) {
-              throw new Error(`API Error in stream: ${data}`);
-            }
-            // Skip other malformed JSON
+            // VC-KIMI-031: never silently drop malformed SSE frames. Surface a
+            // bounded snippet so tool calls, text, usage, or finish reasons are
+            // not lost without notice.
+            const snippet = data.length > 200 ? `${data.slice(0, 200)}…` : data;
+            throw new Error(`Malformed SSE frame from API: ${snippet}`);
           }
         }
       }
@@ -606,7 +631,7 @@ export function buildImageGenerationBody(
   options: Omit<ImageGenerationOptions, 'output'> = {}
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
-    model: options.model || 'flux-2-pro',
+    model: options.model || DEFAULT_MODELS.image,
     prompt,
     format: options.format || 'png',
   };
@@ -659,7 +684,7 @@ export async function generateImage(
 
   trackUsage({
     command: 'image',
-    model: options.model || 'flux-2-pro',
+    model: options.model || DEFAULT_MODELS.image,
   });
 
   return response.images;
@@ -896,7 +921,7 @@ export async function upscaleImage(
 
     trackUsage({
       command: 'upscale',
-      model: options.model || 'upscaler',
+      model: options.model || DEFAULT_MODELS.imageUpscale,
     });
 
     return {
@@ -927,9 +952,9 @@ export async function textToSpeech(
   } = {}
 ): Promise<{ audio: ArrayBuffer; contentType?: string }> {
   const body: Record<string, unknown> = {
-    model: options.model || 'tts-kokoro',
+    model: options.model || DEFAULT_MODELS.tts,
     input: text,
-    voice: options.voice || 'af_sky',
+    voice: options.voice || DEFAULT_MODELS.voice,
   };
   if (options.format !== undefined) {
     body.response_format = options.format;
@@ -986,7 +1011,7 @@ export async function textToSpeech(
 
     trackUsage({
       command: 'tts',
-      model: options.model || 'tts-kokoro',
+      model: options.model || DEFAULT_MODELS.tts,
     });
 
     return {
@@ -1031,7 +1056,7 @@ export async function cloneVoice(
   );
   const audioData = await fs.promises.readFile(audioPath);
   const form = new FormData();
-  form.append('model', options.model || 'tts-chatterbox-hd');
+  form.append('model', options.model || DEFAULT_MODELS.voiceClone);
   form.append(
     'file',
     new Blob([new Uint8Array(audioData)], { type: mimeTypeFromPath(audioPath) }),
@@ -1105,7 +1130,7 @@ export async function transcribe(
   const escapeField = (value: string): string => value.replace(/"/g, '\\"');
 
   const formFields: Array<[string, string]> = [
-    ['model', options.model || 'nvidia/parakeet-tdt-0.6b-v3'],
+    ['model', options.model || DEFAULT_MODELS.transcription],
     ['response_format', 'json'],
   ];
   if (options.language) {
@@ -1149,8 +1174,7 @@ export async function transcribe(
     const requestInit: RequestInit & { duplex: 'half' } = {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${requireApiKey()}`,
-        'User-Agent': `venice-cli/${getVersion()}`,
+        ...getHeaders(true, ''),
         'Content-Type': `multipart/form-data; boundary=${boundary}`,
         'Content-Length': String(contentLength),
       },
@@ -1183,7 +1207,7 @@ export async function transcribe(
 
     trackUsage({
       command: 'transcribe',
-      model: options.model || 'nvidia/parakeet-tdt-0.6b-v3',
+      model: options.model || DEFAULT_MODELS.transcription,
     });
 
     return response;
@@ -1198,6 +1222,10 @@ export async function transcribe(
 }
 
 // Embeddings
+export type EmbeddingResult =
+  | { index: number; encoding: 'float'; embedding: number[] }
+  | { index: number; encoding: 'base64'; embedding: string };
+
 export async function generateEmbeddings(
   input: string | string[],
   options: {
@@ -1205,18 +1233,19 @@ export async function generateEmbeddings(
     dimensions?: number;
     encoding_format?: 'float' | 'base64';
   } = {}
-): Promise<{ embedding: number[]; index: number }[]> {
-  const model = options.model || 'text-embedding-3-small'; // fallback to standard
+): Promise<EmbeddingResult[]> {
+  const model = options.model || DEFAULT_MODELS.embedding;
+  const encodingFormat = options.encoding_format ?? 'float';
   const body: Record<string, unknown> = {
     model,
     input: Array.isArray(input) ? input : [input],
   };
 
   if (options.dimensions) body.dimensions = options.dimensions;
-  if (options.encoding_format) body.encoding_format = options.encoding_format;
+  body.encoding_format = encodingFormat;
 
   const response = await apiRequest<{
-    data: Array<{ embedding: number[]; index: number }>;
+    data: Array<{ embedding: number[] | string; index: number }>;
   }>('/embeddings', {
     method: 'POST',
     body,
@@ -1228,7 +1257,19 @@ export async function generateEmbeddings(
     model,
   });
 
-  return response.data;
+  return response.data.map((item) =>
+    encodingFormat === 'base64'
+      ? {
+          index: item.index,
+          encoding: 'base64' as const,
+          embedding: String(item.embedding),
+        }
+      : {
+          index: item.index,
+          encoding: 'float' as const,
+          embedding: item.embedding as number[],
+        }
+  );
 }
 
 const MODELS_CACHE_TTL_MS = 60_000;
@@ -1656,7 +1697,7 @@ export async function queueVideoGeneration(
   } = {}
 ): Promise<{ queue_id: string; model: string }> {
   const body: Record<string, unknown> = {
-    model: options.model || 'wan-2.6-text-to-video',
+    model: options.model || DEFAULT_MODELS.textToVideo,
     prompt,
     duration: options.duration || '5s',
   };
@@ -1678,7 +1719,7 @@ export async function queueVideoGeneration(
 
   trackUsage({
     command: 'video',
-    model: options.model || 'wan-2.6-text-to-video',
+    model: options.model || DEFAULT_MODELS.textToVideo,
   });
 
   return response;
@@ -1691,7 +1732,7 @@ export async function queueVideoUpscale(
     upscaleFactor?: number;
   } = {}
 ): Promise<{ queue_id: string; model: string }> {
-  const model = options.model || 'topaz-video-upscale';
+  const model = options.model || DEFAULT_MODELS.videoUpscale;
   const response = await apiRequest<{ queue_id: string; model: string }>('/video/queue', {
     method: 'POST',
     body: {
@@ -2060,8 +2101,7 @@ export async function parseDocument(filePath: string): Promise<DocumentParseResp
     const requestInit: RequestInit & { duplex: 'half' } = {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${requireApiKey()}`,
-        'User-Agent': `venice-cli/${getVersion()}`,
+        ...getHeaders(true, ''),
         'Content-Type': `multipart/form-data; boundary=${boundary}`,
         'Content-Length': String(contentLength),
       },

@@ -1,38 +1,29 @@
 /**
- * Import a previously exported session.
+ * Import a previously exported session (round-trips with `venice export --format json`).
  */
 
 import { Command } from 'commander';
-import * as fs from 'node:fs';
-import { SessionManager } from '../agent/sessions.js';
+import { SessionImportService } from '../agent/session-import.js';
 import { formatError } from '../lib/output.js';
-import type { StoredSession } from '../agent/sessions.js';
 
 export function registerImportCommand(program: Command): void {
   program
     .command('import <file>')
-    .description('Import a previously exported session')
-    .action(async (file: string) => {
-      if (!fs.existsSync(file)) {
-        console.error(formatError(`File not found: ${file}`));
-        process.exit(2);
-      }
-
-      let stored: StoredSession;
+    .description('Import a previously exported session (JSON)')
+    .option('--force', 'Overwrite an existing session with the same id')
+    .option('--fork', 'Import under a new session id instead of the stored one')
+    .action((file: string, options) => {
       try {
-        stored = JSON.parse(fs.readFileSync(file, 'utf-8')) as StoredSession;
+        const result = new SessionImportService().importFile(file, {
+          force: Boolean(options.force),
+          fork: Boolean(options.fork),
+        });
+        console.log(
+          `Imported session ${result.sessionId}${result.importedAs === 'forked' ? ' (forked)' : ''}`
+        );
       } catch (error) {
-        console.error(formatError(`Failed to parse session file: ${error instanceof Error ? error.message : String(error)}`));
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(2);
       }
-
-      if (!stored.state || typeof stored.state !== 'object' || !stored.state.sessionId) {
-        console.error(formatError('Invalid session export file'));
-        process.exit(2);
-      }
-
-      const manager = new SessionManager();
-      manager.save(stored.state, stored.events || []);
-      console.log(`Imported session ${stored.state.sessionId}`);
     });
 }

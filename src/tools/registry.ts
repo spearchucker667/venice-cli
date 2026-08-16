@@ -28,6 +28,7 @@ import { checkpointRedoTool } from './agent-meta/checkpoint-redo.js';
 import { skillListTool } from './agent-meta/skill-list.js';
 import { skillLoadTool } from './agent-meta/skill-load.js';
 import { spawnAgentTool } from './agent-meta/spawn-agent.js';
+import { enterPlanModeTool, writePlanTool, exitPlanModeTool } from './agent-meta/plan.js';
 import { runValidationTool } from './validation/run.js';
 import { webSearchTool, webScrapeTool } from './venice/search.js';
 import { editImageTool, generateImageTool, removeBackgroundTool, upscaleImageTool } from './venice/image.js';
@@ -53,8 +54,12 @@ export class ToolRegistry {
   }
 
   definitions(operatingMode?: 'agent' | 'plan'): ToolDefinition[] {
+    // Plan mode uses explicit positive authorization: only tools marked
+    // `planSafe: true` are exposed. An omitted flag is NOT treated as safe
+    // (VC-KIMI-069), so a mutating tool that forgets its annotation cannot
+    // leak into plan mode.
     const tools = operatingMode === 'plan'
-      ? Array.from(this.tools.values()).filter((tool) => tool.planSafe !== false)
+      ? Array.from(this.tools.values()).filter((tool) => tool.planSafe === true)
       : Array.from(this.tools.values());
     return tools.map(toToolDefinition);
   }
@@ -70,31 +75,40 @@ export class ToolRegistry {
 
 export function createDefaultRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
-  registry.register(readFileTool);
-  registry.register(readManyFilesTool);
+  // Read-only tools are explicitly plan-safe; every mutating or external
+  // tool is explicitly excluded from plan mode.
+  registry.register({ ...readFileTool, planSafe: true });
+  registry.register({ ...readManyFilesTool, planSafe: true });
   registry.register({ ...writeFileTool, planSafe: false });
   registry.register({ ...editFileTool, planSafe: false });
   registry.register({ ...applyPatchTool, planSafe: false });
-  registry.register(listDirectoryTool);
-  registry.register(globTool);
-  registry.register(grepTool);
-  registry.register(findTool);
+  registry.register({ ...listDirectoryTool, planSafe: true });
+  registry.register({ ...globTool, planSafe: true });
+  registry.register({ ...grepTool, planSafe: true });
+  registry.register({ ...findTool, planSafe: true });
   registry.register({ ...shellTool, planSafe: false });
-  registry.register(gitStatusTool);
-  registry.register(gitDiffTool);
-  registry.register(gitLogTool);
-  registry.register(todoReadTool);
+  registry.register({ ...gitStatusTool, planSafe: true });
+  registry.register({ ...gitDiffTool, planSafe: true });
+  registry.register({ ...gitLogTool, planSafe: true });
+  registry.register({ ...todoReadTool, planSafe: true });
   registry.register({ ...todoWriteTool, planSafe: false });
-  registry.register(askUserTool);
-  registry.register(checkpointListTool);
-  registry.register(checkpointUndoTool);
-  registry.register(checkpointRedoTool);
-  registry.register(skillListTool);
-  registry.register(skillLoadTool);
+  registry.register({ ...askUserTool, planSafe: true });
+  registry.register({ ...checkpointListTool, planSafe: true });
+  // Checkpoint undo/redo restore files and must not be usable as a loophole
+  // around plan-mode restrictions (VC-KIMI-006).
+  registry.register({ ...checkpointUndoTool, planSafe: false });
+  registry.register({ ...checkpointRedoTool, planSafe: false });
+  registry.register({ ...skillListTool, planSafe: true });
+  registry.register({ ...skillLoadTool, planSafe: true });
   registry.register({ ...spawnAgentTool, planSafe: false });
+  // Plan-mode lifecycle tools: only the plan artifact may be written in plan
+  // mode, and exiting with a plan requires explicit approval (work order §9).
+  registry.register({ ...enterPlanModeTool, planSafe: true });
+  registry.register({ ...writePlanTool, planSafe: true });
+  registry.register({ ...exitPlanModeTool, planSafe: true });
   registry.register({ ...runValidationTool, planSafe: false });
-  registry.register(webSearchTool);
-  registry.register(webScrapeTool);
+  registry.register({ ...webSearchTool, planSafe: true });
+  registry.register({ ...webScrapeTool, planSafe: true });
   registry.register({ ...generateImageTool, planSafe: false });
   registry.register({ ...editImageTool, planSafe: false });
   registry.register({ ...upscaleImageTool, planSafe: false });

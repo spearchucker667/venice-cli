@@ -26,7 +26,13 @@ export type AgentEvent =
   | { type: 'mode_changed'; timestamp: string; eventId: string; mode: RuntimeModeState }
   | { type: 'title_changed'; timestamp: string; eventId: string; title: string }
   | { type: 'session_forked'; timestamp: string; eventId: string; parentSessionId: string; newSessionId: string }
-  | { type: 'session_completed'; timestamp: string; eventId: string; status: string };
+  | { type: 'session_completed'; timestamp: string; eventId: string; status: string }
+  | { type: 'session_persist_failed'; timestamp: string; eventId: string; message: string }
+  | { type: 'plan_updated'; timestamp: string; eventId: string; plan: import('./types.js').PlanArtifact }
+  | { type: 'plan_cleared'; timestamp: string; eventId: string }
+  | { type: 'plan_exit_requested'; timestamp: string; eventId: string; plan: import('./types.js').PlanArtifact }
+  | { type: 'plan_exit_approved'; timestamp: string; eventId: string }
+  | { type: 'plan_exit_denied'; timestamp: string; eventId: string };
 
 export class EventBus {
   private listeners: Array<(event: AgentEvent) => void> = [];

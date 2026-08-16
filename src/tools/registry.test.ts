@@ -54,14 +54,22 @@ describe('ToolRegistry', () => {
     }
   });
 
-  it('plan mode excludes write, shell, and media tools', () => {
+  it('plan mode excludes write, shell, media, and checkpoint undo/redo tools', () => {
     const registry = createDefaultRegistry();
     const planDefs = registry.definitions('plan').map((d) => d.function.name);
-    for (const name of ['write_file', 'edit_file', 'apply_patch', 'shell', 'spawn_agent', 'run_validation', 'todo_write', 'generate_image', 'generate_video', 'generate_music']) {
+    for (const name of ['write_file', 'edit_file', 'apply_patch', 'shell', 'spawn_agent', 'run_validation', 'todo_write', 'generate_image', 'generate_video', 'generate_music', 'checkpoint_undo', 'checkpoint_redo']) {
       assert.ok(!planDefs.includes(name), `plan mode should exclude ${name}`);
     }
     assert.ok(planDefs.includes('read_file'));
     assert.ok(planDefs.includes('glob'));
     assert.ok(planDefs.includes('git_status'));
+    assert.ok(planDefs.includes('checkpoint_list'));
+  });
+
+  it('omitted planSafe is treated as unsafe in plan mode (VC-KIMI-069)', () => {
+    const registry = new ToolRegistry();
+    registry.register({ ...echoTool }); // no planSafe annotation
+    assert.ok(registry.definitions().some((d) => d.function.name === 'echo'));
+    assert.ok(!registry.definitions('plan').some((d) => d.function.name === 'echo'));
   });
 });

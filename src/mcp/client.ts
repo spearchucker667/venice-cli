@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { McpServerConfig } from './config.js';
+import { buildMcpEnv } from './env.js';
 
 export interface McpTool {
   name: string;
@@ -44,7 +45,10 @@ export class McpStdioClient {
     if (this.process) throw new Error('MCP client already started');
     return new Promise((resolve, reject) => {
       const args = this.config.args || [];
-      const env = { ...process.env, ...this.config.env };
+      // MCP servers are third-party executables: do not hand them the full
+      // parent environment (see src/mcp/env.ts). Only allowlisted variables
+      // and explicitly declared config env entries are propagated.
+      const env = buildMcpEnv(this.config.env);
       this.process = spawn(this.config.command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
 
       const startupTimer = setTimeout(() => {

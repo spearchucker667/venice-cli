@@ -3,14 +3,16 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { AgentState, AgentMessage, SubagentResult, ToolResult } from './types.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { AgentState, AgentMessage, PlanArtifact, SubagentResult, ToolResult } from './types.js';
 import type { AgentEvent } from './events.js';
 import { EventBus } from './events.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { createDefaultRegistry } from '../tools/registry.js';
 import type { ToolContext } from '../tools/types.js';
 import { PermissionManager } from './permissions.js';
-import type { ApprovalCallback } from './permissions.js';
+import type { ApprovalCallback, ApprovalMode, PlanApprovalCallback } from './permissions.js';
 import { ContextManager, buildStructuredSummary } from './context.js';
 import { SessionManager } from './sessions.js';
 import { VeniceModelClient } from './model-client.js';
@@ -29,6 +31,11 @@ import { detectValidationCommands } from './validation.js';
 import { runValidationTool } from '../tools/validation/run.js';
 import { SecretRedactor, collectKnownSecrets } from '../lib/redactor.js';
 import type { ModelProfile } from './model-profile.js';
+
+export interface ResumeOverrides {
+  objective?: string;
+  mode?: Partial<RuntimeModeState>;
+}
 
 export interface AgentRuntimeOptions {
   workspaceRoot: string;
@@ -75,6 +82,7 @@ export class AgentRuntime {
   private readonly redactor = new SecretRedactor(collectKnownSecrets());
   private sessionCompletedEmitted = false;
   private started = false;
+  private persistDirty = false;
 
   constructor(options: AgentRuntimeOptions) {
     this.state = {
@@ -98,6 +106,9 @@ export class AgentRuntime {
     this.modelClient = options.modelClient || new VeniceModelClient({ model: this.state.model });
     this.registry = options.toolRegistry || createDefaultRegistry();
     this.permissions = options.permissionManager || new PermissionManager(options.approvalMode || 'suggest');
+    // The persisted mode is the single authority; keep the permission
+    // manager in lockstep from the start (VC-KIMI-004).
+    this.permissions.setMode(this.state.mode.permissionMode);
     this.context = options.contextManager || new ContextManager();
     this.sessions = options.sessionManager || new SessionManager();
     this.events = options.eventBus || new EventBus();
@@ -130,12 +141,36 @@ export class AgentRuntime {
     return this.permissions;
   }
 
+  /** True when the most recent persistence attempt failed (VC-KIMI-022). */
+  isPersistDirty(): boolean {
+    return this.persistDirty;
+  }
+
   getMode(): Readonly<RuntimeModeState> {
     return this.state.mode;
   }
 
+  /**
+   * Single write path for mode changes. Any `permissionMode` patch is also
+   * applied to the live PermissionManager so the two can never diverge
+   * (VC-KIMI-004/024).
+   */
   setMode(patch: Partial<RuntimeModeState>): void {
+    if (patch.permissionMode !== undefined && patch.permissionMode !== this.permissions.getMode()) {
+      this.permissions.setMode(patch.permissionMode);
+    }
     this.state.mode = { ...this.state.mode, ...patch };
+    this.emitModeChanged();
+  }
+
+  /** Change the approval mode through the single runtime-owned write path. */
+  setPermissionMode(mode: ApprovalMode): void {
+    this.permissions.setMode(mode);
+    this.state.mode = { ...this.state.mode, permissionMode: mode };
+    this.emitModeChanged();
+  }
+
+  private emitModeChanged(): void {
     this.emit({
       type: 'mode_changed',
       timestamp: new Date().toISOString(),
@@ -154,7 +189,12 @@ export class AgentRuntime {
     });
   }
 
-  forkSession(): AgentState {
+  /**
+   * Create a durable fork of the current session. The fork is persisted
+   * before it is returned so that an immediate resume cannot fail
+   * (VC-KIMI-010).
+   */
+  async forkSession(): Promise<string> {
     const forked: AgentState = {
       ...this.state,
       sessionId: randomUUID(),
@@ -165,6 +205,13 @@ export class AgentRuntime {
       toolHistory: [...this.state.toolHistory],
       subagentReports: this.state.subagentReports ? [...this.state.subagentReports] : undefined,
     };
+    try {
+      this.sessions.save(forked, this.events.events);
+    } catch (error) {
+      throw new Error(
+        `Failed to persist forked session: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
     this.emit({
       type: 'session_forked',
       timestamp: new Date().toISOString(),
@@ -172,7 +219,7 @@ export class AgentRuntime {
       parentSessionId: this.state.sessionId,
       newSessionId: forked.sessionId,
     });
-    return forked;
+    return forked.sessionId;
   }
 
   async reviewChanges(): Promise<SubagentResult> {
@@ -198,6 +245,11 @@ export class AgentRuntime {
 
   setApprovalCallback(callback: ApprovalCallback): void {
     this.permissions.setApprover(callback);
+  }
+
+  /** Install the plan-exit approval handler (separate from tool approval). */
+  setPlanApprover(callback: PlanApprovalCallback): void {
+    this.permissions.setPlanApprover(callback);
   }
 
   setModel(model: string): void {
@@ -232,20 +284,62 @@ export class AgentRuntime {
     this.signal = signal;
   }
 
+  /**
+   * Fully reset every session-owned field (VC-KIMI-026). A new session has a
+   * fresh id, no title/parent/objective/plan, no history, and no active
+   * skills. The user's permission preference and model are retained; the
+   * operating/input modes return to their defaults.
+   */
   resetSession(): void {
+    const permissionMode = this.state.mode.permissionMode;
     this.state.sessionId = randomUUID();
     this.state.status = 'idle';
+    this.state.title = undefined;
+    this.state.parentSessionId = undefined;
+    this.state.objective = '';
     this.state.messages = [];
     this.state.todos = [];
+    this.state.plan = undefined;
     this.state.relevantFiles = [];
     this.state.changedFiles = [];
     this.state.toolHistory = [];
     this.state.subagentReports = [];
     this.state.lastValidation = undefined;
+    this.state.checkpointIndex = undefined;
+    this.state.checkpointCount = undefined;
+    this.state.canUndoCheckpoints = undefined;
+    this.state.canRedoCheckpoints = undefined;
+    this.state.activeSkills = [];
+    this.state.mode = { inputMode: 'agent', operatingMode: 'agent', permissionMode };
     this.context.resetConversation();
+    this.context.setWorkingMemory(this.state);
     this.workspace.replaceChangedFiles([]);
     this.checkpoints = new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
     this.sessionCompletedEmitted = false;
+    this.emitModeChanged();
+  }
+
+  /** Clear the plan artifact (used by /plan clear). */
+  clearPlan(): void {
+    if (this.state.plan?.filePath) {
+      try {
+        fs.rmSync(this.state.plan.filePath, { force: true });
+      } catch {
+        // Best effort: the plan state is cleared regardless.
+      }
+    } else {
+      try {
+        fs.rmSync(path.join(this.state.workspaceRoot, 'PLAN.md'), { force: true });
+      } catch {
+        // Best effort.
+      }
+    }
+    this.state.plan = undefined;
+    this.emit({
+      type: 'plan_cleared',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+    });
   }
 
   forceCompact(): void {
@@ -259,16 +353,32 @@ export class AgentRuntime {
     });
   }
 
-  loadState(state: AgentState): void {
+  /**
+   * Load a stored session. `overrides` are applied AFTER the stored state so
+   * explicit startup flags (e.g. a CLI approval mode) win over the persisted
+   * session (VC-KIMI-004).
+   */
+  loadState(state: AgentState, overrides?: ResumeOverrides): void {
     const resumedWorkspace = new WorkspaceManager(state.workspaceRoot);
     if (resumedWorkspace.workspaceRoot !== this.workspace.workspaceRoot) {
       throw new Error('Cannot resume a session from a different workspace');
     }
     Object.assign(this.state, state);
+    if (overrides?.objective !== undefined) {
+      this.state.objective = overrides.objective;
+    }
+    if (overrides?.mode) {
+      this.state.mode = { ...this.state.mode, ...overrides.mode };
+    }
     this.workspace.replaceChangedFiles(this.state.changedFiles);
     this.checkpoints = new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
     this.sessionCompletedEmitted = state.status === 'complete' || state.status === 'failed' || state.status === 'cancelled';
     this.modelClient.setModel(this.state.model);
+    // Re-synchronize the live permission manager with the loaded mode and
+    // emit one authoritative mode event so every UI surface converges on the
+    // resumed state (VC-KIMI-004/025).
+    this.permissions.setMode(this.state.mode.permissionMode);
+    this.emitModeChanged();
     this.context.setWorkingMemory(this.state);
     this.context.resetConversation();
     for (const message of this.state.messages) {
@@ -378,6 +488,23 @@ export class AgentRuntime {
 
     this.persist();
     return { state: this.state, events: this.events.events, finalMessage };
+  }
+
+  /**
+   * Resume a session with a NEW user prompt. The prompt is appended as a new
+   * user message — never a replay of the stored objective (VC-KIMI-003).
+   * The resumed session also gets a fresh completion lifecycle so a new
+   * `session_completed` event is always emitted (VC-KIMI-021).
+   */
+  async resumeAndSend(content: string): Promise<AgentRuntimeResult> {
+    await this.start();
+    const trimmed = content.trim();
+    if (!trimmed) {
+      throw new Error('Cannot resume with an empty prompt');
+    }
+    this.state.objective = trimmed;
+    await this.sendUserMessage(trimmed);
+    return await this.complete();
   }
 
   private async processTurns(): Promise<string> {
@@ -510,143 +637,262 @@ export class AgentRuntime {
     return await this.modelClient.complete(messages, tools);
   }
 
+  /**
+   * Execute a tool call from the agent turn loop.
+   * Returns true when the call changed workspace files.
+   */
   private async handleToolCall(toolCall: { id: string; type: 'function'; function: { name: string; arguments: string } }): Promise<boolean> {
     const toolName = toolCall.function.name;
+    let input: unknown = toolCall.function.arguments;
+    try {
+      input = JSON.parse(toolCall.function.arguments || '{}');
+    } catch {
+      const result: ToolResult<unknown> = {
+        ok: false,
+        error: { code: 'INVALID_ARGUMENTS', message: 'Tool arguments are not valid JSON' },
+      };
+      this.emit({
+        type: 'tool_requested',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        toolName,
+        input: this.redactor.redact(toolCall.function.arguments),
+      });
+      this.recordToolCall(toolCall.id, toolName, input, result, false, 0);
+      return false;
+    }
+
+    const { changedFiles } = await this.runTool(toolName, input, toolCall.id);
+    return changedFiles;
+  }
+
+  /**
+   * Execute a direct tool invocation (e.g. TUI shell mode) through the same
+   * runtime-owned authorization, risk classification, event trace, and tool
+   * history as agent tool calls (VC-KIMI-008). The UI must never duplicate
+   * this authorization logic.
+   */
+  async executeDirectTool(
+    toolName: string,
+    input: unknown,
+    _options: { source?: string } = {}
+  ): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string }; approved: boolean }> {
+    await this.start();
+    const previousStatus = this.state.status;
+    try {
+      const { result, approved } = await this.runTool(toolName, input, randomUUID());
+      return { ok: result.ok, data: result.data, error: result.error, approved };
+    } finally {
+      this.state.status = previousStatus;
+    }
+  }
+
+  /**
+   * Shared authorization + execution pipeline for both agent tool calls and
+   * direct (UI-initiated) tool invocations.
+   *
+   * Enforces plan mode at the execution boundary (VC-KIMI-007): a malformed
+   * or adversarial model response cannot invoke a mutating tool by naming it
+   * directly, even if it was omitted from the advertised schema.
+   */
+  private async runTool(
+    toolName: string,
+    input: unknown,
+    toolCallId: string
+  ): Promise<{ result: ToolResult<unknown>; approved: boolean; changedFiles: boolean }> {
     const tool = this.registry.get(toolName);
+    const start = Date.now();
 
     this.emit({
       type: 'tool_requested',
       timestamp: new Date().toISOString(),
       eventId: randomUUID(),
       toolName,
-      input: this.redactor.redact(toolCall.function.arguments),
+      input: this.redactor.redact(input),
     });
 
-    let input: unknown = toolCall.function.arguments;
-    let result: ToolResult<unknown>;
-    let approved = true;
-    let changedFilesThisCall = false;
-    const start = Date.now();
-
     if (!tool) {
-      result = { ok: false, error: { code: 'UNKNOWN_TOOL', message: `Tool not found: ${toolName}` } };
-    } else {
-      try {
-        input = JSON.parse(toolCall.function.arguments || '{}');
-      } catch {
-        result = { ok: false, error: { code: 'INVALID_ARGUMENTS', message: 'Tool arguments are not valid JSON' } };
-        this.recordToolCall(toolCall.id, toolName, input, result, approved, Date.now() - start);
-        return false;
-      }
+      const result: ToolResult<unknown> = {
+        ok: false,
+        error: { code: 'UNKNOWN_TOOL', message: `Tool not found: ${toolName}` },
+      };
+      this.recordToolCall(toolCallId, toolName, input, result, false, 0);
+      return { result, approved: false, changedFiles: false };
+    }
 
-      const risk = typeof tool.risk === 'function' ? tool.risk(input) : tool.risk;
-      approved = await this.permissions.isApproved(toolName, input, risk);
+    // Plan-mode execution gate: schema exposure alone is not a security
+    // boundary (VC-KIMI-007). Plan mode permits only explicitly plan-safe tools.
+    if (this.state.mode.operatingMode === 'plan' && tool.planSafe !== true) {
+      const result: ToolResult<unknown> = {
+        ok: false,
+        error: { code: 'PLAN_MODE_DENIED', message: `${toolName} is unavailable in plan mode` },
+      };
+      this.recordToolCall(toolCallId, toolName, input, result, false, 0);
+      return { result, approved: false, changedFiles: false };
+    }
 
-      if (!approved) {
-        this.emit({
-          type: 'approval_requested',
-          timestamp: new Date().toISOString(),
-          eventId: randomUUID(),
-          toolName,
-          risk,
-        });
-        const decision = await this.permissions.requestApproval(toolName, input, risk);
-        if (!decision.approved) {
-          result = { ok: false, error: { code: 'PERMISSION_DENIED', message: `Approval denied for ${toolName}` } };
-          this.recordToolCall(toolCall.id, toolName, input, result, false, Date.now() - start);
-          return false;
-        }
-        if (decision.scope) {
-          if (decision.scope === 'pattern') {
-            this.permissions.grant(decision.scope, toolName, decision.matcher);
-          } else {
-            this.permissions.grant(decision.scope, toolName);
-          }
-        }
-        approved = true;
-      }
+    const risk = typeof tool.risk === 'function' ? tool.risk(input) : tool.risk;
+    let approved = await this.permissions.isApproved(toolName, input, risk);
 
+    if (!approved) {
       this.emit({
-        type: 'tool_started',
+        type: 'approval_requested',
         timestamp: new Date().toISOString(),
         eventId: randomUUID(),
-        toolCallId: toolCall.id,
         toolName,
-        input: this.redactor.redact(input),
+        risk,
       });
-
-      if (toolName === 'spawn_agent') {
-        const subagentInput = this.parseSubagentInput(input);
-        if (subagentInput) {
-          this.emit({
-            type: 'subagent_started',
-            timestamp: new Date().toISOString(),
-            eventId: randomUUID(),
-            kind: subagentInput.kind,
-            mode: subagentInput.mode,
-            task: subagentInput.task,
-            maxTurns: subagentInput.maxTurns,
-          });
+      const decision = await this.permissions.requestApproval(toolName, input, risk);
+      if (!decision.approved) {
+        const result: ToolResult<unknown> = {
+          ok: false,
+          error: { code: 'PERMISSION_DENIED', message: `Approval denied for ${toolName}` },
+        };
+        this.recordToolCall(toolCallId, toolName, input, result, false, Date.now() - start);
+        return { result, approved: false, changedFiles: false };
+      }
+      if (decision.scope) {
+        if (decision.scope === 'pattern') {
+          this.permissions.grant(decision.scope, toolName, decision.matcher, risk);
+        } else {
+          this.permissions.grant(decision.scope, toolName, undefined, risk);
         }
       }
+      approved = true;
+    }
 
-      this.state.status = 'executing_tool';
-      result = await tool.execute(input, {
-        workspaceRoot: this.state.workspaceRoot,
-        sessionId: this.state.sessionId,
-        objective: this.state.objective,
-        runtimeState: this.state,
-        signal: this.signal,
-        checkpointManager: this.checkpoints,
-        skillRegistry: this.skills,
-      });
+    this.emit({
+      type: 'tool_started',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      toolCallId,
+      toolName,
+      input: this.redactor.redact(input),
+    });
 
-      if (result.metadata?.affectedFiles) {
-        for (const file of result.metadata.affectedFiles) {
-          this.workspace.markChanged(file);
-          changedFilesThisCall = true;
-          this.emit({
-            type: 'file_changed',
-            timestamp: new Date().toISOString(),
-            eventId: randomUUID(),
-            path: file,
-            operation: toolName,
-          });
-        }
-      }
-
-      this.state.changedFiles = this.workspace.changedFiles;
-
-      if (toolName === 'todo_write' && result.ok && Array.isArray(result.data)) {
-        this.state.todos = result.data;
-      }
-
-      if (toolName === 'skill_load' && result.ok && result.data && typeof result.data === 'object' && 'name' in result.data) {
-        const skillName = String((result.data as { name: string }).name);
-        if (!this.state.activeSkills.includes(skillName)) {
-          this.state.activeSkills.push(skillName);
-          this.context.setActiveSkills(
-            this.state.activeSkills
-              .map((name) => this.skills.load(name))
-              .filter((skill): skill is Skill => skill !== undefined)
-          );
-        }
-      }
-
-      if (toolName === 'spawn_agent' && result.ok && this.isSubagentResult(result.data)) {
-        this.state.subagentReports ||= [];
-        this.state.subagentReports.push(result.data);
+    if (toolName === 'spawn_agent') {
+      const subagentInput = this.parseSubagentInput(input);
+      if (subagentInput) {
         this.emit({
-          type: 'subagent_completed',
+          type: 'subagent_started',
           timestamp: new Date().toISOString(),
           eventId: randomUUID(),
-          kind: result.data.kind,
-          mode: result.data.mode,
-          status: result.data.status,
-          findings: result.data.findings.length,
-          filesInspected: result.data.filesInspected.length,
-          changedFiles: result.data.changedFiles?.length ?? 0,
+          kind: subagentInput.kind,
+          mode: subagentInput.mode,
+          task: subagentInput.task,
+          maxTurns: subagentInput.maxTurns,
         });
+      }
+    }
+
+    this.state.status = 'executing_tool';
+    let result = await tool.execute(input, this.buildToolContext());
+
+    let changedFilesThisCall = false;
+    if (result.metadata?.affectedFiles) {
+      for (const file of result.metadata.affectedFiles) {
+        this.workspace.markChanged(file);
+        changedFilesThisCall = true;
+        this.emit({
+          type: 'file_changed',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          path: file,
+          operation: toolName,
+        });
+      }
+    }
+
+    this.state.changedFiles = this.workspace.changedFiles;
+
+    if (toolName === 'todo_write' && result.ok && Array.isArray(result.data)) {
+      this.state.todos = result.data;
+    }
+
+    if (toolName === 'skill_load' && result.ok && result.data && typeof result.data === 'object' && 'name' in result.data) {
+      const skillName = String((result.data as { name: string }).name);
+      if (!this.state.activeSkills.includes(skillName)) {
+        this.state.activeSkills.push(skillName);
+        this.context.setActiveSkills(
+          this.state.activeSkills
+            .map((name) => this.skills.load(name))
+            .filter((skill): skill is Skill => skill !== undefined)
+        );
+      }
+    }
+
+    if (toolName === 'spawn_agent' && result.ok && this.isSubagentResult(result.data)) {
+      this.state.subagentReports ||= [];
+      this.state.subagentReports.push(result.data);
+      this.emit({
+        type: 'subagent_completed',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        kind: result.data.kind,
+        mode: result.data.mode,
+        status: result.data.status,
+        findings: result.data.findings.length,
+        filesInspected: result.data.filesInspected.length,
+        changedFiles: result.data.changedFiles?.length ?? 0,
+      });
+    }
+
+    // Plan-mode lifecycle (work order §9).
+    if (toolName === 'enter_plan_mode' && result.ok) {
+      if (this.state.mode.operatingMode !== 'plan') {
+        this.setMode({ operatingMode: 'plan' });
+      }
+    }
+
+    if (toolName === 'write_plan' && result.ok) {
+      const plan = (result.data as { plan?: PlanArtifact } | undefined)?.plan;
+      if (plan) {
+        this.state.plan = plan;
+        this.emit({
+          type: 'plan_updated',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          plan,
+        });
+      }
+    }
+
+    if (toolName === 'exit_plan_mode' && result.ok) {
+      const plan = this.state.plan;
+      if (plan) {
+        // Exiting with a proposed plan requires explicit user approval — a
+        // policy separate from ordinary tool approval that even YOLO cannot
+        // bypass (work order §9 rule 7). Fails closed without an approver.
+        this.emit({
+          type: 'plan_exit_requested',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          plan,
+        });
+        const approved = await this.permissions.requestPlanApproval(plan);
+        if (approved) {
+          this.setMode({ operatingMode: 'agent' });
+          this.emit({
+            type: 'plan_exit_approved',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+          });
+        } else {
+          result = {
+            ok: false,
+            error: {
+              code: 'PLAN_EXIT_DENIED',
+              message: 'The plan was not approved. Revise the plan and call exit_plan_mode again.',
+            },
+          };
+          this.emit({
+            type: 'plan_exit_denied',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+          });
+        }
+      } else {
+        this.setMode({ operatingMode: 'agent' });
       }
     }
 
@@ -654,8 +900,8 @@ export class AgentRuntime {
     this.context.setWorkingMemory(this.state);
 
     const durationMs = Date.now() - start;
-    this.recordToolCall(toolCall.id, toolName, input, result, approved, durationMs);
-    return changedFilesThisCall;
+    this.recordToolCall(toolCallId, toolName, input, result, approved, durationMs);
+    return { result, approved, changedFiles: changedFilesThisCall };
   }
 
   private recordToolCall(
@@ -754,7 +1000,7 @@ export class AgentRuntime {
           continue;
         }
         if (decision.scope) {
-          this.permissions.grant(decision.scope, 'run_validation');
+          this.permissions.grant(decision.scope, 'run_validation', undefined, 'execute');
         }
       }
 
@@ -906,8 +1152,18 @@ export class AgentRuntime {
   private persist(): void {
     try {
       this.sessions.save(this.state, this.events.events);
-    } catch {
-      // Session persistence is best-effort in Phase 1
+      this.persistDirty = false;
+    } catch (error) {
+      // A session-oriented agent must not lose persistence silently
+      // (VC-KIMI-022): surface the failure and retry on the next state
+      // transition.
+      this.persistDirty = true;
+      this.emit({
+        type: 'session_persist_failed',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }

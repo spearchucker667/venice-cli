@@ -6,19 +6,17 @@ import { useEffect, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import type { AgentRuntime } from '../agent/runtime.js';
 import { AgentRuntime as AgentRuntimeClass } from '../agent/runtime.js';
-import type { AgentState, AgentStatus } from '../agent/types.js';
+import type { AgentStatus } from '../agent/types.js';
 import type { AgentEvent } from '../agent/events.js';
 import { EventBus } from '../agent/events.js';
 import type { McpManager } from '../mcp/manager.js';
 import { PermissionManager } from '../agent/permissions.js';
 import type { ApprovalMode } from '../agent/permissions.js';
-import { defaultMode } from '../agent/mode.js';
-import { shellTool } from '../tools/shell/execute.js';
-import type { ToolContext } from '../tools/types.js';
 import { Composer } from './composer.js';
 import { Transcript } from './transcript.js';
 import { StatusBar } from './status.js';
 import { ApprovalPrompt, type ApprovalDecision } from './approval.js';
+import { PlanApprovalPrompt } from './plan-approval.js';
 import { mapEventToMessage } from './events.js';
 import { parseSlashCommand } from './slash-commands.js';
 import { handleSlashCommand } from './slash-handlers.js';
@@ -29,6 +27,7 @@ import { SessionPicker } from './session-picker.js';
 import { SessionManager } from '../agent/sessions.js';
 import type { ModelProfile } from '../agent/model-profile.js';
 import type { RuntimeModeState } from '../agent/mode.js';
+import type { PlanArtifact } from '../agent/types.js';
 
 export interface AppProps {
   workspaceRoot: string;
@@ -47,6 +46,11 @@ interface PendingApproval {
   input: unknown;
   risk: string;
   resolve: (decision: ApprovalDecision) => void;
+}
+
+interface PendingPlanApproval {
+  plan: PlanArtifact;
+  resolve: (approved: boolean) => void;
 }
 
 type PickerMode = 'normal' | 'model-picker' | 'session-picker';
@@ -73,25 +77,6 @@ function useStdoutDimensions() {
   return dimensions;
 }
 
-function minimalAgentState(workspaceRoot: string): AgentState {
-  return {
-    sessionId: 'tui',
-    workspaceRoot,
-    workspace: { primaryRoot: workspaceRoot, additionalRoots: [] },
-    model: '',
-    objective: '',
-    status: 'idle',
-    mode: defaultMode(),
-    messages: [],
-    todos: [],
-    relevantFiles: [],
-    changedFiles: [],
-    toolHistory: [],
-    skillSummaries: [],
-    activeSkills: [],
-  };
-}
-
 import { execSync } from 'child_process';
 
 function getGitBranch(cwd: string): string | undefined {
@@ -112,6 +97,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
   const [status, setStatus] = useState<AgentStatus>('idle');
   const [isRunning, setIsRunning] = useState(false);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [pendingPlanApproval, setPendingPlanApproval] = useState<PendingPlanApproval | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
   const [currentModel, setCurrentModel] = useState(model);
   const [currentModelProfile, setCurrentModelProfile] = useState<ModelProfile | undefined>();
@@ -170,6 +156,14 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     });
   });
 
+  // Plan-exit approval is a separate policy from tool approval; YOLO does
+  // not bypass it (work order §9 rule 7).
+  permissionsRef.current.setPlanApprover((plan) => {
+    return new Promise<boolean>((resolve) => {
+      setPendingPlanApproval({ plan, resolve });
+    });
+  });
+
   useEffect(() => {
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -225,13 +219,13 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     if (resumeSessionId) {
       const stored = new SessionManager().load(resumeSessionId, workspaceRoot);
       if (stored) {
+        // loadState emits an authoritative mode_changed event, which the
+        // listener above applies to input/operating/approval mode state
+        // (VC-KIMI-025).
         runtime.loadState(stored.state);
         setCurrentModel(stored.state.model);
         setCurrentModelProfile(stored.state.modelProfile);
         setStatus(stored.state.status);
-        setInputMode(stored.state.mode.inputMode);
-        setOperatingMode(stored.state.mode.operatingMode);
-        setCurrentApprovalMode(stored.state.mode.permissionMode);
         const restoredMessages: TuiMessage[] = stored.state.messages.slice(-50).flatMap((message, index) => {
           if (message.role !== 'user' && message.role !== 'assistant') return [];
           return [{
@@ -281,6 +275,12 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
         }
         return null;
       });
+      setPendingPlanApproval((current) => {
+        if (current) {
+          current.resolve(false);
+        }
+        return null;
+      });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceRoot, model, approvalMode, maxTurns, mcpManager]);
@@ -291,26 +291,30 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
 
   const handleShellPassthrough = async (command: string) => {
     addEvent(`$ ${command}`);
-    const decision = await permissionsRef.current.requestApproval('shell', { command }, 'execute');
-    if (!decision.approved) {
-      addEvent('Shell command denied.');
+    const runtime = runtimeRef.current;
+    if (!runtime) {
+      addEvent('Shell unavailable.');
       return;
     }
-    const context: ToolContext = {
-      workspaceRoot,
-      sessionId: runtimeRef.current?.getState().sessionId || 'tui',
-      objective: runtimeRef.current?.getState().objective || '',
-      runtimeState: runtimeRef.current?.getState() ?? minimalAgentState(workspaceRoot),
-      signal: abortControllerRef.current?.signal,
-    };
-    const result = await shellTool.execute({ command }, context);
-    if (result.ok) {
-      const output = result.data as { stdout?: string; stderr?: string; exitCode?: number | null };
-      addEvent(`exit ${output.exitCode ?? '?'}`);
-      if (output.stdout) addEvent(output.stdout);
-      if (output.stderr) addEvent(output.stderr);
-    } else {
-      addEvent(`Error: ${result.error?.message || 'shell failed'}`);
+    // Direct shell must go through the runtime so it uses the same risk
+    // classification, permission policy, approval prompts, event stream,
+    // session trace, and cancellation as agent tool calls (VC-KIMI-008).
+    try {
+      const result = await runtime.executeDirectTool('shell', { command }, { source: 'shell-mode' });
+      if (!result.approved) {
+        addEvent('Shell command denied.');
+        return;
+      }
+      if (result.ok) {
+        const output = result.data as { stdout?: string; stderr?: string; exitCode?: number | null };
+        addEvent(`exit ${output.exitCode ?? '?'}`);
+        if (output.stdout) addEvent(output.stdout);
+        if (output.stderr) addEvent(output.stderr);
+      } else {
+        addEvent(`Error: ${result.error?.message || 'shell failed'}`);
+      }
+    } catch (err) {
+      addEvent(String(err));
     }
   };
 
@@ -335,6 +339,8 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       addEvent(`Session not found in this workspace: ${sessionId}`);
       return;
     }
+    // loadState emits an authoritative mode_changed event, which restores
+    // input/operating/approval mode UI state (VC-KIMI-025).
     runtimeRef.current?.loadState(stored.state);
     setCurrentModel(stored.state.model);
     setCurrentModelProfile(stored.state.modelProfile);
@@ -407,11 +413,6 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       return;
     }
 
-    if (operatingMode === 'plan') {
-      addEvent('Plan mode active. Describe the plan, or type /plan off or Shift-Tab to start executing.');
-      return;
-    }
-
     const { text: resolvedText, mentions } = resolveMentions(trimmed);
     let attachedContext: string | undefined;
 
@@ -440,6 +441,11 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
   const handleApprovalDecision = (decision: ApprovalDecision) => {
     pendingApproval?.resolve(decision);
     setPendingApproval(null);
+  };
+
+  const handlePlanApprovalDecision = (approved: boolean) => {
+    pendingPlanApproval?.resolve(approved);
+    setPendingPlanApproval(null);
   };
 
   const { columns, rows } = useStdoutDimensions();
@@ -485,12 +491,15 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
           onDecision={handleApprovalDecision}
         />
       )}
+      {pendingPlanApproval && pickerMode === 'normal' && (
+        <PlanApprovalPrompt plan={pendingPlanApproval.plan} onDecision={handlePlanApprovalDecision} />
+      )}
       <Composer
         onSubmit={handleSubmit}
         workspaceRoot={workspaceRoot}
         inputMode={inputMode}
         operatingMode={operatingMode}
-        disabled={pendingApproval !== null || pickerMode !== 'normal'}
+        disabled={pendingApproval !== null || pendingPlanApproval !== null || pickerMode !== 'normal'}
         maxSuggestions={Math.max(3, Math.min(8, rows - 11))}
         columns={columns}
       />

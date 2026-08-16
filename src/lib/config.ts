@@ -115,21 +115,6 @@ export function getApiKey(): string | undefined {
   return config.api_key;
 }
 
-export function requireApiKey(): string {
-  const key = getApiKey();
-  if (!key) {
-    throw new Error(
-      'No API key or wallet token found.\n\n' +
-      'Set your authentication using one of these methods:\n' +
-      '  1. venice config set api_key\n' +
-      '  2. venice config set signInWithX\n' +
-      '  3. export VENICE_API_KEY=<your-key>\n\n' +
-      'Get your API key at: https://venice.ai/settings/api'
-    );
-  }
-  return key;
-}
-
 export function getSignInWithX(): string | undefined {
   const envKey = process.env.X_SIGN_IN_WITH_X;
   if (envKey) return envKey;
@@ -138,19 +123,120 @@ export function getSignInWithX(): string | undefined {
   return config.signInWithX;
 }
 
+/**
+ * The single source of truth for the x402 wallet-auth request header name.
+ *
+ * Note: Venice's endpoint reference pages currently name `SIGN-IN-WITH-X` as
+ * the live header and describe `X-Sign-In-With-X` as the legacy header accepted
+ * during migration, while the x402 integration guide documents
+ * `X-Sign-In-With-X`. We follow the guide (and the work-order contract) and keep
+ * this constant as the one place to change if the API settles the other way.
+ */
+export const X_SIGN_IN_WITH_X_HEADER = 'X-Sign-In-With-X';
+
+export type VeniceAuth =
+  | { kind: 'api-key'; value: string }
+  | { kind: 'sign-in-with-x'; value: string };
+
+export function getVeniceAuth(): VeniceAuth | undefined {
+  const apiKey = getApiKey();
+  if (apiKey) return { kind: 'api-key', value: apiKey };
+
+  const signInWithX = getSignInWithX();
+  if (signInWithX) return { kind: 'sign-in-with-x', value: signInWithX };
+
+  return undefined;
+}
+
+export function applyVeniceAuth(
+  headers: Record<string, string>,
+  auth: VeniceAuth
+): void {
+  if (auth.kind === 'api-key') {
+    headers.Authorization = `Bearer ${auth.value}`;
+  } else {
+    headers[X_SIGN_IN_WITH_X_HEADER] = auth.value;
+  }
+}
+
+export function requireAuth(): VeniceAuth {
+  const auth = getVeniceAuth();
+  if (!auth) {
+    throw new Error(
+      'No API key or wallet token found.\n\n' +
+      'Set your authentication using one of these methods:\n' +
+      '  1. venice config set api_key\n' +
+      '  2. venice config set signInWithX\n' +
+      '  3. export VENICE_API_KEY=<your-key>\n' +
+      '  4. export X_SIGN_IN_WITH_X=<your-token>\n\n' +
+      'Get your API key at: https://venice.ai/settings/api'
+    );
+  }
+  return auth;
+}
+
+/**
+ * Central model-ID defaults. Direct API helpers and tools must reference these
+ * instead of duplicating literals (VC-KIMI-068).
+ */
+export const DEFAULT_MODELS = {
+  chat: 'kimi-k2-5',
+  image: 'flux-2-pro',
+  voice: 'af_sky',
+  tts: 'tts-kokoro',
+  voiceClone: 'tts-chatterbox-hd',
+  transcription: 'nvidia/parakeet-tdt-0.6b-v3',
+  embedding: 'text-embedding-3-small',
+  textToVideo: 'wan-2.6-text-to-video',
+  imageToVideo: 'wan-2.6-image-to-video',
+  videoUpscale: 'topaz-video-upscale',
+  imageUpscale: 'upscaler',
+  music: 'elevenlabs-music',
+} as const;
+
 export function getDefaultModel(): string {
   const config = loadConfig();
-  return config.default_model || 'kimi-k2-5';
+  return config.default_model || DEFAULT_MODELS.chat;
 }
 
 export function getDefaultImageModel(): string {
   const config = loadConfig();
-  return config.default_image_model || 'flux-2-pro';
+  return config.default_image_model || DEFAULT_MODELS.image;
 }
 
 export function getDefaultVoice(): string {
   const config = loadConfig();
-  return config.default_voice || 'af_sky';
+  return config.default_voice || DEFAULT_MODELS.voice;
+}
+
+/**
+ * Central config-key registry. Every show/get/set/unset path must derive its
+ * valid keys and secret masking from here (VC-KIMI-014/015).
+ */
+export const CONFIG_KEY_METADATA = {
+  api_key: { secret: true },
+  signInWithX: { secret: true },
+  default_model: { secret: false },
+  default_image_model: { secret: false },
+  default_voice: { secret: false },
+  output_format: { secret: false },
+  no_color: { secret: false },
+  show_usage: { secret: false },
+} as const satisfies Record<keyof VeniceConfig, { secret: boolean }>;
+
+export type ConfigKey = keyof VeniceConfig;
+
+export function isConfigKey(key: string): key is ConfigKey {
+  return Object.prototype.hasOwnProperty.call(CONFIG_KEY_METADATA, key);
+}
+
+export function isSecretConfigKey(key: string): boolean {
+  return isConfigKey(key) && CONFIG_KEY_METADATA[key].secret;
+}
+
+export function maskSecretValue(value: string): string {
+  if (value.length <= 8) return '****';
+  return value.slice(0, 4) + '...' + value.slice(-4);
 }
 
 export function getOutputFormat(): string {

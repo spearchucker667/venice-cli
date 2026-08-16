@@ -52,16 +52,24 @@ export function registerEmbeddingsCommand(program: Command): void {
       }
 
       try {
+        // VC-KIMI-036: validate numeric/enum arguments before hitting the API.
+        const dimensions = options.dimensions !== undefined
+          ? parseDimensions(options.dimensions)
+          : undefined;
+        const encodingFormat = options.encodingFormat !== undefined
+          ? parseEncodingFormat(options.encodingFormat)
+          : undefined;
+
         const result = await generateEmbeddings(input, {
           model: options.model,
-          dimensions: options.dimensions ? parseInt(options.dimensions, 10) : undefined,
-          encoding_format: options.encodingFormat as 'float' | 'base64' | undefined,
+          dimensions,
+          encoding_format: encodingFormat,
         });
 
         if (options.output) {
           fs.writeFileSync(options.output, JSON.stringify(result, null, 2));
           console.log(formatSuccess(`Saved embeddings to ${options.output}`));
-          console.log(c.dim(`Dimension: ${result[0]?.embedding?.length || 0}`));
+          console.log(c.dim(`Encoding: ${result[0]?.encoding || 'float'}`));
           return;
         }
 
@@ -70,12 +78,20 @@ export function registerEmbeddingsCommand(program: Command): void {
           return;
         }
 
-        // Pretty format - show summary
+        // Pretty format - show summary (VC-KIMI-035: base64 needs no numeric math).
         for (const item of result) {
           console.log(c.bold(`Embedding ${item.index + 1}:`));
-          console.log(`  ${c.dim('Dimension:')} ${item.embedding.length}`);
-          console.log(`  ${c.dim('First 5 values:')} [${item.embedding.slice(0, 5).map(v => v.toFixed(4)).join(', ')}...]`);
-          console.log(`  ${c.dim('Magnitude:')} ${magnitude(item.embedding).toFixed(6)}`);
+          if (item.encoding === 'base64') {
+            const preview = item.embedding.length > 40
+              ? `${item.embedding.slice(0, 40)}…`
+              : item.embedding;
+            console.log(`  ${c.dim('Encoding:')} base64`);
+            console.log(`  ${c.dim('Preview:')} ${preview}`);
+          } else {
+            console.log(`  ${c.dim('Dimension:')} ${item.embedding.length}`);
+            console.log(`  ${c.dim('First 5 values:')} [${item.embedding.slice(0, 5).map(v => v.toFixed(4)).join(', ')}...]`);
+            console.log(`  ${c.dim('Magnitude:')} ${magnitude(item.embedding).toFixed(6)}`);
+          }
         }
 
         console.log(c.dim('\nTip: Use --output file.json to save full embeddings'));
@@ -88,6 +104,26 @@ export function registerEmbeddingsCommand(program: Command): void {
 
 function magnitude(vec: number[]): number {
   return Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0));
+}
+
+function parseDimensions(value: string): number {
+  const trimmed = String(value).trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`--dimensions must be a positive integer, got: ${value}`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`--dimensions must be a positive integer, got: ${value}`);
+  }
+  return parsed;
+}
+
+function parseEncodingFormat(value: string): 'float' | 'base64' {
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized !== 'float' && normalized !== 'base64') {
+    throw new Error(`--encoding-format must be one of: float, base64 (got: ${value})`);
+  }
+  return normalized;
 }
 
 async function readStdin(): Promise<string> {

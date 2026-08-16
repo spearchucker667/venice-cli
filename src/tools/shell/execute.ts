@@ -66,10 +66,25 @@ export const shellTool: AgentTool<ShellInput, ShellOutput> = {
     const command = typeof input === 'object' && input !== null
       ? String((input as Record<string, unknown>).command || '')
       : '';
-    if (/\brm\b.*-rf|\bmkfs\b|\bdd\b|\bformat\b/i.test(command)) {
+    // Destructive: data loss or system-level damage.
+    if (/\brm\b[^\n]*\s-rf|\bmkfs\b|\bdd\b|\bformat\b|:{\s*:\|:&\s*};/i.test(command)) {
       return 'destructive';
     }
-    return 'external_side_effect';
+    // External side effects: network, remote systems, package publishing,
+    // and privilege escalation. `auto` mode prompts for these.
+    if (
+      /\bsudo\b/i.test(command) ||
+      /\b(curl|wget|ssh|scp|sftp|telnet|nc|ncat|ping|nslookup|dig|traceroute|whois|aws|gcloud|az)\b/i.test(command) ||
+      /\b(git|docker|npm|npx|yarn|pnpm|pip|pip3|brew|apt|apt-get|yum|dnf)\s+(push|publish|deploy|login|logout|install\s+-g)\b/i.test(command)
+    ) {
+      return 'external_side_effect';
+    }
+    // Ordinary local development commands (build, test, ls, git status...)
+    // are 'execute' so `auto` mode can auto-approve them consistently with
+    // its documented semantics (VC-KIMI-057). This heuristic cannot
+    // perfectly determine safety; destructive/external patterns above are
+    // the conservative carve-outs.
+    return 'execute';
   },
   async execute(input, context) {
     const workspace = new WorkspaceManager(context.workspaceRoot);

@@ -8,7 +8,7 @@ import { getDefaultModel } from '../lib/config.js';
 import { formatError, getChalk } from '../lib/output.js';
 import { EventBus } from '../agent/events.js';
 import { AgentRenderer } from '../ui/renderer.js';
-import { loadMcpConfig, getWorkspaceMcpConfigPath } from '../mcp/config.js';
+import { buildAgentMcpConfig } from '../mcp/config.js';
 import { McpManager } from '../mcp/manager.js';
 import { defaultMode } from '../agent/mode.js';
 import { SessionManager } from '../agent/sessions.js';
@@ -87,7 +87,11 @@ export function registerAgentCommand(program: Command): Command {
         process.exit(2);
       }
 
-      const mcpConfig = loadMcpConfig(undefined, getWorkspaceMcpConfigPath(workspaceRoot));
+      // Project `.venice/mcp.json` may run arbitrary executables. It is only
+      // merged after the user approves this workspace config (interactive) or
+      // when a prior approval still matches the current file hash. In
+      // noninteractive mode an untrusted project config is skipped.
+      const mcpConfig = await buildAgentMcpConfig(workspaceRoot, { interactive });
       const mcpManager = new McpManager(mcpConfig);
 
       const mode = options.plan
@@ -130,11 +134,17 @@ export function registerAgentCommand(program: Command): Command {
           console.error(formatError(`Session not found in this workspace: ${resumeSessionId}`));
           process.exit(2);
         }
-        runtime.loadState(stored.state);
+        // Explicit CLI flags win over the persisted session mode
+        // (VC-KIMI-004: stored suggest -> CLI auto override).
+        runtime.loadState(stored.state, { mode: { permissionMode: approvalMode } });
       }
 
       try {
-        const result = await runtime.run();
+        // Resumed sessions append the new prompt as a fresh user message
+        // instead of replaying the stored objective (VC-KIMI-003).
+        const result = resumeSessionId
+          ? await runtime.resumeAndSend(objective!.trim())
+          : await runtime.run();
         renderer.stop();
         if (outputFormat === 'stream-json') {
           // session.completed was already emitted by the renderer; no additional stdout

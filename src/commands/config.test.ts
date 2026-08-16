@@ -68,6 +68,60 @@ test('config set api_key --stdin saves without printing the key', () => {
   }
 });
 
+test('config set signInWithX --stdin saves without printing the token', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-config-test-'));
+  const token = 'siwx-secret-1234567890';
+
+  try {
+    const result = runCli(['config', 'set', 'signInWithX', '--stdin'], homeDir, `${token}\n`);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!result.stdout.includes(token));
+    assert.ok(!result.stderr.includes(token));
+
+    const config = JSON.parse(
+      readFileSync(join(homeDir, '.venice', 'config.json'), 'utf8')
+    );
+    assert.equal(config.signInWithX, token);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('config show and get mask the signInWithX secret', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-config-test-'));
+  const token = 'siwx-secret-1234567890';
+
+  try {
+    const setResult = runCli(['config', 'set', 'signInWithX', token], homeDir);
+    assert.equal(setResult.status, 0, setResult.stderr);
+    assert.ok(!setResult.stdout.includes(token));
+
+    const showResult = runCli(['config', 'show', '--format', 'json'], homeDir);
+    assert.equal(showResult.status, 0, showResult.stderr);
+    const parsed = JSON.parse(showResult.stdout);
+    assert.equal(parsed.signInWithX, 'siwx...7890');
+    assert.ok(!showResult.stdout.includes(token));
+
+    const getResult = runCli(['config', 'get', 'signInWithX'], homeDir);
+    assert.equal(getResult.status, 0, getResult.stderr);
+    assert.ok(!getResult.stdout.includes(token));
+    assert.match(getResult.stdout, /siwx\.\.\.7890/);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('config set rejects unknown keys', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'venice-config-test-'));
+  try {
+    const result = runCli(['config', 'set', 'not_a_real_key', 'x'], homeDir);
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stderr}${result.stdout}`, /Invalid config key/);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
 test('config init does not print API key input', () => {
   const homeDir = mkdtempSync(join(tmpdir(), 'venice-config-test-'));
   const apiKey = 'sk-init-1234567890';

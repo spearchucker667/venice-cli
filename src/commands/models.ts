@@ -10,6 +10,7 @@ import {
   detectOutputFormat,
 } from '../lib/output.js';
 import type { Model } from '../types/index.js';
+import { modelUsdPrice } from '../types/index.js';
 
 export function registerModelsCommand(program: Command): void {
   const modelsCmd = program
@@ -74,8 +75,13 @@ export function registerModelsCommand(program: Command): void {
           });
         } else if (options.sort === 'price') {
           models.sort((a: Model, b: Model) => {
-            const pA = (a.model_spec?.pricing?.prompt || 0) + (a.model_spec?.pricing?.completion || 0);
-            const pB = (b.model_spec?.pricing?.prompt || 0) + (b.model_spec?.pricing?.completion || 0);
+            // VC-KIMI-034: price by input+output USD (per million tokens).
+            // Models without token USD pricing sort last.
+            const pA = modelUsdPrice(a);
+            const pB = modelUsdPrice(b);
+            if (pA === undefined && pB === undefined) return 0;
+            if (pA === undefined) return 1;
+            if (pB === undefined) return -1;
             return pA - pB; // Ascending price
           });
         } else {

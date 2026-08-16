@@ -52,6 +52,45 @@ export function toStreamJson(event: AgentEvent): StreamJsonEvent | undefined {
         timestamp: event.timestamp,
         status: event.status,
       };
+    case 'session_persist_failed':
+      return {
+        type: 'session.persist_failed',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+        message: event.message,
+      };
+    case 'plan_updated':
+      return {
+        type: 'plan.updated',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+        plan: event.plan,
+      };
+    case 'plan_cleared':
+      return {
+        type: 'plan.cleared',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+      };
+    case 'plan_exit_requested':
+      return {
+        type: 'plan.exit.requested',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+        plan: event.plan,
+      };
+    case 'plan_exit_approved':
+      return {
+        type: 'plan.exit.approved',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+      };
+    case 'plan_exit_denied':
+      return {
+        type: 'plan.exit.denied',
+        schemaVersion: STREAM_JSON_VERSION,
+        timestamp: event.timestamp,
+      };
     default:
       return undefined;
   }

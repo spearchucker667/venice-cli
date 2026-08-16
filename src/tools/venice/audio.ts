@@ -5,6 +5,7 @@
 import type { AgentTool } from '../types.js';
 import { success, failure } from '../result.js';
 import { textToSpeech, transcribe, queueAudioGeneration, retrieveGeneratedAudio, completeAudioGeneration } from '../../lib/api.js';
+import { DEFAULT_MODELS } from '../../lib/config.js';
 import { resolveWorkspaceFile, writeWorkspaceBytes } from './io.js';
 import { writeResponseToFile, MAX_AUDIO_DOWNLOAD_BYTES } from '../../lib/media.js';
 
@@ -137,7 +138,7 @@ export const generateMusicTool: AgentTool<
       }
 
       const queued = await queueAudioGeneration(input.prompt, {
-        model: input.model || 'elevenlabs-music',
+        model: input.model || DEFAULT_MODELS.music,
         durationSeconds: input.duration,
         lyricsPrompt: input.lyricsPrompt,
         forceInstrumental: input.forceInstrumental,

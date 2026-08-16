@@ -5,6 +5,10 @@ import * as path from 'path';
 import * as os from 'os';
 import { SESSIONS_ROOT } from '../agent/sessions.js';
 import { listModels } from '../lib/api.js';
+import type { McpConfig } from '../mcp/config.js';
+import { getWorkspaceMcpConfigPath } from '../mcp/config.js';
+import { WorkspaceTrustStore, hashMcpConfigBytes, summarizeServers } from '../mcp/trust.js';
+import { detectWorkspaceRoot } from '../agent/runtime.js';
 
 export function registerDoctorCommand(program: Command): void {
   const doctorCmd = program
@@ -100,6 +104,32 @@ export function registerDoctorCommand(program: Command): void {
         issues++;
       } else {
         console.log(`✅ Unsafe shell execution mode is disabled`);
+      }
+
+      // Detect untrusted project MCP config (executable code gate).
+      try {
+        const workspaceRoot = detectWorkspaceRoot(process.cwd());
+        const configPath = getWorkspaceMcpConfigPath(workspaceRoot);
+        if (fs.existsSync(configPath)) {
+          const servers = summarizeServers(
+            JSON.parse(fs.readFileSync(configPath, 'utf-8')) as McpConfig
+          );
+          if (servers.length > 0) {
+            const store = new WorkspaceTrustStore();
+            const approved = store.isApproved(workspaceRoot, hashMcpConfigBytes(fs.readFileSync(configPath)));
+            if (approved) {
+              console.log(`✅ Project MCP config at ${configPath} is trusted`);
+            } else {
+              console.log(`❌ ${c.red('Untrusted project MCP config')} at ${configPath} (${servers.map((s) => s.name).join(', ')})`);
+              console.log(`   Project MCP servers will NOT start until approved via ${c.cyan('venice mcp trust')}.`);
+              issues++;
+            }
+          }
+        } else {
+          console.log('✅ No project MCP config in this workspace');
+        }
+      } catch {
+        console.log('✅ No project MCP config in this workspace');
       }
 
       if (issues === 0) {

@@ -238,7 +238,7 @@ export interface Model {
     privacy?: string;
     description?: string;
     traits?: (string | { name: string; description?: string })[];
-    pricing?: any;
+    pricing?: ModelPricing;
     constraints?: any;
     capabilities?: ModelCapabilities;
     voices?: string[];
@@ -281,6 +281,42 @@ export const supportsAudioInput = (model: Model): boolean =>
 
 export const supportsVideoInput = (model: Model): boolean =>
   model.model_spec?.capabilities?.supportsVideoInput === true;
+
+export interface ModelTokenPrice {
+  usd?: number;
+  diem?: number;
+}
+
+export interface ModelPricing {
+  // Token-based pricing (text models). USD figures are per million tokens.
+  input?: ModelTokenPrice;
+  output?: ModelTokenPrice;
+  cache_input?: ModelTokenPrice;
+  cache_write?: ModelTokenPrice;
+  extended?: {
+    context_token_threshold?: number;
+    input?: ModelTokenPrice;
+    output?: ModelTokenPrice;
+    cache_input?: ModelTokenPrice;
+    cache_write?: ModelTokenPrice;
+  };
+  // Image/video pricing uses other shapes; keep the record open for them.
+  [key: string]: unknown;
+}
+
+/**
+ * Sum of input + output USD prices per million tokens. Returns undefined when
+ * the model exposes no token-based USD pricing (e.g. image/video models), so
+ * callers can sort those models last.
+ */
+export function modelUsdPrice(model: Model): number | undefined {
+  const pricing = model.model_spec?.pricing;
+  if (!pricing) return undefined;
+  const input = pricing.input?.usd;
+  const output = pricing.output?.usd;
+  if (typeof input !== 'number' && typeof output !== 'number') return undefined;
+  return (input ?? 0) + (output ?? 0);
+}
 
 export interface CharacterStats {
   averageRating: number;

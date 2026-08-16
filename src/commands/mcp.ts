@@ -1,7 +1,10 @@
 import { Command } from 'commander';
+import * as fs from 'node:fs';
 import type { McpServerConfig } from '../mcp/config.js';
-import { loadMcpConfig, saveMcpConfig, getMcpConfigPath } from '../mcp/config.js';
+import { loadMcpConfig, saveMcpConfig, getMcpConfigPath, getWorkspaceMcpConfigPath } from '../mcp/config.js';
 import { McpManager } from '../mcp/manager.js';
+import { WorkspaceTrustStore, hashMcpConfigBytes, resolveProjectMcpTrust, defaultConfirmTrust } from '../mcp/trust.js';
+import { detectWorkspaceRoot } from '../agent/runtime.js';
 import { formatError, getChalk } from '../lib/output.js';
 
 export function registerMcpCommand(program: Command, configPath = getMcpConfigPath()): void {
@@ -107,6 +110,68 @@ export function registerMcpCommand(program: Command, configPath = getMcpConfigPa
       config.mcpServers[name].disabled = true;
       saveMcpConfig(config, configPath);
       console.log(`Disabled MCP server '${name}'.`);
+    });
+
+  mcp
+    .command('trust')
+    .description('Review and approve the project .venice/mcp.json for this workspace')
+    .option('--status', 'Print trust status without prompting')
+    .option('--revoke', 'Revoke trust for this workspace')
+    .action(async (options) => {
+      const workspaceRoot = detectWorkspaceRoot(process.cwd());
+      const configPath = getWorkspaceMcpConfigPath(workspaceRoot);
+      const store = new WorkspaceTrustStore();
+
+      if (!fs.existsSync(configPath)) {
+        console.log(`No project MCP config found at ${configPath}`);
+        return;
+      }
+
+      const configHash = hashMcpConfigBytes(fs.readFileSync(configPath));
+      const record = store.getRecord(workspaceRoot);
+      const approved = record !== undefined && record.configHash === configHash;
+
+      if (options.revoke) {
+        store.revoke(workspaceRoot);
+        console.log(`Revoked MCP trust for ${workspaceRoot}.`);
+        return;
+      }
+
+      if (options.status) {
+        console.log(`Workspace: ${workspaceRoot}`);
+        console.log(`Config:    ${configPath}`);
+        if (approved) {
+          console.log('Trust:     approved');
+        } else if (record) {
+          console.log('Trust:     config changed since last approval');
+        } else {
+          console.log('Trust:     not approved');
+        }
+        console.log(`Hash:      ${configHash.slice(0, 12)}…`);
+        return;
+      }
+
+      if (approved) {
+        console.log('Project MCP servers are already approved for this workspace.');
+        return;
+      }
+
+      const result = await resolveProjectMcpTrust({
+        workspaceRoot,
+        configPath,
+        interactive: true,
+        store,
+        confirm: defaultConfirmTrust,
+        warn: (message) => console.error(message),
+      });
+
+      if (result.status === 'approved') {
+        console.log(`Approved ${result.config ? Object.keys(result.config.mcpServers).length : 0} project MCP server(s).`);
+      } else if (result.status === 'no-config') {
+        console.log('No runnable project MCP servers to approve.');
+      } else {
+        console.log('Approval declined; project MCP servers will not be started.');
+      }
     });
 
   mcp

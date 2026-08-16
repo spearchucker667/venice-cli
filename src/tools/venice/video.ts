@@ -14,6 +14,7 @@ import {
   videoUrlFromStatus,
 } from '../../lib/api.js';
 import { downloadToFile, mimeTypeFromPath, MAX_VIDEO_DOWNLOAD_BYTES, MAX_VIDEO_REFERENCE_IMAGE_BYTES } from '../../lib/media.js';
+import { DEFAULT_MODELS } from '../../lib/config.js';
 import { waitForVideoStatus, classifyVideoStatus } from '../../commands/video.js';
 import { resolveWorkspaceFile } from './io.js';
 
@@ -116,7 +117,7 @@ export const imageToVideoTool: AgentTool<
       const mimeType = mimeTypeFromPath(source.absolute, 'image/png');
       const imageUrl = `data:${mimeType};base64,${imageData.toString('base64')}`;
       const queued = await queueVideoGeneration(input.prompt, {
-        model: input.model || 'wan-2.6-image-to-video',
+        model: input.model || DEFAULT_MODELS.imageToVideo,
         duration: input.duration,
         aspectRatio: input.aspectRatio,
         imageUrl,

@@ -60,10 +60,22 @@ export function mapEventToMessage(event: AgentEvent): TuiMessage | undefined {
       return { id: event.eventId, role: 'event', content: '… context compacted' };
     case 'session_completed':
       return { id: event.eventId, role: 'event', content: `● ${event.status}` };
+    case 'session_persist_failed':
+      return { id: event.eventId, role: 'event', content: `⚠ Session save failed: ${event.message}` };
     case 'mcp_ready':
       return { id: event.eventId, role: 'event', content: `MCP ready: ${event.servers.map((s) => `${s.name} (${s.toolCount} tools)`).join(', ')}` };
     case 'mcp_failed':
       return { id: event.eventId, role: 'event', content: `MCP failed: ${event.message}` };
+    case 'plan_updated':
+      return { id: event.eventId, role: 'event', content: `📋 Plan updated: ${event.plan.summary || `${event.plan.steps.length} steps`}` };
+    case 'plan_cleared':
+      return { id: event.eventId, role: 'event', content: 'Plan cleared.' };
+    case 'plan_exit_requested':
+      return { id: event.eventId, role: 'event', content: '? Approve the plan to start executing?' };
+    case 'plan_exit_approved':
+      return { id: event.eventId, role: 'event', content: '✓ Plan approved. Executing.' };
+    case 'plan_exit_denied':
+      return { id: event.eventId, role: 'event', content: '✗ Plan not approved. Revise and try again.' };
     default:
       return undefined;
   }

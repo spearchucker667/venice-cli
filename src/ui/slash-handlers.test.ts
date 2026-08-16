@@ -48,11 +48,20 @@ describe('handleSlashCommand', () => {
     assert.strictEqual(exited(), true);
   });
 
-  it('handles /clear', async () => {
+  it('handles /clear as a fresh session (VC-KIMI-023)', async () => {
     const { context, messages } = makeContext();
     messages().push({ id: '1', role: 'user', content: 'hello' });
     await handleSlashCommand('clear', '', context);
-    assert.strictEqual(messages().length, 0);
+    assert.strictEqual(messages().filter((m) => m.role === 'user').length, 0, 'user transcript cleared');
+    assert.ok(messages().some((m) => m.content.includes('fresh session')), 'confirms the fresh session');
+  });
+
+  it('handles /clear-ui as transcript-only', async () => {
+    const { context, messages } = makeContext();
+    messages().push({ id: '1', role: 'user', content: 'hello' });
+    await handleSlashCommand('clear-ui', '', context);
+    assert.strictEqual(messages().filter((m) => m.role === 'user').length, 0);
+    assert.ok(messages().some((m) => m.content.includes('UI only')), 'labels the transcript-only behavior');
   });
 
   it('handles /status', async () => {

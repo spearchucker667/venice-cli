@@ -15,6 +15,8 @@ export interface ApprovalScope {
   scope: 'once' | 'session' | 'pattern';
   toolName?: string;
   matcher?: Matcher;
+  /** Risk level the grant was issued for. Stored grants never authorize more severe risks. */
+  risk?: RiskLevel;
 }
 
 export type ApprovalDecision =
@@ -29,10 +31,36 @@ export type ApprovalCallback = (
   risk: RiskLevel
 ) => Promise<ApprovalDecision>;
 
+/**
+ * Separate policy for plan-exit approval. This is intentionally distinct
+ * from ordinary tool approval: YOLO mode must NOT bypass plan approval
+ * (work order §9 rule 7). With no approver installed the request fails
+ * closed.
+ */
+export type PlanApprovalCallback = (plan: import('./types.js').PlanArtifact) => Promise<boolean>;
+
+/**
+ * Relative severity of each risk level. A grant issued for a given risk may
+ * only cover future requests at the same or a lower severity.
+ */
+const RISK_RANK: Record<RiskLevel, number> = {
+  read: 0,
+  write: 1,
+  execute: 2,
+  network: 3,
+  external_side_effect: 4,
+  outside_workspace: 5,
+  destructive: 6,
+};
+
+/** Default ceiling for grants created without an explicit risk (legacy callers). */
+const LEGACY_GRANT_RISK: RiskLevel = 'write';
+
 export class PermissionManager {
   private mode: ApprovalMode;
   private readonly grants: ApprovalScope[] = [];
   private approver?: ApprovalCallback;
+  private planApprover?: PlanApprovalCallback;
 
   constructor(mode: ApprovalMode = 'suggest') {
     this.mode = mode;
@@ -40,6 +68,23 @@ export class PermissionManager {
 
   setApprover(approver: ApprovalCallback): void {
     this.approver = approver;
+  }
+
+  /** Install the plan-exit approval handler (TUI renders the plan). */
+  setPlanApprover(approver: PlanApprovalCallback): void {
+    this.planApprover = approver;
+  }
+
+  /**
+   * Ask the user to approve leaving plan mode with a proposed plan.
+   * Fails closed (denies) when no approver is installed, which also means
+   * YOLO mode cannot bypass plan approval.
+   */
+  async requestPlanApproval(plan: import('./types.js').PlanArtifact): Promise<boolean> {
+    if (this.planApprover) {
+      return await this.planApprover(plan);
+    }
+    return false;
   }
 
   getMode(): ApprovalMode {
@@ -62,12 +107,17 @@ export class PermissionManager {
     return { approved: false };
   }
 
-  grant(scope: ApprovalScope['scope'], toolName?: string, matcher?: Matcher): void {
+  grant(
+    scope: ApprovalScope['scope'],
+    toolName?: string,
+    matcher?: Matcher,
+    risk?: RiskLevel
+  ): void {
     if (scope === 'pattern' && !matcher) {
       // Cannot grant pattern scope without a matcher
       return;
     }
-    this.grants.push({ scope, toolName, matcher });
+    this.grants.push({ scope, toolName, matcher, risk });
   }
 
   async isApproved(toolName: string, input: unknown, risk: RiskLevel): Promise<boolean> {
@@ -94,6 +144,19 @@ export class PermissionManager {
 
     for (const grant of this.grants) {
       if (grant.toolName && grant.toolName !== toolName) continue;
+
+      // A stored grant never authorizes a call more severe than the one it
+      // was issued for (VC-KIMI-009). Grants created without a risk get the
+      // conservative 'write' ceiling.
+      const grantedRisk = grant.risk ?? LEGACY_GRANT_RISK;
+      if (RISK_RANK[risk] > RISK_RANK[grantedRisk]) continue;
+
+      // Destructive operations always require a fresh explicit approval
+      // unless a deliberately destructive pattern matcher exists.
+      if (risk === 'destructive' && !(grant.scope === 'pattern' && grant.risk === 'destructive' && grant.matcher)) {
+        continue;
+      }
+
       if (grant.scope === 'pattern' && grant.matcher) {
         if (!this.matchesPattern(grant.matcher, input)) continue;
         return true;
@@ -113,20 +176,39 @@ export class PermissionManager {
     if (!input || typeof input !== 'object') return false;
     const value = matcher.field ? (input as any)[matcher.field] : undefined;
     if (value === undefined) return false;
-    
+
     if (matcher.kind === 'field-equals') {
       return String(value) === matcher.value;
     } else if (matcher.kind === 'command-prefix') {
-      return String(value).startsWith(matcher.value);
+      // Match at a shell token boundary: `git` matches `git status` but not `gitty`.
+      const candidate = String(value).trim();
+      const prefix = matcher.value.trim();
+      return candidate === prefix || candidate.startsWith(prefix + ' ');
     } else if (matcher.kind === 'path-glob') {
-      // Basic glob to regex conversion for * and **
-      const regexStr = matcher.value
-        .replace(/\./g, '\\.')
-        .replace(/\*\*/g, '.*')
-        .replace(/(?<!\.)\*/g, '[^/]*');
-      return new RegExp(`^${regexStr}$`).test(String(value));
+      // Normalize Windows separators so globs can always use `/`.
+      const candidate = String(value).split('\\').join('/');
+      return globToRegExp(matcher.value).test(candidate);
     }
     return false;
   }
 }
 
+/**
+ * Convert a path glob to a regular expression.
+ *
+ * - `**` crosses directory boundaries;
+ * - `*` matches within a single path segment;
+ * - every other regex metacharacter in the glob is treated literally.
+ */
+function globToRegExp(glob: string): RegExp {
+  const escaped = glob
+    .split('**')
+    .map((segment) =>
+      segment
+        .split('*')
+        .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('[^/]*')
+    )
+    .join('.*');
+  return new RegExp(`^${escaped}$`);
+}

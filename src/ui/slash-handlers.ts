@@ -5,6 +5,7 @@ import { defaultMode } from '../agent/mode.js';
 import { SLASH_COMMANDS } from './slash-commands.js';
 import type { TuiMessage } from './types.js';
 import { SessionManager, type StoredSession } from '../agent/sessions.js';
+import { SessionImportService } from '../agent/session-import.js';
 import type { AgentRuntime } from '../agent/runtime.js';
 import type { McpManager } from '../mcp/manager.js';
 import { scaffoldVeniceWorkspace } from '../commands/init.js';
@@ -101,7 +102,17 @@ export async function handleSlashCommand(command: string, args: string, context:
       break;
 
     case 'clear':
+      // /clear is a fresh-session alias (Kimi parity): clearing only the
+      // transcript while the model retains context is misleading and
+      // dangerous (VC-KIMI-023). Use /clear-ui for transcript-only.
+      getRuntime?.()?.resetSession();
       setMessages(() => []);
+      addEvent('Conversation cleared — started a fresh session. Use /clear-ui to clear only the transcript.');
+      break;
+
+    case 'clear-ui':
+      setMessages(() => []);
+      addEvent('Transcript cleared (UI only). The agent conversation context is unchanged.');
       break;
 
     case 'status': {
@@ -231,12 +242,25 @@ export async function handleSlashCommand(command: string, args: string, context:
       const current = runtime.getMode().operatingMode;
       if (arg === 'on' || (!arg && current !== 'plan')) {
         runtime.setMode({ operatingMode: 'plan' });
-        addEvent('Plan mode enabled. Tools are read-only.');
+        addEvent('Plan mode enabled. Tools are read-only; the plan artifact is the only file write allowed.');
       } else if (arg === 'off' || (!arg && current === 'plan')) {
         runtime.setMode({ operatingMode: 'agent' });
         addEvent('Plan mode disabled. Agent may now execute writes and shell.');
+      } else if (arg === 'view') {
+        const plan = runtime.getState().plan;
+        if (!plan) {
+          addEvent('No plan has been written yet. Ask the agent to draft a plan, or use /plan on and describe the task.');
+        } else {
+          const steps = plan.steps.length
+            ? '\n' + plan.steps.map((s) => `${s.id}. ${s.text}`).join('\n')
+            : '';
+          addEvent(`Plan (${plan.filePath}):\n${plan.summary || '(no summary)'}${steps}`);
+        }
+      } else if (arg === 'clear') {
+        runtime.clearPlan();
+        addEvent('Plan cleared.');
       } else {
-        addEvent(`Plan mode is ${current}. Use /plan on or /plan off.`);
+        addEvent('Plan mode controls: /plan on, /plan off, /plan view, /plan clear.');
       }
       break;
     }
@@ -308,7 +332,10 @@ export async function handleSlashCommand(command: string, args: string, context:
           break;
         }
         const next = requested as ApprovalMode;
-        getRuntime?.()?.getPermissionManager().setMode(next);
+        // Route through the single runtime-owned write path so the live
+        // PermissionManager, persisted mode, and UI stay in lockstep
+        // (VC-KIMI-024). The mode_changed event updates the UI.
+        getRuntime?.()?.setPermissionMode(next);
         setApprovalMode?.(next);
         addEvent(`Approval mode changed to ${next} for this session.`);
         break;
@@ -386,10 +413,16 @@ export async function handleSlashCommand(command: string, args: string, context:
         addEvent('No active runtime.');
         break;
       }
-      const forked = runtime.forkSession();
-      addEvent(`Forked session: ${forked.sessionId}`);
-      if (resumeSession) {
-        await resumeSession(forked.sessionId);
+      try {
+        // forkSession persists the fork before returning so an immediate
+        // resume cannot fail (VC-KIMI-010).
+        const forkedId = await runtime.forkSession();
+        addEvent(`Forked session: ${forkedId}`);
+        if (resumeSession) {
+          await resumeSession(forkedId);
+        }
+      } catch (error) {
+        addEvent(`Fork failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       break;
     }
@@ -446,15 +479,13 @@ export async function handleSlashCommand(command: string, args: string, context:
         break;
       }
       try {
-        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as StoredSession;
-        if (!data.state || typeof data.state !== 'object') {
-          addEvent('Invalid session export file.');
-          break;
-        }
+        // Import must persist the session before it can be resumed
+        // (VC-KIMI-011) — the shared service handles both.
+        const result = new SessionImportService().importFile(filePath);
+        addEvent(`Imported session ${result.sessionId}${result.importedAs === 'forked' ? ' (forked)' : ''}`);
         if (resumeSession) {
-          await resumeSession(data.state.sessionId);
+          await resumeSession(result.sessionId);
         }
-        addEvent(`Imported session from ${filePath}`);
       } catch (error) {
         addEvent(`Import failed: ${error instanceof Error ? error.message : String(error)}`);
       }

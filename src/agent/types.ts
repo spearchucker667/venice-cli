@@ -79,6 +79,19 @@ export interface SubagentResult {
   changedFiles?: string[];
 }
 
+export interface PlanStep {
+  id: string;
+  text: string;
+}
+
+export interface PlanArtifact {
+  summary: string;
+  steps: PlanStep[];
+  /** Absolute path of the plan file (defaults to <workspace>/PLAN.md). */
+  filePath: string;
+  updatedAt: string;
+}
+
 export interface AgentState {
   sessionId: string;
   workspaceRoot: string;
@@ -108,6 +121,8 @@ export interface AgentState {
   skillSummaries: SkillSummary[];
   activeSkills: string[];
   subagentReports?: SubagentResult[];
+  /** Current plan artifact (plan mode). Persisted with the session. */
+  plan?: PlanArtifact;
   lastValidation?: {
     commands: ValidationResult[];
     overallSuccess: boolean;
