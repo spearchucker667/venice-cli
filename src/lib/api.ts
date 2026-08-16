@@ -4,7 +4,7 @@
  * Handles all API communication with retry logic and error handling.
  */
 
-import { requireApiKey, trackUsage } from './config.js';
+import { requireApiKey, trackUsage, getApiKey, getSignInWithX } from './config.js';
 import { startSpinner, stopSpinner } from './output.js';
 import { getVersion } from './version.js';
 import { Readable } from 'stream';
@@ -107,7 +107,18 @@ function getHeaders(
     headers['Content-Type'] = contentType;
   }
   if (authenticated) {
-    headers.Authorization = `Bearer ${requireApiKey()}`;
+    // Priority: 1. API Key, 2. x402 Wallet Auth
+    const apiKey = getApiKey();
+    const x402 = getSignInWithX();
+    
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    } else if (x402) {
+      headers['X-Sign-In-With-X'] = x402;
+    } else {
+      // Trigger the throw for missing auth
+      requireApiKey();
+    }
   }
   return headers;
 }
@@ -358,6 +369,22 @@ export interface ChatCompletionRequestOptions {
   prompt_cache_key?: string;
   prompt_cache_retention?: PromptCacheRetention;
   showSpinner?: boolean;
+  parallel_tool_calls?: boolean;
+  max_completion_tokens?: number;
+  max_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  min_p?: number;
+  seed?: number;
+  logprobs?: boolean;
+  top_logprobs?: number;
+  frequency_penalty?: number;
+  presence_penalty?: number;
+  repetition_penalty?: number;
+  stop?: string | string[];
+  stop_token_ids?: number[];
+  n?: number;
 }
 
 export function buildChatCompletionBody(
@@ -380,24 +407,18 @@ export function buildChatCompletionBody(
     body.tool_choice = options.tool_choice || 'auto';
   }
 
-  if (options.venice_parameters) {
-    body.venice_parameters = options.venice_parameters;
-  }
+  const optionalFields: (keyof ChatCompletionRequestOptions)[] = [
+    'venice_parameters', 'response_format', 'reasoning_effort', 
+    'prompt_cache_key', 'prompt_cache_retention', 'parallel_tool_calls',
+    'max_completion_tokens', 'max_tokens', 'temperature', 'top_p', 'top_k', 
+    'min_p', 'seed', 'logprobs', 'top_logprobs', 'frequency_penalty', 
+    'presence_penalty', 'repetition_penalty', 'stop', 'stop_token_ids', 'n'
+  ];
 
-  if (options.response_format) {
-    body.response_format = options.response_format;
-  }
-
-  if (options.reasoning_effort) {
-    body.reasoning_effort = options.reasoning_effort;
-  }
-
-  if (options.prompt_cache_key) {
-    body.prompt_cache_key = options.prompt_cache_key;
-  }
-
-  if (options.prompt_cache_retention) {
-    body.prompt_cache_retention = options.prompt_cache_retention;
+  for (const field of optionalFields) {
+    if (options[field] !== undefined) {
+      body[field] = options[field];
+    }
   }
 
   return body;
@@ -1165,12 +1186,18 @@ export async function generateEmbeddings(
   input: string | string[],
   options: {
     model?: string;
+    dimensions?: number;
+    encoding_format?: 'float' | 'base64';
   } = {}
 ): Promise<{ embedding: number[]; index: number }[]> {
-  const body = {
-    model: options.model || 'text-embedding-ada-002',
+  const model = options.model || 'text-embedding-bge-m3';
+  const body: Record<string, unknown> = {
+    model,
     input: Array.isArray(input) ? input : [input],
   };
+
+  if (options.dimensions) body.dimensions = options.dimensions;
+  if (options.encoding_format) body.encoding_format = options.encoding_format;
 
   const response = await apiRequest<{
     data: Array<{ embedding: number[]; index: number }>;
@@ -1182,7 +1209,7 @@ export async function generateEmbeddings(
 
   trackUsage({
     command: 'embeddings',
-    model: options.model || 'text-embedding-ada-002',
+    model,
   });
 
   return response.data;
@@ -2161,6 +2188,14 @@ export type JsonRpcResponse = {
   result?: unknown;
   error?: JsonRpcErrorObject;
 };
+
+export async function listModelCompatibilityMappings(): Promise<Record<string, string>> {
+  const data = await apiRequest<Record<string, string>>('/models/compatibility_mapping', {
+    method: 'GET',
+    spinnerText: 'Fetching model compatibility mappings...',
+  });
+  return data;
+}
 
 export type CryptoRpcResult = {
   body: JsonRpcResponse | JsonRpcResponse[];

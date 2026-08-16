@@ -119,14 +119,23 @@ export function requireApiKey(): string {
   const key = getApiKey();
   if (!key) {
     throw new Error(
-      'No API key found.\n\n' +
-      'Set your API key using one of these methods:\n' +
+      'No API key or wallet token found.\n\n' +
+      'Set your authentication using one of these methods:\n' +
       '  1. venice config set api_key\n' +
-      '  2. export VENICE_API_KEY=<your-key>\n\n' +
+      '  2. venice config set signInWithX\n' +
+      '  3. export VENICE_API_KEY=<your-key>\n\n' +
       'Get your API key at: https://venice.ai/settings/api'
     );
   }
   return key;
+}
+
+export function getSignInWithX(): string | undefined {
+  const envKey = process.env.X_SIGN_IN_WITH_X;
+  if (envKey) return envKey;
+  
+  const config = loadConfig();
+  return config.signInWithX;
 }
 
 export function getDefaultModel(): string {

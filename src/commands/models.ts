@@ -3,7 +3,7 @@
  */
 
 import { Command } from 'commander';
-import { listModels, listModelTraits } from '../lib/api.js';
+import { listModels, listModelTraits, listModelCompatibilityMappings } from '../lib/api.js';
 import {
   formatError,
   getChalk,
@@ -18,6 +18,9 @@ export function registerModelsCommand(program: Command): void {
     .option('-t, --type <type>', 'Filter by type (all|text|image|tts|asr|music|embedding|video|upscale|inpaint)')
     .option('-s, --search <query>', 'Search models by name')
     .option('--privacy', 'Show only privacy-preserving models')
+    .option('-d, --details', 'Show detailed model specs and capabilities')
+    .option('-c, --capability <cap>', 'Filter by capability (e.g., vision, webSearch, optimizedForCode, logProbs)')
+    .option('--sort <field>', 'Sort models by field (id|context)', 'id')
     .option('-f, --format <format>', 'Output format (pretty|json)')
     .action(async (options) => {
       const format = detectOutputFormat(options.format);
@@ -51,8 +54,28 @@ export function registerModelsCommand(program: Command): void {
           models = models.filter((m: Model) => isPrivacyPreserving(m));
         }
 
-        // Sort by id
-        models.sort((a: Model, b: Model) => (a.id || '').localeCompare(b.id || ''));
+        // Filter by capability
+        if (options.capability) {
+          const cap = String(options.capability);
+          models = models.filter((m: Model) => {
+            const caps = m.model_spec?.capabilities as Record<string, any> || {};
+            // check case-insensitively or exactly
+            const found = Object.keys(caps).find(k => k.toLowerCase() === cap.toLowerCase() || k.toLowerCase() === `supports${cap.toLowerCase()}`);
+            return found ? caps[found] === true : false;
+          });
+        }
+
+        // Sort
+        if (options.sort === 'context') {
+          models.sort((a: Model, b: Model) => {
+            const ctxA = a.model_spec?.availableContextTokens || 0;
+            const ctxB = b.model_spec?.availableContextTokens || 0;
+            return ctxB - ctxA; // Descending context window
+          });
+        } else {
+          // Sort by id (default)
+          models.sort((a: Model, b: Model) => (a.id || '').localeCompare(b.id || ''));
+        }
 
         if (format === 'json') {
           console.log(JSON.stringify(models, null, 2));
@@ -76,8 +99,29 @@ export function registerModelsCommand(program: Command): void {
           for (const model of typeModels) {
             const privacy = isPrivacyPreserving(model) ? c.green('🔒') : c.dim('📊');
             console.log(`  ${privacy} ${c.cyan(model.id)}`);
-            
-            if (model.model_spec?.description) {
+            if (options.details) {
+              const spec = model.model_spec || {};
+              const caps = spec.capabilities as Record<string, any> || {};
+              const indent = '     ';
+              
+              if (spec.description) {
+                const maxWidth = Math.max(60, (process.stdout.columns || 80) - indent.length - 2);
+                for (const line of wrapText(spec.description, maxWidth)) {
+                  console.log(`${indent}${c.dim(line)}`);
+                }
+              }
+              
+              const details = [];
+              if (spec.availableContextTokens) details.push(`Context: ${spec.availableContextTokens}`);
+              if (caps.supportsVision) details.push('Vision: Yes');
+              if (caps.supportsWebSearch) details.push('WebSearch: Yes');
+              if (caps.optimizedForCode) details.push('Code: Yes');
+              if (caps.supportsFunctionCalling) details.push('Tools: Yes');
+              
+              if (details.length > 0) {
+                console.log(`${indent}${c.green('↳')} ${c.dim(details.join(' • '))}`);
+              }
+            } else if (model.model_spec?.description) {
               const desc = model.model_spec.description;
               const indent = '     ';
               const maxWidth = Math.max(60, (process.stdout.columns || 80) - indent.length - 2);
@@ -130,6 +174,60 @@ export function registerModelsCommand(program: Command): void {
         process.exit(1);
       }
     });
+
+  modelsCmd
+    .command('mappings')
+    .description('List compatibility mappings for models')
+    .option('-t, --type <type>', 'Filter mappings by model type (e.g. text)')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (options) => {
+      const format = detectOutputFormat(options.format);
+      const c = getChalk();
+      try {
+        const mappings = await listModelCompatibilityMappings();
+        
+        let models = await listModels();
+        if (options.type) {
+          const requestedType = String(options.type).toLowerCase().trim();
+          if (requestedType !== 'all') {
+            models = models.filter((m: Model) => m.type?.toLowerCase() === requestedType);
+          }
+        }
+        const validModelIds = new Set(models.map(m => m.id));
+
+        const filteredMappings = Object.entries(mappings).filter(([_alias, targetId]) => {
+          if (options.type && options.type.toLowerCase().trim() !== 'all') {
+            return validModelIds.has(targetId);
+          }
+          return true;
+        });
+
+        if (format === 'json') {
+          console.log(JSON.stringify(Object.fromEntries(filteredMappings), null, 2));
+          return;
+        }
+
+        if (filteredMappings.length === 0) {
+          console.log(c.yellow('No mappings found matching your criteria.'));
+          return;
+        }
+
+        console.log(c.bold(`\n🔗 Model Compatibility Mappings (${filteredMappings.length})\n`));
+        for (const [alias, targetId] of filteredMappings) {
+          console.log(`  ${c.cyan(alias)} → ${c.green(targetId)}`);
+        }
+        console.log('');
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+
+  program.on('command:models', () => {
+    if (!process.argv.slice(2).length) {
+      modelsCmd.outputHelp();
+    }
+  });
 }
 
 function groupModelsByType(models: Model[]): Record<string, Model[]> {

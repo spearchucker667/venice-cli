@@ -4,6 +4,7 @@
 
 export interface VeniceConfig {
   api_key?: string;
+  signInWithX?: string;
   default_model?: string;
   default_image_model?: string;
   default_voice?: string;
@@ -215,6 +216,9 @@ export interface ModelCapabilities {
   supportsReasoning?: boolean;
   supportsReasoningEffort?: boolean;
   supportsXSearch?: boolean;
+  supportsWebSearch?: boolean;
+  supportsLogProbs?: boolean;
+  optimizedForCode?: boolean;
   supportsVision?: boolean;
   supportsMultipleImages?: boolean;
   maxImages?: number;
@@ -231,6 +235,9 @@ export interface Model {
     maxCompletionTokens?: number;
     privacy?: string;
     description?: string;
+    traits?: (string | { name: string; description?: string })[];
+    pricing?: any;
+    constraints?: any;
     capabilities?: ModelCapabilities;
     voices?: string[];
     default_voice?: string;

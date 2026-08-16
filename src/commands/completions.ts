@@ -14,19 +14,19 @@ export function registerCompletionsCommand(program: Command): void {
 
       switch (shell.toLowerCase()) {
         case 'bash':
-          console.log(generateBashCompletion());
+          console.log(generateBashCompletion(program));
           console.error(c.dim('\n# Add to ~/.bashrc:'));
           console.error(c.dim('# eval "$(venice completions bash)"'));
           break;
 
         case 'zsh':
-          console.log(generateZshCompletion());
+          console.log(generateZshCompletion(program));
           console.error(c.dim('\n# Add to ~/.zshrc:'));
           console.error(c.dim('# eval "$(venice completions zsh)"'));
           break;
 
         case 'fish':
-          console.log(generateFishCompletion());
+          console.log(generateFishCompletion(program));
           console.error(c.dim('\n# Save to ~/.config/fish/completions/venice.fish'));
           break;
 
@@ -36,15 +36,91 @@ export function registerCompletionsCommand(program: Command): void {
           process.exit(1);
       }
     });
+
+  program
+    .command('__complete')
+    .description('Internal dynamic completion helper')
+    .argument('<type>', 'Type of completion to generate')
+    .option('--type <modelType>', 'Model type filter')
+    .action(async (type, options) => {
+      if (type === 'models') {
+        const models = await getCachedModels(options.type);
+        console.log(models.join(' '));
+      }
+    });
 }
 
-function generateBashCompletion(): string {
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { listModels, listModelCompatibilityMappings } from '../lib/api.js';
+
+async function getCachedModels(modelType?: string): Promise<string[]> {
+  const cacheDir = path.join(os.homedir(), '.venice', 'cache');
+  const cacheFile = path.join(cacheDir, 'models.json');
+  
+  if (!fs.existsSync(cacheDir)) {
+    fs.mkdirSync(cacheDir, { recursive: true });
+  }
+
+  let cachedData: any = null;
+  const now = Date.now();
+  const maxAgeMs = 1000 * 60 * 60 * 24; // 24 hours
+
+  if (fs.existsSync(cacheFile)) {
+    try {
+      const content = fs.readFileSync(cacheFile, 'utf-8');
+      cachedData = JSON.parse(content);
+    } catch {
+      // ignore
+    }
+  }
+
+  // If we have a valid cache, return it immediately, but trigger an async update if we can
+  if (cachedData && (now - cachedData.timestamp < maxAgeMs)) {
+    // Return cached list
+    return filterModels(cachedData.models, modelType);
+  }
+
+  // Otherwise we must fetch synchronously (or use a hardcoded fallback if we wanted to be perfectly non-blocking,
+  // but let's fetch once to prime the cache)
+  try {
+    const [models, mappings] = await Promise.all([
+      listModels(),
+      listModelCompatibilityMappings().catch(() => ({}))
+    ]);
+    
+    const combined = [
+      ...models.map(m => ({ id: m.id, type: m.type })),
+      ...Object.keys(mappings).map(alias => ({ id: alias, type: 'alias' }))
+    ];
+
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      timestamp: now,
+      models: combined
+    }));
+
+    return filterModels(combined, modelType);
+  } catch {
+    // If offline and no cache, fallback
+    return ['kimi-k2-5', 'flux-2-pro'];
+  }
+}
+
+function filterModels(models: Array<{id: string, type?: string}>, typeFilter?: string): string[] {
+  if (!typeFilter || typeFilter === 'all') return models.map(m => m.id);
+  return models.filter(m => !m.type || m.type === typeFilter || m.type === 'alias').map(m => m.id);
+}
+
+function generateBashCompletion(program: Command): string {
+  const topLevelCommands = program.commands.map(cmd => cmd.name()).join(' ');
+
   return `# Venice CLI bash completion
 _venice_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="chat search scrape parse image image-edit image-multi-edit image-bg-remove image-styles tts transcribe models embeddings upscale history usage billing keys config characters voices voice video music rpc completions"
+    local commands="${topLevelCommands}"
     local config_cmds="show set get unset path init"
     local history_cmds="list show clear export"
     local video_cmds="generate quote status retrieve complete transcribe upscale models"
@@ -101,9 +177,15 @@ _venice_completion() {
             ;;
         -m|--model)
             if [[ "\${words[1]}" == "image-edit" || "\${words[1]}" == "image-multi-edit" ]]; then
-                COMPREPLY=( \$(compgen -W "\${edit_models}" -- "\${cur}") )
+                COMPREPLY=( \$(compgen -W "\$(venice __complete models --type inpaint 2>/dev/null)" -- "\${cur}") )
+            elif [[ "\${words[1]}" == "image" || "\${words[1]}" == "image-bg-remove" ]]; then
+                COMPREPLY=( \$(compgen -W "\$(venice __complete models --type image 2>/dev/null)" -- "\${cur}") )
+            elif [[ "\${words[1]}" == "video" ]]; then
+                COMPREPLY=( \$(compgen -W "\$(venice __complete models --type video 2>/dev/null)" -- "\${cur}") )
+            elif [[ "\${words[1]}" == "music" ]]; then
+                COMPREPLY=( \$(compgen -W "\$(venice __complete models --type music 2>/dev/null)" -- "\${cur}") )
             else
-                COMPREPLY=( \$(compgen -W "\${models} \${image_models} \${video_models} \${music_models}" -- "\${cur}") )
+                COMPREPLY=( \$(compgen -W "\$(venice __complete models --type text 2>/dev/null)" -- "\${cur}") )
             fi
             return 0
             ;;
@@ -273,76 +355,33 @@ _venice_completion() {
 complete -F _venice_completion venice`;
 }
 
-function generateZshCompletion(): string {
+function generateZshCompletion(program: Command): string {
+  const topLevelCommands = program.commands.map(cmd => cmd.name()).join(' ');
+
   return `#compdef venice
 
-# Venice CLI zsh completion
 _venice() {
+    local line state
+    
     local -a commands
     commands=(
-        'chat:Chat with an AI model'
-        'search:Web search with optional AI synthesis'
-        'scrape:Scrape a public page to Markdown'
-        'parse:Extract text from a document'
-        'image:Generate an image'
-        'image-edit:Edit a local image'
-        'image-multi-edit:Edit layered local images'
-        'image-bg-remove:Remove an image background'
-        'image-styles:List image style presets'
-        'upscale:Upscale an image'
-        'tts:Convert text to speech'
-        'transcribe:Transcribe audio to text'
-        'video:AI video generation'
-        'music:Generate music and sound effects'
-        'models:List available models'
-        'embeddings:Generate text embeddings'
-        'history:View conversation history'
-        'usage:Show usage statistics'
-        'billing:Show account billing and billed usage'
-        'keys:Manage API keys'
-        'config:Manage configuration'
-        'characters:List characters from the Venice API catalog'
-        'voices:List available TTS voices'
-        'rpc:Proxy JSON-RPC requests to blockchain nodes'
-        'voice:Create and manage cloned voices'
-        'completions:Generate shell completions'
+        ${topLevelCommands.split(' ').map(c => `'${c}'`).join('\n        ')}
     )
 
-    local -a models=(
-        'kimi-k2-5' 'zai-org-glm-4.7' 'zai-org-glm-4.6' 'claude-opus-4-6' 'claude-opus-45' 'claude-sonnet-4-6' 'openai-gpt-53-codex' 'minimax-m25'
-        'llama-3.2-3b'
-        'mistral-31-24b'
-        'qwen-2.5-coder'
-        'nous-hermes-3'
-        'deepseek-v3.2'
-        'dolphin-2.9.2'
-    )
+    local -a models
+    models=($(venice __complete models --type text 2>/dev/null))
 
-    local -a image_models=(
-        'flux-2-pro' 'flux-2-max' 'seedream-v5-lite' 'recraft-v4' 'grok-imagine' 'nano-banana-pro'
-        'flux-1-dev'
-        'flux-1-schnell'
-        'akash-sdxl'
-    )
+    local -a image_models
+    image_models=($(venice __complete models --type image 2>/dev/null))
 
-    local -a edit_models=(
-        'qwen-edit' 'firered-image-edit' 'qwen-edit-uncensored'
-        'grok-imagine-edit' 'grok-imagine-quality-edit'
-        'qwen-image-2-edit' 'qwen-image-2-pro-edit' 'wan-2-7-pro-edit'
-        'flux-2-max-edit' 'gpt-image-2-edit' 'gpt-image-1-5-edit'
-        'nano-banana-2-edit' 'nano-banana-pro-edit'
-        'seedream-v5-lite-edit' 'seedream-v5-pro-edit' 'seedream-v4-edit'
-        'qwen-image-3-edit' 'qwen-image-3-pro-edit'
-    )
+    local -a edit_models
+    edit_models=($(venice __complete models --type inpaint 2>/dev/null))
 
-    local -a video_models=(
-        'wan-2.6-text-to-video' 'wan-2.6-image-to-video' 'wan-2.6-flash-image-to-video'
-        'veo3-fast-text-to-video' 'veo3-fast-image-to-video' 'veo3.1-fast-text-to-video'
-        'sora2-text-to-video' 'sora2-image-to-video'
-        'kling-v3-pro-text-to-video' 'kling-v3-pro-image-to-video'
-        'grok-imagine-text-to-video' 'grok-imagine-image-to-video'
-        'ltx2-fast-text-to-video' 'ltx2-fast-image-to-video'
-    )
+    local -a video_models
+    video_models=($(venice __complete models --type video 2>/dev/null))
+
+    local -a music_models
+    music_models=($(venice __complete models --type music 2>/dev/null))
 
     local -a asr_models=(
         'nvidia/parakeet-tdt-0.6b-v3:Parakeet ASR (fast, default)'
@@ -615,11 +654,12 @@ _venice() {
 _venice`;
 }
 
-function generateFishCompletion(): string {
+function generateFishCompletion(program: Command): string {
+  const topLevelCommands = program.commands.map(cmd => cmd.name()).join(' ');
+
   return `# Venice CLI fish completion
 
-# Main commands
-set -l commands chat search scrape parse image image-edit image-multi-edit image-bg-remove image-styles upscale tts transcribe video music models embeddings history usage billing keys config characters voices voice rpc completions
+set -l commands ${topLevelCommands}
 
 # Disable file completions by default
 complete -c venice -f
@@ -653,11 +693,11 @@ complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a rpc -d "Crypto JSON-RPC"
 
 # Models
-set -l models kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25
-set -l image_models flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro
-set -l edit_models qwen-edit firered-image-edit qwen-edit-uncensored grok-imagine-edit grok-imagine-quality-edit qwen-image-2-edit qwen-image-2-pro-edit wan-2-7-pro-edit flux-2-max-edit gpt-image-2-edit gpt-image-1-5-edit nano-banana-2-edit nano-banana-pro-edit seedream-v5-lite-edit seedream-v5-pro-edit seedream-v4-edit qwen-image-3-edit qwen-image-3-pro-edit
-set -l video_models wan-2.6-text-to-video wan-2.6-image-to-video veo3-fast-text-to-video sora2-text-to-video kling-v3-pro-text-to-video
-set -l music_models elevenlabs-music elevenlabs-sound-effects-v2
+set -l models (venice __complete models --type text 2>/dev/null)
+set -l image_models (venice __complete models --type image 2>/dev/null)
+set -l edit_models (venice __complete models --type inpaint 2>/dev/null)
+set -l video_models (venice __complete models --type video 2>/dev/null)
+set -l music_models (venice __complete models --type music 2>/dev/null)
 set -l asr_models nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3
 set -l voices af_sky af_bella af_nicole am_adam am_michael bf_emma bm_george
 set -l tools calculator weather datetime random base64 hash

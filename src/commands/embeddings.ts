@@ -17,7 +17,10 @@ export function registerEmbeddingsCommand(program: Command): void {
     .command('embeddings [text...]')
     .alias('embed')
     .description('Generate text embeddings')
-    .option('-m, --model <model>', 'Model to use', 'text-embedding-ada-002')
+    .option('-m, --model <model>', 'Model to use', 'text-embedding-bge-m3')
+    .option('-i, --input <text...>', 'Explicit inputs (preserves multiple inputs)')
+    .option('-d, --dimensions <number>', 'Number of dimensions')
+    .option('-e, --encoding-format <format>', 'Encoding format (float|base64)')
     .option('-o, --output <path>', 'Save embeddings to JSON file')
     .option('-f, --format <format>', 'Output format (pretty|json)')
     .option('--file <path>', 'Read text from file instead')
@@ -34,6 +37,8 @@ export function registerEmbeddingsCommand(program: Command): void {
           process.exit(1);
         }
         input = fs.readFileSync(options.file, 'utf-8').trim();
+      } else if (options.input && options.input.length > 0) {
+        input = options.input;
       } else if (textParts.length === 0 && !process.stdin.isTTY) {
         // Read from stdin
         input = await readStdin();
@@ -41,7 +46,7 @@ export function registerEmbeddingsCommand(program: Command): void {
         input = textParts.join(' ');
       }
 
-      if (!input) {
+      if (!input || (Array.isArray(input) && input.length === 0)) {
         console.error(formatError('No text provided. Usage: venice embeddings "Your text"'));
         process.exit(1);
       }
@@ -49,6 +54,8 @@ export function registerEmbeddingsCommand(program: Command): void {
       try {
         const result = await generateEmbeddings(input, {
           model: options.model,
+          dimensions: options.dimensions ? parseInt(options.dimensions, 10) : undefined,
+          encoding_format: options.encodingFormat as 'float' | 'base64' | undefined,
         });
 
         if (options.output) {

@@ -12,6 +12,14 @@ export interface ModelProfile {
   supportsVision?: boolean;
   supportsE2EE?: boolean;
   supportsTeeAttestation?: boolean;
+  optimizedForCode?: boolean;
+  supportsLogProbs?: boolean;
+  supportsMultipleImages?: boolean;
+  supportsResponseSchema?: boolean;
+  supportsVideoInput?: boolean;
+  supportsWebSearch?: boolean;
+  supportsXSearch?: boolean;
+  traits?: (string | { name: string; description?: string })[];
 }
 
 export function profileModel(model: Model): ModelProfile {
@@ -27,6 +35,14 @@ export function profileModel(model: Model): ModelProfile {
     supportsVision: capabilities?.supportsVision,
     supportsE2EE: capabilities?.supportsE2EE,
     supportsTeeAttestation: capabilities?.supportsTeeAttestation,
+    optimizedForCode: capabilities?.optimizedForCode,
+    supportsLogProbs: capabilities?.supportsLogProbs,
+    supportsMultipleImages: capabilities?.supportsMultipleImages,
+    supportsResponseSchema: capabilities?.supportsResponseSchema,
+    supportsVideoInput: capabilities?.supportsVideoInput,
+    supportsWebSearch: capabilities?.supportsWebSearch,
+    supportsXSearch: capabilities?.supportsXSearch,
+    traits: model.model_spec?.traits,
   };
 }
 
