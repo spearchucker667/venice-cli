@@ -18,6 +18,8 @@ export interface TuiState {
   model: string;
   agentMode: AgentMode;
   modelProfile?: ModelProfile;
+  inputMode?: 'agent' | 'shell';
+  operatingMode?: 'agent' | 'plan';
   workspaceRoot: string;
   approvalMode: string;
   contextTokens: number;

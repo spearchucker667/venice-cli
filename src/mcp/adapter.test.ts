@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { createMcpToolAdapter } from './adapter.js';
 import type { ToolContext } from '../tools/types.js';
+import { defaultMode } from '../agent/mode.js';
 
 describe('createMcpToolAdapter', () => {
   it('namespaces tool name and forwards call', async () => {
@@ -10,7 +11,7 @@ describe('createMcpToolAdapter', () => {
       workspaceRoot: '/tmp',
       sessionId: 's',
       objective: 'o',
-      runtimeState: { sessionId: 's', workspaceRoot: '/tmp', model: 'm', objective: 'o', status: 'idle', messages: [], todos: [], relevantFiles: [], changedFiles: [], toolHistory: [], skillSummaries: [], activeSkills: [] },
+      runtimeState: { sessionId: 's', workspaceRoot: '/tmp', workspace: { primaryRoot: '/tmp', additionalRoots: [] }, model: 'm', objective: 'o', status: 'idle', mode: defaultMode(), messages: [], todos: [], relevantFiles: [], changedFiles: [], toolHistory: [], skillSummaries: [], activeSkills: [] },
     };
     const adapter = createMcpToolAdapter('memory', {
       name: 'add',
@@ -23,6 +24,7 @@ describe('createMcpToolAdapter', () => {
 
     assert.strictEqual(adapter.name, 'mcp:memory:add');
     assert.strictEqual(adapter.risk, 'external_side_effect');
+    assert.strictEqual(adapter.planSafe, false);
     const result = await adapter.execute({ key: 'x' }, context);
     assert.strictEqual(result.ok, true);
     assert.deepStrictEqual(calls, [{ name: 'add', args: { key: 'x' } }]);
@@ -33,7 +35,7 @@ describe('createMcpToolAdapter', () => {
       workspaceRoot: '/tmp',
       sessionId: 's',
       objective: 'o',
-      runtimeState: { sessionId: 's', workspaceRoot: '/tmp', model: 'm', objective: 'o', status: 'idle', messages: [], todos: [], relevantFiles: [], changedFiles: [], toolHistory: [], skillSummaries: [], activeSkills: [] },
+      runtimeState: { sessionId: 's', workspaceRoot: '/tmp', workspace: { primaryRoot: '/tmp', additionalRoots: [] }, model: 'm', objective: 'o', status: 'idle', mode: defaultMode(), messages: [], todos: [], relevantFiles: [], changedFiles: [], toolHistory: [], skillSummaries: [], activeSkills: [] },
     };
     const adapter = createMcpToolAdapter('memory', { name: 'fail' }, async () => {
       throw new Error('boom');

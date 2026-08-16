@@ -9,9 +9,11 @@ const makeState = (todos: AgentState['todos']): Readonly<AgentState> =>
   ({
     sessionId: 's1',
     workspaceRoot: '/tmp',
+    workspace: { primaryRoot: '/tmp', additionalRoots: [] },
     model: 'test-model',
     objective: 'test',
     status: 'idle',
+    mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
     messages: [],
     todos,
     relevantFiles: [],

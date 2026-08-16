@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { parseSlashCommand, SLASH_COMMANDS } from './slash-commands.js';
+import { parseSlashCommand, SLASH_COMMANDS, findSlashCommands } from './slash-commands.js';
 
 describe('parseSlashCommand', () => {
   it('parses /quit', () => {
@@ -23,8 +23,24 @@ describe('parseSlashCommand', () => {
     assert.strictEqual(result, undefined);
   });
 
-  it('includes help in the command list', () => {
-    assert.ok(SLASH_COMMANDS.includes('help'));
-    assert.ok(SLASH_COMMANDS.includes('quit'));
+  it('includes help and quit in the command list', () => {
+    assert.ok(SLASH_COMMANDS.some((cmd) => cmd.name === 'help'));
+    assert.ok(SLASH_COMMANDS.some((cmd) => cmd.name === 'quit'));
+  });
+
+  it('lists all slash commands with descriptions and availability', () => {
+    assert.ok(SLASH_COMMANDS.length > 10);
+    for (const cmd of SLASH_COMMANDS) {
+      assert.ok(cmd.name.length > 0);
+      assert.ok(cmd.description.length > 0);
+      assert.ok(cmd.availability === 'always' || cmd.availability === 'idle');
+    }
+  });
+
+  it('finds slash commands by name, alias, or description', () => {
+    assert.ok(findSlashCommands('/help').some((c) => c.name === 'help'));
+    assert.ok(findSlashCommands('/quit').some((c) => c.name === 'quit'));
+    assert.ok(findSlashCommands('/toggle').some((c) => c.name.includes('plan')));
+    assert.strictEqual(findSlashCommands('help').length, 0);
   });
 });

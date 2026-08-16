@@ -13,9 +13,11 @@ const context = (workspaceRoot: string) => ({
   runtimeState: {
     sessionId: 's1',
     workspaceRoot,
+    workspace: { primaryRoot: workspaceRoot, additionalRoots: [] },
     model: 'test',
     objective: 'test',
     status: 'idle',
+    mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
     messages: [],
     todos: [],
     relevantFiles: [],

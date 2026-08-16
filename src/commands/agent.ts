@@ -10,6 +10,8 @@ import { EventBus } from '../agent/events.js';
 import { AgentRenderer } from '../ui/renderer.js';
 import { loadMcpConfig, getWorkspaceMcpConfigPath } from '../mcp/config.js';
 import { McpManager } from '../mcp/manager.js';
+import { defaultMode } from '../agent/mode.js';
+import { SessionManager } from '../agent/sessions.js';
 
 export function registerAgentCommand(program: Command): Command {
   const agent = program
@@ -18,9 +20,13 @@ export function registerAgentCommand(program: Command): Command {
     .option('-p, --prompt <prompt>', 'Single noninteractive prompt')
     .option('-m, --model <model>', 'Model to use')
     .option('-a, --approval <mode>', 'Approval mode (suggest|auto-edit|auto|yolo)', 'suggest')
+    .option('--plan', 'Start in plan mode (read-only)', false)
+    .option('--continue', 'Resume the most recent session in this workspace', false)
+    .option('--session [sessionId]', 'Resume a session by id, or open the session picker if no id is given')
     .option('--cwd <cwd>', 'Working directory (defaults to git root or current directory)')
     .option('--max-turns <n>', 'Maximum agent turns', '25')
-    .option('--json', 'Output final result as JSON')
+    .option('--output-format <format>', 'Output format for noninteractive mode (text|stream-json|json)', 'text')
+    .option('--json', 'Output final result as JSON (deprecated: use --output-format json)')
     .option('--interactive', 'Render live progress (default when stdin is a TTY and --json is not used)')
     .option('--no-interactive', 'Force plain output even in a TTY')
     .action(async (options) => {
@@ -39,7 +45,35 @@ export function registerAgentCommand(program: Command): Command {
         process.exit(2);
       }
 
-      const interactive = options.interactive ?? (process.stdin.isTTY && process.stdout.isTTY && !options.json);
+      const interactive = options.interactive ?? (process.stdin.isTTY && process.stdout.isTTY && !options.json && options.outputFormat !== 'stream-json');
+
+      const outputFormat = options.json ? 'json' : options.outputFormat;
+      if (!['text', 'stream-json', 'json'].includes(outputFormat)) {
+        console.error(formatError(`Invalid output format: ${outputFormat}`));
+        process.exit(2);
+      }
+
+      if (options.continue && options.session !== undefined) {
+        console.error(formatError('--continue and --session are mutually exclusive'));
+        process.exit(2);
+      }
+
+      let resumeSessionId: string | undefined;
+      if (options.continue) {
+        const sessions = new SessionManager().list(workspaceRoot);
+        resumeSessionId = sessions[0]?.sessionId;
+        if (!resumeSessionId) {
+          console.error(formatError('No saved session to continue'));
+          process.exit(2);
+        }
+      } else if (options.session === true) {
+        if (!interactive) {
+          console.error(formatError('--session requires an id in noninteractive mode'));
+          process.exit(2);
+        }
+      } else if (typeof options.session === 'string') {
+        resumeSessionId = options.session;
+      }
 
       let objective: string | undefined;
       if (options.prompt) {
@@ -56,21 +90,27 @@ export function registerAgentCommand(program: Command): Command {
       const mcpConfig = loadMcpConfig(undefined, getWorkspaceMcpConfigPath(workspaceRoot));
       const mcpManager = new McpManager(mcpConfig);
 
+      const mode = options.plan
+        ? { ...defaultMode(approvalMode), operatingMode: 'plan' as const }
+        : defaultMode(approvalMode);
+
       if (interactive) {
         const { runTui } = await import('../ui/tui.js');
         await runTui({
           workspaceRoot,
           model: options.model || getDefaultModel(),
           approvalMode,
+          mode,
           maxTurns,
           mcpManager,
           initialObjective: objective?.trim(),
+          resumeSessionId,
         });
         process.exit(0);
       }
 
       const events = new EventBus();
-      const renderer = new AgentRenderer({ eventBus: events, interactive: false, json: !!options.json });
+      const renderer = new AgentRenderer({ eventBus: events, interactive: false, outputFormat });
       renderer.start();
 
       const runtime = new AgentRuntime({
@@ -78,15 +118,27 @@ export function registerAgentCommand(program: Command): Command {
         objective: objective!.trim(),
         model: options.model || getDefaultModel(),
         approvalMode,
+        mode,
         maxTurns,
         eventBus: events,
         mcpManager,
       });
 
+      if (resumeSessionId) {
+        const stored = new SessionManager().load(resumeSessionId, workspaceRoot);
+        if (!stored) {
+          console.error(formatError(`Session not found in this workspace: ${resumeSessionId}`));
+          process.exit(2);
+        }
+        runtime.loadState(stored.state);
+      }
+
       try {
         const result = await runtime.run();
         renderer.stop();
-        if (options.json) {
+        if (outputFormat === 'stream-json') {
+          // session.completed was already emitted by the renderer; no additional stdout
+        } else if (outputFormat === 'json') {
           console.log(JSON.stringify({
             finalMessage: result.finalMessage,
             status: result.state.status,

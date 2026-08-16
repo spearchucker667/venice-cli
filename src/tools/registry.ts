@@ -52,8 +52,11 @@ export class ToolRegistry {
     return this.tools.has(name);
   }
 
-  definitions(): ToolDefinition[] {
-    return Array.from(this.tools.values()).map(toToolDefinition);
+  definitions(operatingMode?: 'agent' | 'plan'): ToolDefinition[] {
+    const tools = operatingMode === 'plan'
+      ? Array.from(this.tools.values()).filter((tool) => tool.planSafe !== false)
+      : Array.from(this.tools.values());
+    return tools.map(toToolDefinition);
   }
 
   async execute(name: string, input: unknown, context: ToolContext): Promise<ToolResult<unknown>> {
@@ -69,37 +72,37 @@ export function createDefaultRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   registry.register(readFileTool);
   registry.register(readManyFilesTool);
-  registry.register(writeFileTool);
-  registry.register(editFileTool);
-  registry.register(applyPatchTool);
+  registry.register({ ...writeFileTool, planSafe: false });
+  registry.register({ ...editFileTool, planSafe: false });
+  registry.register({ ...applyPatchTool, planSafe: false });
   registry.register(listDirectoryTool);
   registry.register(globTool);
   registry.register(grepTool);
   registry.register(findTool);
-  registry.register(shellTool);
+  registry.register({ ...shellTool, planSafe: false });
   registry.register(gitStatusTool);
   registry.register(gitDiffTool);
   registry.register(gitLogTool);
   registry.register(todoReadTool);
-  registry.register(todoWriteTool);
+  registry.register({ ...todoWriteTool, planSafe: false });
   registry.register(askUserTool);
   registry.register(checkpointListTool);
   registry.register(checkpointUndoTool);
   registry.register(checkpointRedoTool);
   registry.register(skillListTool);
   registry.register(skillLoadTool);
-  registry.register(spawnAgentTool);
-  registry.register(runValidationTool);
+  registry.register({ ...spawnAgentTool, planSafe: false });
+  registry.register({ ...runValidationTool, planSafe: false });
   registry.register(webSearchTool);
   registry.register(webScrapeTool);
-  registry.register(generateImageTool);
-  registry.register(editImageTool);
-  registry.register(upscaleImageTool);
-  registry.register(removeBackgroundTool);
-  registry.register(generateVideoTool);
-  registry.register(imageToVideoTool);
-  registry.register(transcribeAudioTool);
-  registry.register(textToSpeechTool);
-  registry.register(generateMusicTool);
+  registry.register({ ...generateImageTool, planSafe: false });
+  registry.register({ ...editImageTool, planSafe: false });
+  registry.register({ ...upscaleImageTool, planSafe: false });
+  registry.register({ ...removeBackgroundTool, planSafe: false });
+  registry.register({ ...generateVideoTool, planSafe: false });
+  registry.register({ ...imageToVideoTool, planSafe: false });
+  registry.register({ ...transcribeAudioTool, planSafe: false });
+  registry.register({ ...textToSpeechTool, planSafe: false });
+  registry.register({ ...generateMusicTool, planSafe: false });
   return registry;
 }

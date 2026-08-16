@@ -18,6 +18,8 @@ import type { ModelResponse } from './model-client.js';
 import { loadInstructions } from './instructions.js';
 import { WorkspaceManager, detectGitRoot } from './workspace.js';
 import { getDefaultModel } from '../lib/config.js';
+import type { RuntimeModeState } from './mode.js';
+import { defaultMode } from './mode.js';
 import { McpManager } from '../mcp/manager.js';
 import { createMcpToolAdapter } from '../mcp/adapter.js';
 import { CheckpointManager } from './checkpoints.js';
@@ -33,6 +35,8 @@ export interface AgentRuntimeOptions {
   objective: string;
   model?: string;
   approvalMode?: 'suggest' | 'auto-edit' | 'auto' | 'yolo';
+  mode?: RuntimeModeState;
+  workspace?: { primaryRoot: string; additionalRoots: string[] };
   maxTurns?: number;
   sessionId?: string;
   autoValidate?: boolean;
@@ -76,10 +80,12 @@ export class AgentRuntime {
     this.state = {
       sessionId: options.sessionId || randomUUID(),
       workspaceRoot: options.workspaceRoot,
+      workspace: options.workspace ?? { primaryRoot: options.workspaceRoot, additionalRoots: [] },
       model: options.model || getDefaultModel(),
       agentMode: 'agent',
       objective: options.objective,
       status: 'idle',
+      mode: options.mode ?? defaultMode(options.approvalMode || 'suggest'),
       messages: [],
       todos: [],
       relevantFiles: [],
@@ -117,11 +123,56 @@ export class AgentRuntime {
   }
 
   getToolDefinitions() {
-    return this.registry.definitions();
+    return this.registry.definitions(this.state.mode.operatingMode);
   }
 
   getPermissionManager(): PermissionManager {
     return this.permissions;
+  }
+
+  getMode(): Readonly<RuntimeModeState> {
+    return this.state.mode;
+  }
+
+  setMode(patch: Partial<RuntimeModeState>): void {
+    this.state.mode = { ...this.state.mode, ...patch };
+    this.emit({
+      type: 'mode_changed',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      mode: this.state.mode,
+    });
+  }
+
+  setTitle(title: string): void {
+    this.state.title = title;
+    this.emit({
+      type: 'title_changed',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      title,
+    });
+  }
+
+  forkSession(): AgentState {
+    const forked: AgentState = {
+      ...this.state,
+      sessionId: randomUUID(),
+      parentSessionId: this.state.sessionId,
+      title: this.state.title ? `${this.state.title} (fork)` : undefined,
+      messages: [...this.state.messages],
+      changedFiles: [...this.state.changedFiles],
+      toolHistory: [...this.state.toolHistory],
+      subagentReports: this.state.subagentReports ? [...this.state.subagentReports] : undefined,
+    };
+    this.emit({
+      type: 'session_forked',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      parentSessionId: this.state.sessionId,
+      newSessionId: forked.sessionId,
+    });
+    return forked;
   }
 
   async reviewChanges(): Promise<SubagentResult> {
@@ -453,7 +504,9 @@ export class AgentRuntime {
       eventId: randomUUID(),
       messageCount: messages.length,
     });
-    const tools = this.state.agentMode === 'chat-only' ? [] : this.registry.definitions();
+    const tools = this.state.agentMode === 'chat-only'
+      ? []
+      : this.registry.definitions(this.state.mode.operatingMode);
     return await this.modelClient.complete(messages, tools);
   }
 

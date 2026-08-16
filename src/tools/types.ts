@@ -27,6 +27,8 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
     required?: string[];
   };
   risk: RiskLevel | ((input: unknown) => RiskLevel);
+  planSafe?: boolean;
+  parallelSafe?: boolean;
   execute(input: TInput, context: ToolContext): Promise<ToolResult<TOutput>>;
 }
 

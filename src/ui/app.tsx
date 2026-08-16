@@ -12,6 +12,7 @@ import { EventBus } from '../agent/events.js';
 import type { McpManager } from '../mcp/manager.js';
 import { PermissionManager } from '../agent/permissions.js';
 import type { ApprovalMode } from '../agent/permissions.js';
+import { defaultMode } from '../agent/mode.js';
 import { shellTool } from '../tools/shell/execute.js';
 import type { ToolContext } from '../tools/types.js';
 import { Composer } from './composer.js';
@@ -27,14 +28,17 @@ import { ModelPicker } from './model-picker.js';
 import { SessionPicker } from './session-picker.js';
 import { SessionManager } from '../agent/sessions.js';
 import type { ModelProfile } from '../agent/model-profile.js';
+import type { RuntimeModeState } from '../agent/mode.js';
 
 export interface AppProps {
   workspaceRoot: string;
   model: string;
   approvalMode: 'suggest' | 'auto-edit' | 'auto' | 'yolo';
+  mode?: RuntimeModeState;
   maxTurns: number;
   mcpManager?: McpManager;
   initialObjective?: string;
+  resumeSessionId?: string;
   onExit: () => void;
 }
 
@@ -73,9 +77,11 @@ function minimalAgentState(workspaceRoot: string): AgentState {
   return {
     sessionId: 'tui',
     workspaceRoot,
+    workspace: { primaryRoot: workspaceRoot, additionalRoots: [] },
     model: '',
     objective: '',
     status: 'idle',
+    mode: defaultMode(),
     messages: [],
     todos: [],
     relevantFiles: [],
@@ -96,7 +102,7 @@ function getGitBranch(cwd: string): string | undefined {
   }
 }
 
-export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, initialObjective, onExit }: AppProps): JSX.Element {
+export function App({ workspaceRoot, model, approvalMode, mode: initialMode, maxTurns, mcpManager, initialObjective, resumeSessionId, onExit }: AppProps): JSX.Element {
   const { exit } = useApp();
   const abortControllerRef = useRef<AbortController | null>(null);
   const runtimeRef = useRef<AgentRuntime | null>(null);
@@ -110,7 +116,9 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
   const [currentModel, setCurrentModel] = useState(model);
   const [currentModelProfile, setCurrentModelProfile] = useState<ModelProfile | undefined>();
   const [currentApprovalMode, setCurrentApprovalMode] = useState<ApprovalMode>(approvalMode);
-  const [mode, setMode] = useState<PickerMode>('normal');
+  const [pickerMode, setPickerMode] = useState<PickerMode>('normal');
+  const [inputMode, setInputMode] = useState<'agent' | 'shell'>('agent');
+  const [operatingMode, setOperatingMode] = useState<'agent' | 'plan'>('agent');
   const [gitBranch] = useState(() => getGitBranch(workspaceRoot));
 
   useInput((input, key) => {
@@ -130,8 +138,29 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
       }
       return;
     }
-    if (key.escape && mode !== 'normal') {
-      setMode('normal');
+    if (key.shift && key.tab) {
+      const runtime = runtimeRef.current;
+      if (runtime) {
+        const next = operatingMode === 'plan' ? 'agent' : 'plan';
+        runtime.setMode({ operatingMode: next });
+      }
+      return;
+    }
+    if (key.ctrl && input === 'x') {
+      const runtime = runtimeRef.current;
+      if (runtime) {
+        const next = inputMode === 'shell' ? 'agent' : 'shell';
+        runtime.setMode({ inputMode: next });
+        if (next === 'shell') {
+          addEvent('⚠ Shell commands run with your OS account privileges and are not filesystem-sandboxed.');
+        } else {
+          addEvent('Agent mode.');
+        }
+      }
+      return;
+    }
+    if (key.escape && pickerMode !== 'normal') {
+      setPickerMode('normal');
     }
   });
 
@@ -151,6 +180,11 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     const unsubscribe = events.on((event: AgentEvent) => {
       if (event.type === 'model_profile_updated') {
         setCurrentModelProfile(event.profile);
+      }
+      if (event.type === 'mode_changed') {
+        setInputMode(event.mode.inputMode);
+        setOperatingMode(event.mode.operatingMode);
+        setCurrentApprovalMode(event.mode.permissionMode);
       }
       if (event.type === 'model_request') setStatus('thinking');
       if (event.type === 'approval_requested') setStatus('awaiting_approval');
@@ -176,13 +210,48 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
       objective: initialObjective || '',
       model: currentModel,
       approvalMode,
+      mode: initialMode,
       maxTurns,
       eventBus: events,
       mcpManager,
       signal: controller.signal,
       permissionManager: permissionsRef.current,
     });
+    setInputMode(runtime.getMode().inputMode);
+    setOperatingMode(runtime.getMode().operatingMode);
+    setCurrentApprovalMode(runtime.getMode().permissionMode);
     runtimeRef.current = runtime;
+
+    if (resumeSessionId) {
+      const stored = new SessionManager().load(resumeSessionId, workspaceRoot);
+      if (stored) {
+        runtime.loadState(stored.state);
+        setCurrentModel(stored.state.model);
+        setCurrentModelProfile(stored.state.modelProfile);
+        setStatus(stored.state.status);
+        setInputMode(stored.state.mode.inputMode);
+        setOperatingMode(stored.state.mode.operatingMode);
+        setCurrentApprovalMode(stored.state.mode.permissionMode);
+        const restoredMessages: TuiMessage[] = stored.state.messages.slice(-50).flatMap((message, index) => {
+          if (message.role !== 'user' && message.role !== 'assistant') return [];
+          return [{
+            id: `restored-${index}`,
+            role: message.role,
+            content: typeof message.content === 'string' ? message.content : '[multimodal message]',
+          }];
+        });
+        setMessages([
+          ...restoredMessages,
+          {
+            id: `resume-${resumeSessionId}`,
+            role: 'event',
+            content: `Resumed session ${resumeSessionId} · ${stored.state.messages.length} messages restored`,
+          },
+        ]);
+      } else {
+        addEvent(`Session not found in this workspace: ${resumeSessionId}`);
+      }
+    }
 
     if (initialObjective?.trim()) {
       setIsRunning(true);
@@ -310,13 +379,18 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
         setApprovalMode: setCurrentApprovalMode,
         workspaceRoot,
         setModel: handleSetModel,
-        showModelPicker: () => setMode('model-picker'),
-        showSessionPicker: () => setMode('session-picker'),
+        showModelPicker: () => setPickerMode('model-picker'),
+        showSessionPicker: () => setPickerMode('session-picker'),
         resumeSession: handleResumeSession,
         listSessions: () => new SessionManager().list(workspaceRoot),
         mcpManager,
         getRuntime: () => runtimeRef.current ?? undefined,
       });
+      return;
+    }
+
+    if (inputMode === 'shell') {
+      handleShellPassthrough(trimmed).catch((err) => addEvent(String(err)));
       return;
     }
 
@@ -330,6 +404,11 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
 
     if (isRunning) {
       addEvent('Wait for the current task to finish, or press Ctrl+C to cancel.');
+      return;
+    }
+
+    if (operatingMode === 'plan') {
+      addEvent('Plan mode active. Describe the plan, or type /plan off or Shift-Tab to start executing.');
       return;
     }
 
@@ -373,7 +452,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
           <Text color="red">Error: {error}</Text>
         </Box>
       )}
-      {mode === 'model-picker' && (
+      {pickerMode === 'model-picker' && (
         <ModelPicker
           limit={Math.max(3, Math.min(8, rows - 12))}
           columns={columns}
@@ -383,22 +462,22 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
             addEvent(profile.mode === 'chat-only'
               ? `Model set to ${selected}. Chat only — agent tools unavailable.`
               : `Model set to ${selected}. Agent tools enabled.`);
-            setMode('normal');
+            setPickerMode('normal');
           }}
         />
       )}
-      {mode === 'session-picker' && (
+      {pickerMode === 'session-picker' && (
         <SessionPicker
           limit={Math.max(3, Math.min(6, rows - 12))}
           columns={columns}
           workspaceRoot={workspaceRoot}
           onSelect={(sessionId) => {
             handleResumeSession(sessionId);
-            setMode('normal');
+            setPickerMode('normal');
           }}
         />
       )}
-      {pendingApproval && mode === 'normal' && (
+      {pendingApproval && pickerMode === 'normal' && (
         <ApprovalPrompt
           toolName={pendingApproval.toolName}
           input={pendingApproval.input}
@@ -409,7 +488,9 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
       <Composer
         onSubmit={handleSubmit}
         workspaceRoot={workspaceRoot}
-        disabled={pendingApproval !== null || mode !== 'normal'}
+        inputMode={inputMode}
+        operatingMode={operatingMode}
+        disabled={pendingApproval !== null || pickerMode !== 'normal'}
         maxSuggestions={Math.max(3, Math.min(8, rows - 11))}
         columns={columns}
       />
@@ -421,6 +502,8 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
           model: currentModel,
           agentMode: currentModelProfile?.mode ?? runtimeRef.current?.getState().agentMode ?? 'agent',
           modelProfile: currentModelProfile ?? runtimeRef.current?.getState().modelProfile,
+          inputMode,
+          operatingMode,
           workspaceRoot,
           approvalMode: currentApprovalMode,
           contextTokens: runtimeRef.current?.getContextManager().estimateTokens() ?? 0,

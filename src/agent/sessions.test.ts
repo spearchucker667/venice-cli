@@ -23,9 +23,11 @@ describe('SessionManager', () => {
   const state = (id: string): AgentState => ({
     sessionId: id,
     workspaceRoot: '/tmp',
+    workspace: { primaryRoot: '/tmp', additionalRoots: [] },
     model: 'test',
     objective: 'test',
     status: 'idle',
+    mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
     messages: [{ role: 'user', content: 'hello' }],
     todos: [],
     relevantFiles: [],

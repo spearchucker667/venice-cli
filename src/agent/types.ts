@@ -5,6 +5,7 @@
 import type { MessageContent } from '../types/index.js';
 import type { SkillSummary } from '../skills/types.js';
 import type { AgentMode, ModelProfile } from './model-profile.js';
+import type { RuntimeModeState } from './mode.js';
 
 export type AgentStatus =
   | 'idle'
@@ -81,11 +82,18 @@ export interface SubagentResult {
 export interface AgentState {
   sessionId: string;
   workspaceRoot: string;
+  workspace: {
+    primaryRoot: string;
+    additionalRoots: string[];
+  };
   model: string;
   agentMode?: AgentMode;
   modelProfile?: ModelProfile;
   objective: string;
   status: AgentStatus;
+  mode: RuntimeModeState;
+  title?: string;
+  parentSessionId?: string;
   messages: AgentMessage[];
   todos: TodoItem[];
   relevantFiles: string[];

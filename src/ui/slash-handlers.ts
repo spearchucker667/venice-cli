@@ -1,4 +1,7 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { AgentState, AgentStatus } from '../agent/types.js';
+import { defaultMode } from '../agent/mode.js';
 import { SLASH_COMMANDS } from './slash-commands.js';
 import type { TuiMessage } from './types.js';
 import { SessionManager, type StoredSession } from '../agent/sessions.js';
@@ -10,6 +13,30 @@ import { gitStatusTool } from '../tools/git/status.js';
 import type { ToolContext } from '../tools/types.js';
 import type { ApprovalMode } from '../agent/permissions.js';
 import type { ModelProfile } from '../agent/model-profile.js';
+
+function formatSessionAsMarkdown(state: AgentState): string {
+  const lines: string[] = [];
+  lines.push(`# Session ${state.sessionId}`);
+  if (state.title) lines.push(`## ${state.title}`);
+  if (state.parentSessionId) lines.push(`Parent: ${state.parentSessionId}`);
+  lines.push(`Model: ${state.model}`);
+  lines.push(`Workspace: ${state.workspaceRoot}`);
+  lines.push(`Objective: ${state.objective || '(none)'}`);
+  lines.push('');
+  lines.push('## Messages');
+  for (const message of state.messages) {
+    if (typeof message.content !== 'string') continue;
+    lines.push(`### ${message.role}`);
+    lines.push(message.content);
+    lines.push('');
+  }
+  if (state.changedFiles.length) {
+    lines.push('## Changed Files');
+    for (const file of state.changedFiles) lines.push(`- ${file}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
 
 export interface SlashHandlerContext {
   exit: () => void;
@@ -52,7 +79,8 @@ export async function handleSlashCommand(command: string, args: string, context:
   const toolContext = (): ToolContext => {
     const state = getRuntime?.()?.getState();
     const runtimeState: Readonly<AgentState> = state ?? {
-      sessionId: 'slash-command', workspaceRoot, model, objective: '', status: 'idle',
+      sessionId: 'slash-command', workspaceRoot, workspace: { primaryRoot: workspaceRoot, additionalRoots: [] }, model, objective: '', status: 'idle',
+      mode: defaultMode(),
       messages: [], todos: [], relevantFiles: [], changedFiles: [], toolHistory: [],
       skillSummaries: [], activeSkills: [], subagentReports: [],
     };
@@ -62,7 +90,7 @@ export async function handleSlashCommand(command: string, args: string, context:
   switch (command) {
     case 'help':
       if (args.trim() === 'all') {
-        addEvent('All slash commands:\n' + SLASH_COMMANDS.map((c) => `  /${c}`).join('\n'));
+        addEvent('All slash commands:\n' + SLASH_COMMANDS.map((c) => `  /${c.name} — ${c.description}`).join('\n'));
       } else {
         addEvent('Venice Agent\nJust tell Venice what you want done.\n\nExamples:\n  Explain this repository\n  Fix the failing tests\n  Search Venice docs\n  Generate an image\n\nContext:\n  @file\nShell:\n  !command\nControls:\n  /model\n  /status\n  /permissions\n  /new\n  /resume\n  /help all');
       }
@@ -195,17 +223,20 @@ export async function handleSlashCommand(command: string, args: string, context:
 
     case 'plan': {
       const runtime = getRuntime?.();
-      const state = runtime?.getState();
-      const todos = state?.todos || [];
-      if (todos.length === 0) {
-        addEvent('No active plan or todo items.');
+      if (!runtime) {
+        addEvent('No active plan.');
+        break;
+      }
+      const arg = args.trim();
+      const current = runtime.getMode().operatingMode;
+      if (arg === 'on' || (!arg && current !== 'plan')) {
+        runtime.setMode({ operatingMode: 'plan' });
+        addEvent('Plan mode enabled. Tools are read-only.');
+      } else if (arg === 'off' || (!arg && current === 'plan')) {
+        runtime.setMode({ operatingMode: 'agent' });
+        addEvent('Plan mode disabled. Agent may now execute writes and shell.');
       } else {
-        const lines = ['Current Plan / Tasks:'];
-        for (const todo of todos) {
-          const icon = todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '●' : todo.status === 'blocked' ? '✗' : '○';
-          lines.push(`  ${icon} [${todo.status}] ${todo.content}`);
-        }
-        addEvent(lines.join('\n'));
+        addEvent(`Plan mode is ${current}. Use /plan on or /plan off.`);
       }
       break;
     }
@@ -346,6 +377,87 @@ export async function handleSlashCommand(command: string, args: string, context:
       }
       setMessages(() => []);
       addEvent('Started fresh conversation context.');
+      break;
+    }
+
+    case 'fork': {
+      const runtime = getRuntime?.();
+      if (!runtime) {
+        addEvent('No active runtime.');
+        break;
+      }
+      const forked = runtime.forkSession();
+      addEvent(`Forked session: ${forked.sessionId}`);
+      if (resumeSession) {
+        await resumeSession(forked.sessionId);
+      }
+      break;
+    }
+
+    case 'title':
+    case 'rename': {
+      const runtime = getRuntime?.();
+      if (!runtime) {
+        addEvent('No active runtime.');
+        break;
+      }
+      const title = args.trim();
+      if (!title) {
+        addEvent(`Current title: ${runtime.getState().title || '(none)'}`);
+        break;
+      }
+      runtime.setTitle(title);
+      addEvent(`Title set to: ${title}`);
+      break;
+    }
+
+    case 'export': {
+      const runtime = getRuntime?.();
+      if (!runtime) {
+        addEvent('No active runtime.');
+        break;
+      }
+      const state = runtime.getState();
+      const markdown = formatSessionAsMarkdown(state);
+      const target = args.trim() || path.join(workspaceRoot, `${state.sessionId}.md`);
+      try {
+        fs.writeFileSync(target, markdown);
+        addEvent(`Exported session to ${target}`);
+      } catch (error) {
+        addEvent(`Export failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      break;
+    }
+
+    case 'export-debug-zip': {
+      const runtime = getRuntime?.();
+      if (!runtime) {
+        addEvent('No active runtime.');
+        break;
+      }
+      addEvent('Debug zip export is not yet implemented.');
+      break;
+    }
+
+    case 'import': {
+      const filePath = args.trim();
+      if (!filePath) {
+        addEvent('Usage: /import <path>');
+        break;
+      }
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as StoredSession;
+        if (!data.state || typeof data.state !== 'object') {
+          addEvent('Invalid session export file.');
+          break;
+        }
+        if (resumeSession) {
+          await resumeSession(data.state.sessionId);
+        }
+        addEvent(`Imported session from ${filePath}`);
+      } catch (error) {
+        addEvent(`Import failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
       break;
     }
 

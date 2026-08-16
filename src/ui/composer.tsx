@@ -1,19 +1,23 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { readdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { isPathInside } from '../agent/workspace.js';
+import { findSlashCommands } from './slash-commands.js';
 
 export interface ComposerProps {
   onSubmit: (text: string) => void;
   workspaceRoot: string;
+  inputMode?: 'agent' | 'shell';
+  operatingMode?: 'agent' | 'plan';
   disabled?: boolean;
   maxSuggestions?: number;
   columns?: number;
 }
 
 const IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', 'target', 'vendor']);
+const EMPTY_SLASH_OPTIONS: Array<{ name: string; description: string }> = [];
 
 export async function findMentionCompletions(workspaceRoot: string, query: string): Promise<string[]> {
   const normalized = query.replaceAll('\\', '/');
@@ -33,13 +37,14 @@ export async function findMentionCompletions(workspaceRoot: string, query: strin
     .map((entry) => `${directoryPart}${entry.name}${entry.isDirectory() ? '/' : ''}`);
 }
 
-export function Composer({ onSubmit, workspaceRoot, disabled, maxSuggestions = 8, columns = 80 }: ComposerProps): JSX.Element {
+export function Composer({ onSubmit, workspaceRoot, inputMode = 'agent', operatingMode = 'agent', disabled, maxSuggestions = 8, columns = 80 }: ComposerProps): JSX.Element {
   const [value, setValue] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [draft, setDraft] = useState('');
   const [autocompleteOptions, setAutocompleteOptions] = useState<string[]>([]);
   const [autocompleteIndex, setAutocompleteIndex] = useState(0);
+  const [slashIndex, setSlashIndex] = useState(0);
   const valueRef = useRef(value);
   const lookupSequence = useRef(0);
   useEffect(() => { valueRef.current = value; }, [value]);
@@ -66,6 +71,20 @@ export function Composer({ onSubmit, workspaceRoot, disabled, maxSuggestions = 8
     return () => clearTimeout(timer);
   }, [value, workspaceRoot, maxSuggestions]);
 
+  const slashOptions = useMemo(() => {
+    const match = value.match(/^\/([^\s]*)$/);
+    if (!match) return EMPTY_SLASH_OPTIONS;
+    return findSlashCommands(value)
+      .slice(0, maxSuggestions)
+      .map((cmd) => ({ name: cmd.name, description: cmd.description }));
+  }, [value, maxSuggestions]);
+
+  useEffect(() => {
+    if (value.match(/^\/([^\s]*)$/)) {
+      setSlashIndex(0);
+    }
+  }, [value]);
+
   const updateValue = (next: string) => {
     setValue(next);
     if (historyIndex === -1) setDraft(next);
@@ -73,6 +92,19 @@ export function Composer({ onSubmit, workspaceRoot, disabled, maxSuggestions = 8
 
   useInput((input, key) => {
     if (disabled) return;
+    if (slashOptions.length > 0) {
+      if (key.upArrow || key.downArrow) {
+        setSlashIndex((previous) => key.upArrow
+          ? (previous > 0 ? previous - 1 : slashOptions.length - 1)
+          : (previous < slashOptions.length - 1 ? previous + 1 : 0));
+        return;
+      }
+      if (key.tab || key.return) {
+        const selected = slashOptions[slashIndex];
+        updateValue(`/${selected.name} `);
+        return;
+      }
+    }
     if (autocompleteOptions.length > 0) {
       if (key.upArrow || key.downArrow) {
         setAutocompleteIndex((previous) => key.upArrow
@@ -118,8 +150,19 @@ export function Composer({ onSubmit, workspaceRoot, disabled, maxSuggestions = 8
 
   const lines = value.split('\n');
   const currentLine = lines.at(-1) ?? '';
+  const promptChar = operatingMode === 'plan' ? 'P' : inputMode === 'shell' ? '$' : '>';
   return (
     <Box flexDirection="column">
+      {slashOptions.length > 0 && (
+        <Box flexDirection="column" borderStyle="round" paddingX={1} marginBottom={1}>
+          <Text bold color="cyan">Commands</Text>
+          {slashOptions.map((option, index) => (
+            <Text key={option.name} color={index === slashIndex ? 'green' : undefined}>
+              {truncateSuggestion(`${index === slashIndex ? '> ' : '  '}/${option.name} — ${option.description}`, columns)}
+            </Text>
+          ))}
+        </Box>
+      )}
       {autocompleteOptions.length > 0 && (
         <Box flexDirection="column" borderStyle="round" paddingX={1} marginBottom={1}>
           <Text bold color="cyan">Files</Text>
@@ -130,9 +173,9 @@ export function Composer({ onSubmit, workspaceRoot, disabled, maxSuggestions = 8
           ))}
         </Box>
       )}
-      {lines.slice(0, -1).map((line, index) => <Text key={`${index}:${line}`}>{index === 0 ? '> ' : '  '}{line}</Text>)}
+      {lines.slice(0, -1).map((line, index) => <Text key={`${index}:${line}`}>{index === 0 ? `${promptChar} ` : '  '}{line}</Text>)}
       <Box>
-        <Text bold>{lines.length === 1 ? '> ' : '  '}</Text>
+        <Text bold>{lines.length === 1 ? `${promptChar} ` : '  '}</Text>
         <TextInput value={currentLine} onChange={(line) => updateValue([...lines.slice(0, -1), line].join('\n'))} />
       </Box>
     </Box>

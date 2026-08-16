@@ -35,11 +35,17 @@ import { registerSkillsCommand } from './commands/skills.js';
 import { registerInitCommand } from './commands/init.js';
 import { registerResponsesCommand } from './commands/responses.js';
 import { registerDoctorCommand } from './commands/doctor.js';
+import { registerExportCommand } from './commands/export.js';
+import { registerImportCommand } from './commands/import.js';
 import { formatError, getChalk } from './lib/output.js';
 import { getVersion } from './lib/version.js';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const packageJson = require('../package.json') as { name: string; version: string };
 
 // Check for updates in the background (non-blocking, checks once per day)
-const pkg = { name: 'veniceai-cli', version: getVersion() };
+const pkg = { name: packageJson.name, version: getVersion() };
 updateNotifier({ pkg, updateCheckInterval: 1000 * 60 * 60 * 24 }).notify({
   isGlobal: true,
   message: 'Update available {currentVersion} → {latestVersion}\nRun {updateCommand} to update',
@@ -90,6 +96,8 @@ async function main() {
   registerInitCommand(program);
   registerResponsesCommand(program);
   registerDoctorCommand(program);
+  registerExportCommand(program);
+  registerImportCommand(program);
 
   // The agent command is now the default command (see registerAgentCommand)
 

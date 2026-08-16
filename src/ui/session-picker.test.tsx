@@ -25,9 +25,11 @@ describe('SessionPicker', () => {
       {
         sessionId: 'session-abc',
         workspaceRoot: '/tmp',
+        workspace: { primaryRoot: '/tmp', additionalRoots: [] },
         model: 'kimi-k2.5',
         objective: 'Test session',
         status: 'complete',
+        mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
         messages: [],
         todos: [],
         relevantFiles: [],
@@ -57,9 +59,11 @@ describe('SessionPicker', () => {
       {
         sessionId: 'other-workspace',
         workspaceRoot: '/tmp',
+        workspace: { primaryRoot: '/tmp', additionalRoots: [] },
         model: 'kimi-k2.5',
         objective: 'Hidden session',
         status: 'complete',
+        mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
         messages: [],
         todos: [],
         relevantFiles: [],

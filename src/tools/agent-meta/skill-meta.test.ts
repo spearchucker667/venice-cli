@@ -11,9 +11,11 @@ import type { AgentState } from '../../agent/types.js';
 const state: AgentState = {
   sessionId: 's',
   workspaceRoot: '/tmp',
+  workspace: { primaryRoot: '/tmp', additionalRoots: [] },
   model: 'm',
   objective: 'o',
   status: 'idle',
+  mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
   messages: [],
   todos: [],
   relevantFiles: [],

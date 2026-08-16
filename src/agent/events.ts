@@ -2,6 +2,8 @@
  * Append-only event bus for the agent runtime.
  */
 
+import type { RuntimeModeState } from './mode.js';
+
 export type AgentEvent =
   | { type: 'session_started'; timestamp: string; eventId: string; sessionId: string; objective: string }
   | { type: 'user_message'; timestamp: string; eventId: string; content: string }
@@ -21,6 +23,9 @@ export type AgentEvent =
   | { type: 'context_compacted'; timestamp: string; eventId: string; summary: unknown }
   | { type: 'mcp_ready'; timestamp: string; eventId: string; servers: Array<{ name: string; toolCount: number; error?: string }> }
   | { type: 'mcp_failed'; timestamp: string; eventId: string; message: string }
+  | { type: 'mode_changed'; timestamp: string; eventId: string; mode: RuntimeModeState }
+  | { type: 'title_changed'; timestamp: string; eventId: string; title: string }
+  | { type: 'session_forked'; timestamp: string; eventId: string; parentSessionId: string; newSessionId: string }
   | { type: 'session_completed'; timestamp: string; eventId: string; status: string };
 
 export class EventBus {

@@ -54,4 +54,18 @@ describe('StatusBar', () => {
     assert.match(frame, /50%/);
     assert.doesNotMatch(frame, /workspace|dominate/);
   });
+
+  it('shows plan and shell mode indicators', () => {
+    const { lastFrame } = render(
+      <StatusBar state={{
+        messages: [], status: 'idle', model: 'kimi-k2.5', agentMode: 'agent',
+        operatingMode: 'plan', inputMode: 'shell',
+        workspaceRoot: '/tmp', approvalMode: 'suggest',
+        contextTokens: 0, maxTokens: 0,
+      }} />
+    );
+    const frame = lastFrame() || '';
+    assert.match(frame, /plan/);
+    assert.match(frame, /shell/);
+  });
 });

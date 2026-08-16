@@ -53,4 +53,15 @@ describe('ToolRegistry', () => {
       assert.ok(registry.has(name), `missing ${name}`);
     }
   });
+
+  it('plan mode excludes write, shell, and media tools', () => {
+    const registry = createDefaultRegistry();
+    const planDefs = registry.definitions('plan').map((d) => d.function.name);
+    for (const name of ['write_file', 'edit_file', 'apply_patch', 'shell', 'spawn_agent', 'run_validation', 'todo_write', 'generate_image', 'generate_video', 'generate_music']) {
+      assert.ok(!planDefs.includes(name), `plan mode should exclude ${name}`);
+    }
+    assert.ok(planDefs.includes('read_file'));
+    assert.ok(planDefs.includes('glob'));
+    assert.ok(planDefs.includes('git_status'));
+  });
 });

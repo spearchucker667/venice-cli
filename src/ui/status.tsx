@@ -15,7 +15,11 @@ export function StatusBar({ state, columns = 80 }: StatusBarProps): JSX.Element 
   const isUnknown = state.maxTokens === 0;
   const contextPct = !isUnknown ? Math.round((state.contextTokens / state.maxTokens) * 100) : 0;
   const location = state.gitBranch || shortenPath(state.workspaceRoot);
-  const mode = state.agentMode === 'chat-only' ? 'chat-only' : 'agent';
+  const agentMode = state.agentMode === 'chat-only' ? 'chat-only' : 'agent';
+  const modeParts = [agentMode];
+  if (state.operatingMode === 'plan') modeParts.push('plan');
+  if (state.inputMode === 'shell') modeParts.push('shell');
+  const mode = modeParts.join('+');
   const context = isUnknown ? 'context unknown' : `${contextPct}% of ${formatTokenLimit(state.maxTokens).replace(' ctx', '')}`;
   const narrow = columns <= 72;
   const modelLimit = columns <= 55 ? 10 : 18;

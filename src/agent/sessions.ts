@@ -13,8 +13,11 @@ import type { AgentState } from './types.js';
 export const SESSIONS_ROOT = path.join(os.homedir(), '.venice', 'sessions');
 
 export interface StoredSession {
+  schemaVersion: number;
   sessionId: string;
   state: AgentState;
+  title?: string;
+  parentSessionId?: string;
   createdAt: string;
   updatedAt: string;
   events?: AgentEvent[];
@@ -67,8 +70,11 @@ export class SessionManager {
 
     const existing = this.readStored(path.join(dir, 'session.json'));
     const stored: StoredSession = {
+      schemaVersion: 2,
       sessionId: redactedState.sessionId,
       state: redactedState,
+      title: redactedState.title,
+      parentSessionId: redactedState.parentSessionId,
       createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       events: redactedEvents,
@@ -142,7 +148,15 @@ export class SessionManager {
       if (!value || typeof value !== 'object' || typeof value.sessionId !== 'string' ||
           typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string' ||
           !value.state || typeof value.state !== 'object') return undefined;
-      return value as StoredSession;
+      const stored = value as StoredSession;
+      if (!stored.schemaVersion) stored.schemaVersion = 1;
+      if (!stored.state.workspace) {
+        stored.state.workspace = { primaryRoot: stored.state.workspaceRoot, additionalRoots: [] };
+      }
+      if (!stored.state.mode) {
+        stored.state.mode = { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' };
+      }
+      return stored;
     } catch {
       return undefined;
     }

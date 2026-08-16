@@ -26,9 +26,11 @@ describe('Security and Secret Redaction', () => {
   const state = (id: string, messages: any[]): AgentState => ({
     sessionId: id,
     workspaceRoot: '/tmp',
+    workspace: { primaryRoot: '/tmp', additionalRoots: [] },
     model: 'test',
     objective: 'test',
     status: 'idle',
+    mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
     messages,
     todos: [],
     relevantFiles: [],

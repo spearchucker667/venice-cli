@@ -16,6 +16,8 @@ export function createMcpToolAdapter(
       tool.description || `MCP tool '${tool.name}' from server '${serverName}'`,
     inputSchema: normalizeSchema(tool.inputSchema),
     risk: 'external_side_effect',
+    planSafe: false,
+    parallelSafe: false,
     async execute(input: unknown, context: ToolContext): Promise<ToolResult<unknown>> {
       try {
         const args =

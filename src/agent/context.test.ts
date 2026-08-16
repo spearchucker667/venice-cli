@@ -120,9 +120,11 @@ describe('buildStructuredSummary', () => {
     const state: AgentState = {
       sessionId: 's1',
       workspaceRoot: '/tmp',
+      workspace: { primaryRoot: '/tmp', additionalRoots: [] },
       model: 'test',
       objective: 'fix build',
       status: 'idle',
+      mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
       messages: [],
       todos: [
         { id: '1', content: 'inspect', status: 'completed' },

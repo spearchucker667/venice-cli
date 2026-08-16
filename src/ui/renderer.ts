@@ -9,23 +9,25 @@
 import type { AgentEvent } from '../agent/events.js';
 import { EventBus } from '../agent/events.js';
 import { getChalk } from '../lib/output.js';
+import { toStreamJson, serializeStreamJson } from '../agent/stream-json.js';
 
 export interface RendererOptions {
   eventBus: EventBus;
   interactive?: boolean;
   json?: boolean;
+  outputFormat?: 'text' | 'stream-json' | 'json';
 }
 
 export class AgentRenderer {
   private readonly eventBus: EventBus;
   private readonly interactive: boolean;
-  private readonly json: boolean;
+  private readonly outputFormat: 'text' | 'stream-json' | 'json';
   private unsubscribe?: () => void;
 
   constructor(options: RendererOptions) {
     this.eventBus = options.eventBus;
     this.interactive = options.interactive ?? false;
-    this.json = options.json ?? false;
+    this.outputFormat = options.outputFormat ?? (options.json ? 'json' : 'text');
   }
 
   start(): void {
@@ -39,7 +41,15 @@ export class AgentRenderer {
 
   private render(event: AgentEvent): void {
     const c = getChalk();
-    const out = this.json ? console.error : console.log;
+    if (this.outputFormat === 'stream-json') {
+      const streamEvent = toStreamJson(event);
+      if (streamEvent) {
+        console.log(serializeStreamJson(streamEvent));
+      }
+      return;
+    }
+
+    const out = this.outputFormat === 'json' ? console.error : console.log;
     switch (event.type) {
       case 'session_started':
         out(c.bold(`▶ ${event.objective}`));
