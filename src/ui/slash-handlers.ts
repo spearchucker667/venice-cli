@@ -1,13 +1,14 @@
-import type { AgentStatus } from '../agent/types.js';
+import type { AgentState, AgentStatus } from '../agent/types.js';
 import { SLASH_COMMANDS } from './slash-commands.js';
 import type { TuiMessage } from './types.js';
 import { SessionManager, type StoredSession } from '../agent/sessions.js';
 import type { AgentRuntime } from '../agent/runtime.js';
 import type { McpManager } from '../mcp/manager.js';
 import { scaffoldVeniceWorkspace } from '../commands/init.js';
-import { createDefaultRegistry } from '../tools/registry.js';
 import { gitDiffTool } from '../tools/git/diff.js';
 import { gitStatusTool } from '../tools/git/status.js';
+import type { ToolContext } from '../tools/types.js';
+import type { ApprovalMode } from '../agent/permissions.js';
 
 export interface SlashHandlerContext {
   exit: () => void;
@@ -15,6 +16,7 @@ export interface SlashHandlerContext {
   status: AgentStatus;
   model: string;
   approvalMode: string;
+  setApprovalMode?: (mode: ApprovalMode) => void;
   workspaceRoot: string;
   setModel?: (model: string) => void;
   showModelPicker?: () => void;
@@ -32,6 +34,7 @@ export async function handleSlashCommand(command: string, args: string, context:
     status,
     model,
     approvalMode,
+    setApprovalMode,
     workspaceRoot,
     setModel,
     showModelPicker,
@@ -45,14 +48,23 @@ export async function handleSlashCommand(command: string, args: string, context:
   const addEvent = (content: string) => {
     setMessages((prev) => [...prev, { id: `cmd-${prev.length + 1}`, role: 'event', content }]);
   };
+  const toolContext = (): ToolContext => {
+    const state = getRuntime?.()?.getState();
+    const runtimeState: Readonly<AgentState> = state ?? {
+      sessionId: 'slash-command', workspaceRoot, model, objective: '', status: 'idle',
+      messages: [], todos: [], relevantFiles: [], changedFiles: [], toolHistory: [],
+      skillSummaries: [], activeSkills: [], subagentReports: [],
+    };
+    return { workspaceRoot, sessionId: runtimeState.sessionId, objective: runtimeState.objective, runtimeState };
+  };
 
   switch (command) {
     case 'help':
-      addEvent(
-        'Available slash commands:\n' +
-          SLASH_COMMANDS.map((c) => `  /${c}`).join('\n') +
-          '\n\nType /help for this list, or /<command> to execute.'
-      );
+      if (args.trim() === 'all') {
+        addEvent('All slash commands:\n' + SLASH_COMMANDS.map((c) => `  /${c}`).join('\n'));
+      } else {
+        addEvent('Venice Agent\nJust tell Venice what you want done.\n\nExamples:\n  Explain this repository\n  Fix the failing tests\n  Search Venice docs\n  Generate an image\n\nContext:\n  @file\nShell:\n  !command\nControls:\n  /model\n  /status\n  /permissions\n  /new\n  /resume\n  /help all');
+      }
       break;
 
     case 'quit':
@@ -139,8 +151,7 @@ export async function handleSlashCommand(command: string, args: string, context:
     }
 
     case 'diff': {
-      const toolCtx: any = { workspaceRoot, sessionId: '', objective: '', runtimeState: getRuntime?.()?.getState() };
-      const res = await gitDiffTool.execute({}, toolCtx);
+      const res = await gitDiffTool.execute({}, toolContext());
       if (res.ok && res.data) {
         addEvent(`Git Diff:\n${res.data}`);
       } else {
@@ -157,31 +168,21 @@ export async function handleSlashCommand(command: string, args: string, context:
 
     case 'review': {
       const runtime = getRuntime?.();
-      const state = runtime?.getState();
-      if (!state) {
+      if (!runtime) {
         addEvent('No active session state to review.');
         break;
       }
-      const lines = [
-        `Session Review (${state.sessionId}):`,
-        `Objective: ${state.objective || 'None'}`,
-        `Status: ${state.status}`,
-        `Changed Files (${state.changedFiles.length}):`,
-      ];
-      if (state.changedFiles.length === 0) {
-        lines.push('  (none)');
-      } else {
-        for (const file of state.changedFiles) {
-          lines.push(`  + ${file}`);
-        }
+      addEvent('Reviewing the current diff in read-only mode…');
+      try {
+        const review = await runtime.reviewChanges();
+        const lines = [`Review: ${review.summary}`];
+        if (review.findings.length === 0) lines.push('No actionable findings.');
+        else lines.push(...review.findings.map((finding) => `  • ${finding}`));
+        if (review.recommendations.length) lines.push('Recommendations:', ...review.recommendations.map((item) => `  • ${item}`));
+        addEvent(lines.join('\n'));
+      } catch (error) {
+        addEvent(`Review failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (state.lastValidation) {
-        lines.push(`\nValidation: ${state.lastValidation.overallSuccess ? 'PASS' : 'FAIL'}`);
-        for (const cmd of state.lastValidation.commands) {
-          lines.push(`  ${cmd.exitCode === 0 ? '✓' : '✗'} ${cmd.command} (exit ${cmd.exitCode})`);
-        }
-      }
-      addEvent(lines.join('\n'));
       break;
     }
 
@@ -214,8 +215,7 @@ export async function handleSlashCommand(command: string, args: string, context:
     }
 
     case 'tools': {
-      const registry = createDefaultRegistry();
-      const defs = registry.definitions();
+      const defs = getRuntime?.()?.getToolDefinitions() ?? [];
       const lines = ['Registered Tools:'];
       for (const def of defs) {
         lines.push(`  • ${def.function.name} — ${def.function.description?.split('.')[0] || ''}`);
@@ -262,13 +262,26 @@ export async function handleSlashCommand(command: string, args: string, context:
     }
 
     case 'permissions': {
-      addEvent(`Current Approval Mode: ${approvalMode}\nPermission Policies:\n  suggest   — Requires user approval for all file edits, shell commands, network requests, and external operations.\n  auto-edit — Auto-approves workspace file writes/edits; prompts for shell and network commands.\n  auto      — Auto-approves workspace edits and standard development commands.\n  yolo      — Autonomous workspace execution.`);
+      const requested = args.trim();
+      const validModes: ApprovalMode[] = ['suggest', 'auto-edit', 'auto', 'yolo'];
+      if (requested) {
+        if (!validModes.includes(requested as ApprovalMode)) {
+          addEvent(`Unknown permission mode: ${requested}. Expected: ${validModes.join(', ')}`);
+          break;
+        }
+        const next = requested as ApprovalMode;
+        getRuntime?.()?.getPermissionManager().setMode(next);
+        setApprovalMode?.(next);
+        addEvent(`Approval mode changed to ${next} for this session.`);
+        break;
+      }
+      const current = getRuntime?.()?.getPermissionManager().getMode() ?? approvalMode;
+      addEvent(`Current Approval Mode: ${current}\nPermission Policies:\n  suggest   — Requires user approval for all file edits, shell commands, network requests, and external operations.\n  auto-edit — Auto-approves workspace file writes/edits; prompts for shell and network commands.\n  auto      — Auto-approves workspace edits and standard development commands.\n  yolo      — Autonomous workspace execution.`);
       break;
     }
 
     case 'git': {
-      const toolCtx: any = { workspaceRoot, sessionId: '', objective: '', runtimeState: getRuntime?.()?.getState() };
-      const res = await gitStatusTool.execute({}, toolCtx);
+      const res = await gitStatusTool.execute({}, toolContext());
       if (res.ok) {
         addEvent(`Git Status:\n${res.data}`);
       } else {
@@ -307,6 +320,14 @@ export async function handleSlashCommand(command: string, args: string, context:
         `Active skills: ${state?.activeSkills?.join(', ') || 'none'}`,
         `Subagent reports: ${state?.subagentReports?.length ?? 0}`,
       ];
+      const manager = runtime?.getContextManager();
+      const used = manager?.estimateTokens() ?? 0;
+      const limit = manager?.getMaxTokens() ?? 0;
+      lines.push(`Context tokens: ${used}`);
+      lines.push(`Context limit: ${limit || 'unknown'}`);
+      lines.push(`Utilization: ${limit ? `${Math.round((used / limit) * 100)}%` : 'unknown'}`);
+      lines.push(`Relevant files: ${state?.relevantFiles.length ?? 0}`);
+      lines.push(`MCP tools: ${mcpManager?.getServerStates().reduce((count, server) => count + server.tools.length, 0) ?? 0}`);
       addEvent(lines.join('\n'));
       break;
     }

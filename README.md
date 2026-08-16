@@ -1,11 +1,11 @@
 # Venice CLI
 
-> Privacy-first AI from the command line. No browser. No tracking. Just you and the model.
+> Privacy-first AI agent and command-line toolkit powered by Venice.
 
 [![npm version](https://badge.fury.io/js/veniceai-cli.svg)](https://www.npmjs.com/package/veniceai-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-The official command-line interface for [Venice AI](https://venice.ai). Chat with AI models, generate images, convert text to speech, transcribe audio, and more—all from your terminal.
+Work naturally with a workspace-aware agent, or use deterministic commands for chat, search, images, audio, video, and automation—all from your terminal.
 
 ## Installation
 
@@ -13,10 +13,10 @@ The official command-line interface for [Venice AI](https://venice.ai). Chat wit
 npm install -g veniceai-cli
 ```
 
-Or use without installing:
+Or run it without installing:
 
 ```bash
-npx veniceai-cli chat 'Hello, world!'
+npx veniceai-cli
 ```
 
 ## Quick Start
@@ -40,12 +40,29 @@ npx veniceai-cli chat 'Hello, world!'
    inherited by child processes or captured in diagnostic output. Scope them
    to the process that needs them.
 
-3. **Start chatting**:
+3. **Start the agent from a project**:
    ```bash
-   venice chat "What is the meaning of life?"
+   cd /path/to/project
+   venice
    ```
 
-## Features
+## Talk Naturally to Venice
+
+Natural language is the work interface:
+
+```text
+> explain this repository
+> fix the failing tests
+> review your changes
+> search the latest Venice API documentation
+> generate a README image and save it under docs/assets
+```
+
+Use `@file` to attach workspace context, `!command` for an explicit shell command,
+and slash commands such as `/model`, `/status`, `/permissions`, and `/help` to
+control the current session.
+
+## What the Agent Can Do
 
 - 🤖 **Chat** with state-of-the-art AI models
 - 🔐 **End-to-End Encryption (E2EE)** for maximum privacy
@@ -67,7 +84,15 @@ npx veniceai-cli chat 'Hello, world!'
 - 🐚 **Shell Completions** for bash, zsh, fish
 - 🧭 **Workspace Agent** with guarded file edits, validation, resumable sessions, MCP, skills, and bounded subagents
 
-## Commands
+## Agent Controls
+
+The bare `venice` command starts the same agent available through the explicit
+`venice agent` command. It can work with files, code, Git, approved shell
+commands, live web search, Venice media APIs, MCP servers, skills, and bounded
+subagents. Run `/help` in the TUI for the agent-first guide or `/help all` for
+all control commands.
+
+## Direct Commands and Automation
 
 ### Workspace Agent
 

@@ -64,7 +64,7 @@ export function createSpawnAgentTool(deps: SpawnAgentToolDeps = {}): AgentTool<S
 
   return {
     name: 'spawn_agent',
-    description: 'Run a bounded subagent. Defaults to read-only; write mode permits workspace edits but no shell commands.',
+    description: 'Run a bounded subagent for focused exploration, review, research, testing, or isolated edits. Defaults to read-only; write mode permits workspace edits but no shell, network, or MCP tools.',
     inputSchema: {
       type: 'object',
       properties: {

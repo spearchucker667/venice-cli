@@ -3,6 +3,15 @@ import assert from 'node:assert';
 import { PermissionManager, classifyRisk } from './permissions.js';
 
 describe('PermissionManager', () => {
+  it('changes the live approval policy and clears prior grants', async () => {
+    const permissions = new PermissionManager('suggest');
+    permissions.grant('session', 'write_file');
+    permissions.setMode('auto-edit');
+    assert.strictEqual(permissions.getMode(), 'auto-edit');
+    assert.strictEqual(await permissions.isApproved('write_file', {}, 'write'), true);
+    permissions.setMode('suggest');
+    assert.strictEqual(await permissions.isApproved('write_file', {}, 'write'), false);
+  });
   it('suggest mode requires approval for writes', async () => {
     const pm = new PermissionManager('suggest');
     assert.strictEqual(await pm.isApproved('write_file', { path: 'x' }, 'write'), false);

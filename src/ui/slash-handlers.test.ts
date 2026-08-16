@@ -39,7 +39,7 @@ describe('handleSlashCommand', () => {
   it('handles /help', async () => {
     const { context, messages } = makeContext();
     await handleSlashCommand('help', '', context);
-    assert.ok(messages().some((m) => m.content.includes('Available slash commands')));
+    assert.ok(messages().some((m) => m.content.includes('Just tell Venice what you want done')));
   });
 
   it('handles /quit', async () => {

@@ -11,6 +11,7 @@ import type { AgentEvent } from '../agent/events.js';
 import { EventBus } from '../agent/events.js';
 import type { McpManager } from '../mcp/manager.js';
 import { PermissionManager } from '../agent/permissions.js';
+import type { ApprovalMode } from '../agent/permissions.js';
 import { shellTool } from '../tools/shell/execute.js';
 import type { ToolContext } from '../tools/types.js';
 import { Composer } from './composer.js';
@@ -106,6 +107,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
   const [currentModel, setCurrentModel] = useState(model);
+  const [currentApprovalMode, setCurrentApprovalMode] = useState<ApprovalMode>(approvalMode);
   const [mode, setMode] = useState<PickerMode>('normal');
   const [gitBranch] = useState(() => getGitBranch(workspaceRoot));
 
@@ -259,7 +261,8 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
         setMessages,
         status,
         model: currentModel,
-        approvalMode,
+        approvalMode: currentApprovalMode,
+        setApprovalMode: setCurrentApprovalMode,
         workspaceRoot,
         setModel: handleSetModel,
         showModelPicker: () => setMode('model-picker'),
@@ -286,14 +289,11 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     }
 
     const { text: resolvedText, mentions } = resolveMentions(trimmed);
-    let finalPrompt = resolvedText;
+    let attachedContext: string | undefined;
 
     if (mentions.length) {
       addEvent(`Attached files: ${mentions.join(', ')}`);
-      const fileContents = await readMentionedFiles(workspaceRoot, mentions);
-      if (fileContents) {
-        finalPrompt += `\n\n${fileContents}`;
-      }
+      attachedContext = await readMentionedFiles(workspaceRoot, mentions);
     }
 
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'user', content: resolvedText }]);
@@ -301,7 +301,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     setError(undefined);
 
     runtimeRef.current
-      ?.sendUserMessage(finalPrompt)
+      ?.sendUserMessage(resolvedText, attachedContext)
       .then(() => {
         setStatus(runtimeRef.current?.getState().status ?? 'idle');
         setIsRunning(false);
@@ -355,14 +355,14 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
           onDecision={handleApprovalDecision}
         />
       )}
-      <Composer onSubmit={handleSubmit} disabled={pendingApproval !== null || mode !== 'normal'} />
+      <Composer onSubmit={handleSubmit} workspaceRoot={workspaceRoot} disabled={pendingApproval !== null || mode !== 'normal'} />
       <StatusBar
         state={{
           messages,
           status,
           model: currentModel,
           workspaceRoot,
-          approvalMode,
+          approvalMode: currentApprovalMode,
           contextTokens: runtimeRef.current?.getContextManager().estimateTokens() ?? 0,
           maxTokens: runtimeRef.current?.getContextManager().getMaxTokens() ?? 0,
           gitBranch,

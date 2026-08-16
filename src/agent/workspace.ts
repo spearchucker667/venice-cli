@@ -5,6 +5,15 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+export function isPathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
 export class WorkspaceManager {
   private readonly root: string;
   private readonly changed = new Set<string>();
@@ -50,7 +59,7 @@ export class WorkspaceManager {
 
     const relative = path.relative(this.root, absolute);
 
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    if (!isPathInside(this.root, absolute)) {
       throw new Error(`Path outside workspace: ${inputPath}`);
     }
 
@@ -59,8 +68,7 @@ export class WorkspaceManager {
 
   isInsideWorkspace(absolutePath: string): boolean {
     const real = fs.existsSync(absolutePath) ? fs.realpathSync(absolutePath) : absolutePath;
-    const relative = path.relative(this.root, real);
-    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+    return isPathInside(this.root, real);
   }
 
   assertInsideWorkspace(absolutePath: string): void {

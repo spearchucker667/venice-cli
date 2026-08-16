@@ -51,8 +51,8 @@ async function main() {
     .name('venice')
     .version(getVersion())
     .description(
-      `${c.bold('Venice CLI')} — Privacy-first AI from the command line\n\n` +
-      `Chat with AI models, generate images, convert text to speech, and more.\n` +
+      `${c.bold('Venice CLI')} — Privacy-first AI agent and command-line toolkit\n\n` +
+      `Work naturally with a workspace agent, or use direct commands for automation.\n` +
       `All with Venice's privacy-preserving infrastructure.`
     )
     .option('--no-color', 'Disable colored output')

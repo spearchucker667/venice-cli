@@ -4,6 +4,15 @@ import { ContextManager, buildStructuredSummary } from './context.js';
 import type { AgentState } from './types.js';
 
 describe('ContextManager', () => {
+  it('keeps attached source separate from project instructions', () => {
+    const manager = new ContextManager();
+    manager.setProjectInstructions('PROJECT RULE');
+    manager.setFileContext([{ role: 'user', content: 'UNTRUSTED SOURCE' }]);
+    const messages = manager.buildMessages();
+    assert.match(String(messages[0].content), /PROJECT RULE/);
+    assert.strictEqual(messages[1].role, 'user');
+    assert.strictEqual(messages[1].content, 'UNTRUSTED SOURCE');
+  });
   it('builds messages with system content', () => {
     const ctx = new ContextManager();
     ctx.setProjectInstructions('Use TypeScript strict mode.');

@@ -3,6 +3,7 @@
  */
 
 import * as path from 'node:path';
+import { isPathInside } from '../agent/workspace.js';
 
 export interface MentionResolution {
   text: string;
@@ -11,12 +12,12 @@ export interface MentionResolution {
 
 export function resolveMentions(input: string): MentionResolution {
   const mentions: string[] = [];
-  const mentionPattern = /@(\S+)/g;
+  const mentionPattern = /@(?:"([^"]+)"|'([^']+)'|([^\s]+))/g;
 
-  const text = input.replace(mentionPattern, (_match, mention: string) => {
-    const resolved = path.normalize(mention).replace(/^\.\.\/+/g, '').replace(/^\//, '');
-    if (resolved && !mentions.includes(resolved)) {
-      mentions.push(resolved);
+  const text = input.replace(mentionPattern, (_match, doubleQuoted: string | undefined, singleQuoted: string | undefined, bare: string | undefined) => {
+    const mention = doubleQuoted ?? singleQuoted ?? bare ?? '';
+    if (mention && !mentions.includes(mention)) {
+      mentions.push(mention);
     }
     return mention;
   });
@@ -47,7 +48,16 @@ export async function readMentionedFiles(workspaceRoot: string, mentions: string
 
   for (const mention of mentions) {
     try {
-      const fullPath = path.resolve(workspaceRoot, mention);
+      if (path.isAbsolute(mention) || path.win32.isAbsolute(mention)) {
+        combined += `\n[Error reading ${mention}: Path outside workspace]\n`;
+        continue;
+      }
+      const fullPath = path.resolve(root, mention);
+
+      if (!isPathInside(root, fullPath)) {
+        combined += `\n[Error reading ${mention}: Path outside workspace]\n`;
+        continue;
+      }
       
       let realPath: string;
       try {
@@ -58,7 +68,7 @@ export async function readMentionedFiles(workspaceRoot: string, mentions: string
       }
 
       // Ensure the path is within the workspace
-      if (!realPath.startsWith(root)) {
+      if (!isPathInside(root, realPath)) {
         combined += `\n[Error reading ${mention}: Path outside workspace]\n`;
         continue;
       }

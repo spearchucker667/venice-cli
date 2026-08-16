@@ -11,12 +11,20 @@ test('resolveMentions extracts @ mentions correctly', () => {
   assert.deepStrictEqual(mentions, ['src/index.ts', 'package.json']);
 });
 
+test('resolveMentions preserves unsafe paths for explicit rejection', () => {
+  const { text, mentions } = resolveMentions('read @../../.ssh/id_ed25519 and @"file with spaces.txt"');
+  assert.strictEqual(text, 'read ../../.ssh/id_ed25519 and file with spaces.txt');
+  assert.deepStrictEqual(mentions, ['../../.ssh/id_ed25519', 'file with spaces.txt']);
+});
+
 test('readMentionedFiles securely handles mentions', async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'venice-mentions-test-'));
   const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'venice-mentions-external-'));
 
   try {
     await fs.writeFile(path.join(tmpDir, 'test.txt'), 'hello world');
+    await fs.writeFile(path.join(tmpDir, 'unicode-雪.txt'), 'snow');
+    await fs.writeFile(path.join(tmpDir, 'file with spaces.txt'), 'spaced');
     await fs.writeFile(path.join(tmpDir, 'binary.bin'), Buffer.from([0x00, 0x01, 0x02]));
     await fs.mkdir(path.join(tmpDir, 'src'));
     await fs.writeFile(path.join(tmpDir, 'src', 'index.ts'), 'console.log("hello");');
@@ -52,6 +60,19 @@ test('readMentionedFiles securely handles mentions', async () => {
     // Test absolute path
     const absolute = await readMentionedFiles(tmpDir, [path.join(externalDir, 'secret.txt')]);
     assert.match(absolute, /Path outside workspace/);
+
+    const windowsAbsolute = await readMentionedFiles(tmpDir, ['C:\\Users\\example\\secret.txt']);
+    assert.match(windowsAbsolute, /Path outside workspace/);
+
+    const prefixCollisionRoot = `${tmpDir}2`;
+    await fs.mkdir(prefixCollisionRoot);
+    await fs.writeFile(path.join(prefixCollisionRoot, 'secret.txt'), 'prefix secret');
+    const prefixCollision = await readMentionedFiles(tmpDir, [path.relative(tmpDir, path.join(prefixCollisionRoot, 'secret.txt'))]);
+    assert.match(prefixCollision, /Path outside workspace/);
+    await fs.rm(prefixCollisionRoot, { recursive: true, force: true });
+
+    assert.match(await readMentionedFiles(tmpDir, ['unicode-雪.txt']), /snow/);
+    assert.match(await readMentionedFiles(tmpDir, ['file with spaces.txt']), /spaced/);
 
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });

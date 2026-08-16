@@ -18,7 +18,7 @@ export type ApprovalCallback = (
 ) => Promise<{ approved: boolean; scope?: ApprovalScope['scope'] }>;
 
 export class PermissionManager {
-  private readonly mode: ApprovalMode;
+  private mode: ApprovalMode;
   private readonly grants: ApprovalScope[] = [];
   private approver?: ApprovalCallback;
 
@@ -28,6 +28,15 @@ export class PermissionManager {
 
   setApprover(approver: ApprovalCallback): void {
     this.approver = approver;
+  }
+
+  getMode(): ApprovalMode {
+    return this.mode;
+  }
+
+  setMode(mode: ApprovalMode): void {
+    this.mode = mode;
+    this.grants.length = 0;
   }
 
   async requestApproval(
@@ -139,6 +148,7 @@ export function classifyRisk(toolName: string, input: unknown): RiskLevel {
       'image_to_video',
       'transcribe_audio',
       'text_to_speech',
+      'generate_music',
     ].includes(toolName)
   ) {
     return 'network';

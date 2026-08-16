@@ -1,7 +1,7 @@
 {
   "name": "veniceai-cli",
   "version": "2.1.0",
-  "description": "Privacy-first command line interface for Venice AI",
+  "description": "Privacy-first AI agent and command-line toolkit powered by Venice",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -11,10 +11,13 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
-    "test": "npm run build && node --test \"dist/**/*.test.js\"",
+    "test": "npm run build && npm run test:compiled",
+    "test:compiled": "node scripts/run-tests.mjs",
+    "pack:check": "npm pack --dry-run --json",
+    "verify": "npm run lint && npm run build && npm run test:compiled && npm audit --omit=dev && npm run pack:check",
     "lint": "eslint \"src/**/*.ts\"",
     "clean": "node -e \"const fs = require('fs'); fs.rmSync('dist', { recursive: true, force: true });\"",
-    "prepublishOnly": "npm run clean && npm run build"
+    "prepublishOnly": "npm run verify"
   },
   "files": [
     "dist",

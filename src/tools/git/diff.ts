@@ -8,7 +8,7 @@ import { success, failure } from '../result.js';
 
 export const gitDiffTool: AgentTool<{ cwd?: string; path?: string }, string> = {
   name: 'git_diff',
-  description: 'Show Git diff for the working tree or a specific path.',
+  description: 'Inspect uncommitted Git changes in the current workspace. Use when reviewing or summarizing what changed.',
   inputSchema: {
     type: 'object',
     properties: {
