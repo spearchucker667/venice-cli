@@ -3,7 +3,7 @@
  */
 
 import { Command } from 'commander';
-import { listModels } from '../lib/api.js';
+import { listModels, listModelTraits } from '../lib/api.js';
 import {
   formatError,
   getChalk,
@@ -12,7 +12,7 @@ import {
 import type { Model } from '../types/index.js';
 
 export function registerModelsCommand(program: Command): void {
-  program
+  const modelsCmd = program
     .command('models')
     .description('List available models')
     .option('-t, --type <type>', 'Filter by type (all|text|image|tts|asr|music|embedding|video|upscale|inpaint)')
@@ -91,6 +91,40 @@ export function registerModelsCommand(program: Command): void {
 
         console.log(`\n${c.dim('🔒 = Privacy-preserving (no data retention)')}`);
         console.log(c.dim('📊 = Standard model'));
+      } catch (error) {
+        console.error(formatError(error instanceof Error ? error.message : String(error)));
+        process.exit(1);
+      }
+    });
+
+  modelsCmd
+    .command('traits')
+    .description('List model traits')
+    .option('-t, --type <type>', 'Filter traits by type (e.g. text)')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (options) => {
+      const format = detectOutputFormat(options.format);
+      const c = getChalk();
+      try {
+        const traits = await listModelTraits({ type: options.type });
+        if (format === 'json') {
+          console.log(JSON.stringify(traits, null, 2));
+          return;
+        }
+        if (!traits || (Array.isArray(traits) && traits.length === 0) || Object.keys(traits).length === 0) {
+          console.log(c.yellow('No traits found.'));
+          return;
+        }
+        console.log(c.bold(`\n📋 Model Traits\n`));
+        if (Array.isArray(traits)) {
+          for (const trait of traits) {
+            console.log(`  - ${c.cyan(typeof trait === 'string' ? trait : trait.name || JSON.stringify(trait))}`);
+          }
+        } else {
+          for (const [key, value] of Object.entries(traits)) {
+            console.log(`  ${c.cyan(key)}: ${value}`);
+          }
+        }
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
         process.exit(1);

@@ -3,19 +3,31 @@
  */
 
 export type ApprovalMode = 'suggest' | 'auto-edit' | 'auto' | 'yolo';
-export type RiskLevel = 'read' | 'write' | 'execute' | 'network' | 'outside_workspace' | 'destructive';
+export type RiskLevel = 'read' | 'write' | 'execute' | 'network' | 'outside_workspace' | 'destructive' | 'external_side_effect';
+
+export interface Matcher {
+  kind: 'path-glob' | 'command-prefix' | 'field-equals';
+  field?: string;
+  value: string;
+}
 
 export interface ApprovalScope {
   scope: 'once' | 'session' | 'pattern';
   toolName?: string;
-  pattern?: RegExp;
+  matcher?: Matcher;
 }
+
+export type ApprovalDecision =
+  | { approved: false }
+  | { approved: true; scope: 'once' }
+  | { approved: true; scope: 'session' }
+  | { approved: true; scope: 'pattern'; matcher: Matcher };
 
 export type ApprovalCallback = (
   toolName: string,
   input: unknown,
   risk: RiskLevel
-) => Promise<{ approved: boolean; scope?: ApprovalScope['scope'] }>;
+) => Promise<ApprovalDecision>;
 
 export class PermissionManager {
   private mode: ApprovalMode;
@@ -43,15 +55,19 @@ export class PermissionManager {
     toolName: string,
     input: unknown,
     risk: RiskLevel
-  ): Promise<{ approved: boolean; scope?: ApprovalScope['scope'] }> {
+  ): Promise<ApprovalDecision> {
     if (this.approver) {
       return await this.approver(toolName, input, risk);
     }
     return { approved: false };
   }
 
-  grant(scope: ApprovalScope['scope'], toolName?: string, pattern?: RegExp): void {
-    this.grants.push({ scope, toolName, pattern });
+  grant(scope: ApprovalScope['scope'], toolName?: string, matcher?: Matcher): void {
+    if (scope === 'pattern' && !matcher) {
+      // Cannot grant pattern scope without a matcher
+      return;
+    }
+    this.grants.push({ scope, toolName, matcher });
   }
 
   async isApproved(toolName: string, input: unknown, risk: RiskLevel): Promise<boolean> {
@@ -63,7 +79,7 @@ export class PermissionManager {
       return true;
     }
 
-    if (this.mode === 'auto' && risk !== 'destructive' && risk !== 'network') {
+    if (this.mode === 'auto' && risk !== 'destructive' && risk !== 'network' && risk !== 'external_side_effect') {
       return true;
     }
 
@@ -78,80 +94,39 @@ export class PermissionManager {
 
     for (const grant of this.grants) {
       if (grant.toolName && grant.toolName !== toolName) continue;
-      if (grant.pattern && !this.matchesPattern(grant.pattern, input)) continue;
+      if (grant.scope === 'pattern' && grant.matcher) {
+        if (!this.matchesPattern(grant.matcher, input)) continue;
+        return true;
+      }
       if (grant.scope === 'session') return true;
       if (grant.scope === 'once') {
         const index = this.grants.indexOf(grant);
         if (index !== -1) this.grants.splice(index, 1);
         return true;
       }
-      if (grant.scope === 'pattern') return true;
     }
 
     return false;
   }
 
-  private matchesPattern(pattern: RegExp, input: unknown): boolean {
-    const text = typeof input === 'string' ? input : JSON.stringify(input);
-    return pattern.test(text);
+  private matchesPattern(matcher: Matcher, input: unknown): boolean {
+    if (!input || typeof input !== 'object') return false;
+    const value = matcher.field ? (input as any)[matcher.field] : undefined;
+    if (value === undefined) return false;
+    
+    if (matcher.kind === 'field-equals') {
+      return String(value) === matcher.value;
+    } else if (matcher.kind === 'command-prefix') {
+      return String(value).startsWith(matcher.value);
+    } else if (matcher.kind === 'path-glob') {
+      // Basic glob to regex conversion for * and **
+      const regexStr = matcher.value
+        .replace(/\./g, '\\.')
+        .replace(/\*\*/g, '.*')
+        .replace(/(?<!\.)\*/g, '[^/]*');
+      return new RegExp(`^${regexStr}$`).test(String(value));
+    }
+    return false;
   }
 }
 
-export function classifyRisk(toolName: string, input: unknown): RiskLevel {
-  if (toolName === 'spawn_agent') {
-    const mode = typeof input === 'object' && input !== null
-      ? (input as Record<string, unknown>).mode
-      : undefined;
-    return mode === 'write' ? 'write' : 'execute';
-  }
-  if (toolName === 'shell') {
-    const command = typeof input === 'object' && input !== null
-      ? String((input as Record<string, unknown>).command || '')
-      : '';
-    if (/\brm\b.*-rf|\bmkfs\b|\bdd\b|\bformat\b/i.test(command)) {
-      return 'destructive';
-    }
-    return 'execute';
-  }
-  if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'apply_patch') {
-    return 'write';
-  }
-  if (
-    [
-      'read_file',
-      'read_many_files',
-      'list_directory',
-      'glob',
-      'grep',
-      'find',
-      'git_status',
-      'git_diff',
-      'git_log',
-      'todo_read',
-      'todo_write',
-      'skill_list',
-      'skill_load',
-    ].includes(toolName)
-  ) {
-    return 'read';
-  }
-  if (toolName === 'ask_user') return 'read';
-  if (
-    [
-      'web_search',
-      'web_scrape',
-      'generate_image',
-      'edit_image',
-      'upscale_image',
-      'remove_background',
-      'generate_video',
-      'image_to_video',
-      'transcribe_audio',
-      'text_to_speech',
-      'generate_music',
-    ].includes(toolName)
-  ) {
-    return 'network';
-  }
-  return 'execute';
-}

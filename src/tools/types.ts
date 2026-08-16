@@ -6,6 +6,7 @@ import type { ToolDefinition } from '../types/index.js';
 import type { AgentState, ToolResult } from '../agent/types.js';
 import type { CheckpointManager } from '../agent/checkpoints.js';
 import type { SkillRegistry } from '../skills/registry.js';
+import type { RiskLevel } from '../agent/permissions.js';
 
 export interface ToolContext {
   workspaceRoot: string;
@@ -25,7 +26,7 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
     properties: Record<string, unknown>;
     required?: string[];
   };
-  risk: 'read' | 'write' | 'execute' | 'network' | 'destructive';
+  risk: RiskLevel | ((input: unknown) => RiskLevel);
   execute(input: TInput, context: ToolContext): Promise<ToolResult<TOutput>>;
 }
 

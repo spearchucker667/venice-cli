@@ -74,20 +74,24 @@ function readRepoInstructions(workspaceRoot: string): InstructionSource[] {
 function readNestedRules(workspaceRoot: string): InstructionSource[] {
   const rulesDir = path.join(workspaceRoot, '.venice', 'rules');
   const sources: InstructionSource[] = [];
-  if (!fs.existsSync(rulesDir) || !fs.lstatSync(rulesDir).isDirectory()) {
-    return sources;
-  }
-
-  const entries = fs.readdirSync(rulesDir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-    const filePath = path.join(rulesDir, entry.name);
-    const content = readFileIfExists(filePath);
-    if (content !== undefined) {
-      // Scope applies to the subtree named like the file without .md
-      const scope = entry.name.slice(0, -3);
-      sources.push({ source: path.relative(workspaceRoot, filePath), content, scope });
+  try {
+    if (!fs.existsSync(rulesDir) || !fs.lstatSync(rulesDir).isDirectory()) {
+      return sources;
     }
+
+    const entries = fs.readdirSync(rulesDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+      const filePath = path.join(rulesDir, entry.name);
+      const content = readFileIfExists(filePath);
+      if (content !== undefined) {
+        // Scope applies to the subtree named like the file without .md
+        const scope = entry.name.slice(0, -3);
+        sources.push({ source: path.relative(workspaceRoot, filePath), content, scope });
+      }
+    }
+  } catch {
+    // Ignore read errors
   }
   return sources;
 }

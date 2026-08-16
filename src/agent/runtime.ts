@@ -9,7 +9,7 @@ import { EventBus } from './events.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { createDefaultRegistry } from '../tools/registry.js';
 import type { ToolContext } from '../tools/types.js';
-import { PermissionManager, classifyRisk } from './permissions.js';
+import { PermissionManager } from './permissions.js';
 import type { ApprovalCallback } from './permissions.js';
 import { ContextManager, buildStructuredSummary } from './context.js';
 import { SessionManager } from './sessions.js';
@@ -25,6 +25,7 @@ import { SkillRegistry, getGlobalSkillsDir, getProjectSkillsDir } from '../skill
 import type { Skill } from '../skills/types.js';
 import { detectValidationCommands } from './validation.js';
 import { runValidationTool } from '../tools/validation/run.js';
+import { SecretRedactor, collectKnownSecrets } from '../lib/redactor.js';
 import type { ModelProfile } from './model-profile.js';
 
 export interface AgentRuntimeOptions {
@@ -67,6 +68,7 @@ export class AgentRuntime {
   private checkpoints: CheckpointManager;
   private readonly workspace: WorkspaceManager;
   private readonly skills: SkillRegistry;
+  private readonly redactor = new SecretRedactor(collectKnownSecrets());
   private sessionCompletedEmitted = false;
   private started = false;
 
@@ -243,8 +245,11 @@ export class AgentRuntime {
     try {
       const instructions = await loadInstructions(this.state.workspaceRoot);
       this.context.setProjectInstructions(instructions.text);
-    } catch {
-      // Instructions are best-effort in Phase 2.
+    } catch (e) {
+      this.state.messages.push({
+        role: 'system',
+        content: `Warning: Failed to load project instructions. ${e instanceof Error ? e.message : String(e)}`,
+      });
     }
 
     try {
@@ -461,7 +466,7 @@ export class AgentRuntime {
       timestamp: new Date().toISOString(),
       eventId: randomUUID(),
       toolName,
-      input: toolCall.function.arguments,
+      input: this.redactor.redact(toolCall.function.arguments),
     });
 
     let input: unknown = toolCall.function.arguments;
@@ -481,7 +486,7 @@ export class AgentRuntime {
         return false;
       }
 
-      const risk = classifyRisk(toolName, input);
+      const risk = typeof tool.risk === 'function' ? tool.risk(input) : tool.risk;
       approved = await this.permissions.isApproved(toolName, input, risk);
 
       if (!approved) {
@@ -499,7 +504,11 @@ export class AgentRuntime {
           return false;
         }
         if (decision.scope) {
-          this.permissions.grant(decision.scope, toolName);
+          if (decision.scope === 'pattern') {
+            this.permissions.grant(decision.scope, toolName, decision.matcher);
+          } else {
+            this.permissions.grant(decision.scope, toolName);
+          }
         }
         approved = true;
       }
@@ -510,7 +519,7 @@ export class AgentRuntime {
         eventId: randomUUID(),
         toolCallId: toolCall.id,
         toolName,
-        input,
+        input: this.redactor.redact(input),
       });
 
       if (toolName === 'spawn_agent') {
@@ -604,25 +613,28 @@ export class AgentRuntime {
     approved: boolean,
     durationMs: number
   ): void {
+    const safeInput = this.redactor.redact(input);
+    const safeResult = this.redactor.redact(result) as ToolResult<unknown>;
+
     this.emit({
       type: 'tool_completed',
       timestamp: new Date().toISOString(),
       eventId: randomUUID(),
       toolCallId: id,
       toolName,
-      input,
-      result,
+      input: safeInput,
+      result: safeResult,
     });
     this.state.toolHistory.push({
       id,
       toolName,
-      input,
-      result,
+      input: safeInput,
+      result: safeResult,
       approved,
       durationMs,
       timestamp: new Date().toISOString(),
     });
-    this.addToolResult(id, result);
+    this.addToolResult(id, safeResult);
   }
 
   private syncCheckpointState(): void {

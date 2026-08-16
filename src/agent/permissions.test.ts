@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { PermissionManager, classifyRisk } from './permissions.js';
+import { PermissionManager } from './permissions.js';
 
 describe('PermissionManager', () => {
   it('changes the live approval policy and clears prior grants', async () => {
@@ -32,6 +32,21 @@ describe('PermissionManager', () => {
     assert.strictEqual(await pm.isApproved('run_validation', { command: 'npm test' }, 'execute'), false);
   });
 
+  it('does not auto-approve shell in auto mode', async () => {
+    const pm = new PermissionManager('auto');
+    assert.strictEqual(await pm.isApproved('shell', { command: 'echo hi' }, 'external_side_effect'), false);
+  });
+
+  it('does not auto-approve mcp tools in auto mode', async () => {
+    const pm = new PermissionManager('auto');
+    assert.strictEqual(await pm.isApproved('mcp:github:create_issue', { title: 'x' }, 'external_side_effect'), false);
+  });
+
+  it('auto mode still auto-approves ordinary execute tools', async () => {
+    const pm = new PermissionManager('auto');
+    assert.strictEqual(await pm.isApproved('spawn_agent', { task: 'review' }, 'execute'), true);
+  });
+
   it('yolo mode still requires approval for destructive ops', async () => {
     const pm = new PermissionManager('yolo');
     assert.strictEqual(await pm.isApproved('shell', { command: 'rm -rf /' }, 'destructive'), false);
@@ -41,33 +56,5 @@ describe('PermissionManager', () => {
     const pm = new PermissionManager('suggest');
     pm.grant('session', 'write_file');
     assert.strictEqual(await pm.isApproved('write_file', { path: 'x' }, 'write'), true);
-  });
-});
-
-describe('classifyRisk', () => {
-  it('classifies shell as execute', () => {
-    assert.strictEqual(classifyRisk('shell', { command: 'echo hi' }), 'execute');
-  });
-
-  it('classifies destructive shell commands', () => {
-    assert.strictEqual(classifyRisk('shell', { command: 'rm -rf /' }), 'destructive');
-  });
-
-  it('classifies read tools', () => {
-    assert.strictEqual(classifyRisk('read_file', { path: 'x' }), 'read');
-  });
-
-  it('classifies spawn_agent as execute', () => {
-    assert.strictEqual(classifyRisk('spawn_agent', { task: 'inspect' }), 'execute');
-  });
-
-  it('classifies a write-capable subagent as write', () => {
-    assert.strictEqual(classifyRisk('spawn_agent', { task: 'edit', mode: 'write' }), 'write');
-  });
-
-  it('classifies Venice media tools as network', () => {
-    assert.strictEqual(classifyRisk('edit_image', { image: 'a.png', prompt: 'x', output: 'b.png' }), 'network');
-    assert.strictEqual(classifyRisk('generate_video', { prompt: 'a clip' }), 'network');
-    assert.strictEqual(classifyRisk('text_to_speech', { text: 'hi', output: 'out.mp3' }), 'network');
   });
 });

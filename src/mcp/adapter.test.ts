@@ -22,7 +22,7 @@ describe('createMcpToolAdapter', () => {
     });
 
     assert.strictEqual(adapter.name, 'mcp:memory:add');
-    assert.strictEqual(adapter.risk, 'execute');
+    assert.strictEqual(adapter.risk, 'external_side_effect');
     const result = await adapter.execute({ key: 'x' }, context);
     assert.strictEqual(result.ok, true);
     assert.deepStrictEqual(calls, [{ name: 'add', args: { key: 'x' } }]);

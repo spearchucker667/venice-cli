@@ -32,18 +32,22 @@ export class SkillRegistry {
   discover(): void {
     this.skills.clear();
     for (const dir of [this.globalDir, this.projectDir]) {
-      if (!dir || !fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) {
-        continue;
-      }
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (!entry.isDirectory()) {
+      try {
+        if (!dir || !fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) {
           continue;
         }
-        const skillPath = path.join(dir, entry.name, 'SKILL.md');
-        const skill = parseSkillMarkdown(skillPath);
-        if (skill) {
-          this.skills.set(skill.name, skill);
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) {
+            continue;
+          }
+          const skillPath = path.join(dir, entry.name, 'SKILL.md');
+          const skill = parseSkillMarkdown(skillPath);
+          if (skill) {
+            this.skills.set(skill.name, skill);
+          }
         }
+      } catch {
+        // Handle capability discovery failures gracefully
       }
     }
   }

@@ -49,23 +49,35 @@ const MAX_DOCUMENT_PARSE_RESPONSE_BYTES = 50 * 1024 * 1024;
 const MAX_VIDEO_STATUS_BYTES = 1024 * 1024;
 
 export class VeniceApiError extends Error {
+  public retryAfter?: number;
+  
   constructor(
     message: string,
     public statusCode?: number,
-    public code?: string
+    public code?: string,
+    retryAfter?: number
   ) {
     super(message);
     this.name = 'VeniceApiError';
+    this.retryAfter = retryAfter;
   }
 
-  static fromResponse(status: number, body: string): VeniceApiError {
+  static fromResponse(response: Response, body: string): VeniceApiError {
+    const status = response.status;
+    let retryAfter: number | undefined;
+    const retryAfterHeader = response.headers.get('retry-after');
+    if (retryAfterHeader) {
+      const parsed = parseInt(retryAfterHeader, 10);
+      if (!isNaN(parsed)) retryAfter = parsed;
+    }
+    
     try {
       const json = JSON.parse(body);
       const message = json.error?.message || json.message || body;
       const code = json.error?.code;
-      return new VeniceApiError(message, status, code);
+      return new VeniceApiError(message, status, code, retryAfter);
     } catch {
-      return new VeniceApiError(body || `HTTP ${status}`, status);
+      return new VeniceApiError(body || `HTTP ${status}`, status, undefined, retryAfter);
     }
   }
 
@@ -217,7 +229,7 @@ export async function apiRequest<T>(
           clearTimeout(timeoutId);
           errorBody = await response.text();
         }
-        throw VeniceApiError.fromResponse(response.status, errorBody);
+        throw VeniceApiError.fromResponse(response, errorBody);
       }
 
       onHeaders?.(response.headers);
@@ -298,8 +310,9 @@ export async function apiRequest<T>(
         }
 
         if (error.isRateLimited()) {
+          const waitTime = error.retryAfter ? error.retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1) * 2;
           if (spinner) spinner.text = `Rate limited, waiting... (attempt ${attempt + 1}/${retries + 1})`;
-          await sleep(RETRY_DELAY_MS * (attempt + 1) * 2);
+          await sleep(waitTime);
           continue;
         }
 
@@ -418,6 +431,7 @@ export async function chatCompletion(
     body,
     spinnerText: 'Thinking...',
     showSpinner: options.showSpinner,
+    additionalHeaders: options.additionalHeaders,
   });
 
   const choice = response.choices?.[0];
@@ -474,7 +488,15 @@ export async function* chatCompletionStream(
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let timeoutId: NodeJS.Timeout | undefined;
+      const readWithTimeout = () => {
+        return new Promise<any>((resolve, reject) => {
+          timeoutId = setTimeout(() => reject(new Error('Stream idle timeout: server stopped sending data')), 30000);
+          reader.read().then(resolve).catch(reject);
+        }).finally(() => clearTimeout(timeoutId));
+      };
+
+      const { done, value } = await readWithTimeout();
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
@@ -526,7 +548,10 @@ export async function* chatCompletionStream(
               yield { finish_reason: choice.finish_reason, done: false, completionId };
             }
           } catch {
-            // Skip malformed JSON
+            if (data.includes('"error"')) {
+              throw new Error(`API Error in stream: ${data}`);
+            }
+            // Skip other malformed JSON
           }
         }
       }
@@ -817,7 +842,7 @@ export async function upscaleImage(
 
     if (!response.ok) {
       const errorBody = bytes.toString('utf-8');
-      throw VeniceApiError.fromResponse(response.status, errorBody);
+      throw VeniceApiError.fromResponse(response, errorBody);
     }
 
     const contentType = response.headers.get('content-type') || '';
@@ -899,7 +924,7 @@ export async function textToSpeech(
         MAX_AUDIO_DOWNLOAD_BYTES,
         'Text-to-speech API error response'
       );
-      throw VeniceApiError.fromResponse(response.status, errorBytes.toString('utf-8'));
+      throw VeniceApiError.fromResponse(response, errorBytes.toString('utf-8'));
     }
 
     const contentType = response.headers.get('content-type')?.split(';')[0].trim();
@@ -990,7 +1015,7 @@ export async function cloneVoice(
 
     if (!response.ok) {
       const errorBody = await response.text();
-      throw VeniceApiError.fromResponse(response.status, errorBody);
+      throw VeniceApiError.fromResponse(response, errorBody);
     }
 
     if (spinner) stopSpinner(true);
@@ -1105,7 +1130,7 @@ export async function transcribe(
 
     if (!res.ok) {
       const errorBody = await res.text();
-      throw VeniceApiError.fromResponse(res.status, errorBody);
+      throw VeniceApiError.fromResponse(res, errorBody);
     }
 
     if (spinner) stopSpinner(true);
@@ -1165,6 +1190,19 @@ export async function generateEmbeddings(
 
 const MODELS_CACHE_TTL_MS = 60_000;
 let modelsCache: { models: Model[]; fetchedAt: number } | null = null;
+
+export async function listModelTraits(
+  options: { showSpinner?: boolean; type?: string } = {}
+): Promise<any> {
+  const { showSpinner = true, type } = options;
+  const url = type ? `/models/traits?type=${encodeURIComponent(type)}` : '/models/traits';
+  const response = await apiRequest<any>(url, {
+    method: 'GET',
+    spinnerText: 'Fetching model traits...',
+    showSpinner,
+  });
+  return response?.data || response || [];
+}
 
 export function clearModelsCache(): void {
   modelsCache = null;
@@ -1410,7 +1448,7 @@ async function retrieveVideoResponse(
 
       if (!response.ok) {
         const errorBody = await response.text();
-        throw VeniceApiError.fromResponse(response.status, errorBody);
+        throw VeniceApiError.fromResponse(response, errorBody);
       }
 
       const inspected = await inspectVideoRetrieveResponse(response);
@@ -1996,7 +2034,7 @@ export async function parseDocument(filePath: string): Promise<DocumentParseResp
     );
 
     if (!response.ok) {
-      throw VeniceApiError.fromResponse(response.status, responseBytes.toString('utf-8'));
+      throw VeniceApiError.fromResponse(response, responseBytes.toString('utf-8'));
     }
 
     const responseBody = responseBytes.toString('utf-8');

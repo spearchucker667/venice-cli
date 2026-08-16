@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import * as os from 'node:os';
-import { shellTool } from './execute.js';
+import { shellTool, buildShellEnv } from './execute.js';
 
 describe('shell tool', () => {
   const context = (root: string) => ({
@@ -29,5 +29,19 @@ describe('shell tool', () => {
     const result = await shellTool.execute({ command: 'sleep 10', timeoutMs: 100 }, context(os.tmpdir()));
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.data?.timedOut, true);
+  });
+});
+
+describe('buildShellEnv', () => {
+  it('does not inherit arbitrary secrets from process.env', () => {
+    process.env.VENICE_API_KEY = 'super-secret-123';
+    process.env.GITHUB_TOKEN = 'ghp_super_secret';
+    const env = buildShellEnv('/tmp/workspace');
+    assert.strictEqual(env.VENICE_API_KEY, undefined, 'VENICE_API_KEY should not leak');
+    assert.strictEqual(env.GITHUB_TOKEN, undefined, 'GITHUB_TOKEN should not leak');
+    assert.strictEqual(env.PWD, '/tmp/workspace');
+    assert.ok(env.PATH, 'PATH should be preserved');
+    delete process.env.VENICE_API_KEY;
+    delete process.env.GITHUB_TOKEN;
   });
 });

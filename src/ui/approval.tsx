@@ -5,10 +5,9 @@
 import { Box, Text } from 'ink';
 import SelectInput from 'ink-select-input';
 
-export interface ApprovalDecision {
-  approved: boolean;
-  scope?: 'once' | 'session' | 'pattern';
-}
+import type { ApprovalDecision } from '../agent/permissions.js';
+
+export type { ApprovalDecision };
 
 export interface ApprovalPromptProps {
   toolName: string;
