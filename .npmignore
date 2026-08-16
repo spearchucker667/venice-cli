@@ -15,9 +15,14 @@ CHANGELOG.md
 
 # Test files
 *.test.ts
+*.test.js
+*.test.js.map
+*.test.d.ts
+*.test.d.ts.map
 *.spec.ts
 __tests__/
 coverage/
+dist/mcp/test-server.*
 
 # Development
 .vscode/

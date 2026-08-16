@@ -37,6 +37,7 @@ export interface AgentRuntimeOptions {
   modelClient?: VeniceModelClient;
   toolRegistry?: ToolRegistry;
   permissionManager?: PermissionManager;
+  checkpointManager?: CheckpointManager;
   contextManager?: ContextManager;
   sessionManager?: SessionManager;
   eventBus?: EventBus;
@@ -62,7 +63,8 @@ export class AgentRuntime {
   private readonly autoValidate: boolean;
   private readonly signal?: AbortSignal;
   private readonly mcpManager?: McpManager;
-  private readonly checkpoints: CheckpointManager;
+  private checkpoints: CheckpointManager;
+  private readonly workspace: WorkspaceManager;
   private readonly skills: SkillRegistry;
   private sessionCompletedEmitted = false;
 
@@ -92,7 +94,8 @@ export class AgentRuntime {
     this.autoValidate = options.autoValidate ?? true;
     this.signal = options.signal;
     this.mcpManager = options.mcpManager;
-    this.checkpoints = new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
+    this.workspace = new WorkspaceManager(this.state.workspaceRoot);
+    this.checkpoints = options.checkpointManager || new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
     this.skills = new SkillRegistry(getGlobalSkillsDir(), getProjectSkillsDir(this.state.workspaceRoot));
     this.skills.discover();
     this.state.skillSummaries = this.skills.list();
@@ -114,7 +117,13 @@ export class AgentRuntime {
   }
 
   loadState(state: AgentState): void {
+    const resumedWorkspace = new WorkspaceManager(state.workspaceRoot);
+    if (resumedWorkspace.workspaceRoot !== this.workspace.workspaceRoot) {
+      throw new Error('Cannot resume a session from a different workspace');
+    }
     Object.assign(this.state, state);
+    this.workspace.replaceChangedFiles(this.state.changedFiles);
+    this.checkpoints = new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
     this.sessionCompletedEmitted = state.status === 'complete' || state.status === 'failed' || state.status === 'cancelled';
     this.modelClient.setModel(this.state.model);
     this.context.setWorkingMemory(this.state);
@@ -353,7 +362,6 @@ export class AgentRuntime {
     let approved = true;
     let changedFilesThisCall = false;
     const start = Date.now();
-    const workspace = new WorkspaceManager(this.state.workspaceRoot);
 
     if (!tool) {
       result = { ok: false, error: { code: 'UNKNOWN_TOOL', message: `Tool not found: ${toolName}` } };
@@ -405,6 +413,7 @@ export class AgentRuntime {
             timestamp: new Date().toISOString(),
             eventId: randomUUID(),
             kind: subagentInput.kind,
+            mode: subagentInput.mode,
             task: subagentInput.task,
             maxTurns: subagentInput.maxTurns,
           });
@@ -423,7 +432,7 @@ export class AgentRuntime {
 
       if (result.metadata?.affectedFiles) {
         for (const file of result.metadata.affectedFiles) {
-          workspace.markChanged(file);
+          this.workspace.markChanged(file);
           changedFilesThisCall = true;
           this.emit({
             type: 'file_changed',
@@ -435,7 +444,7 @@ export class AgentRuntime {
         }
       }
 
-      this.state.changedFiles = workspace.changedFiles;
+      this.state.changedFiles = this.workspace.changedFiles;
 
       this.emit({
         type: 'tool_completed',
@@ -469,9 +478,11 @@ export class AgentRuntime {
           timestamp: new Date().toISOString(),
           eventId: randomUUID(),
           kind: result.data.kind,
+          mode: result.data.mode,
           status: result.data.status,
           findings: result.data.findings.length,
           filesInspected: result.data.filesInspected.length,
+          changedFiles: result.data.changedFiles?.length ?? 0,
         });
       }
     }
@@ -647,28 +658,30 @@ export class AgentRuntime {
     return finalMessage + lines.join('\n');
   }
 
-  private parseSubagentInput(input: unknown): { task: string; kind: string; maxTurns: number } | undefined {
+  private parseSubagentInput(input: unknown): { task: string; kind: string; mode: string; maxTurns: number } | undefined {
     if (!input || typeof input !== 'object') return undefined;
     const value = input as Record<string, unknown>;
     const task = typeof value.task === 'string' ? value.task.trim() : '';
     if (!task) return undefined;
     const kind = typeof value.kind === 'string' ? value.kind : 'general';
+    const mode = value.mode === 'write' ? 'write' : 'read-only';
     const maxTurns = Number.isFinite(value.maxTurns) ? Math.trunc(Number(value.maxTurns)) : 6;
-    return { task, kind, maxTurns };
+    return { task, kind, mode, maxTurns };
   }
 
   private isSubagentResult(data: unknown): data is SubagentResult {
     if (!data || typeof data !== 'object') return false;
     const value = data as Record<string, unknown>;
     return (
-      value.mode === 'read-only' &&
+      (value.mode === 'read-only' || value.mode === 'write') &&
       typeof value.task === 'string' &&
       typeof value.kind === 'string' &&
       typeof value.status === 'string' &&
       typeof value.summary === 'string' &&
       Array.isArray(value.findings) &&
       Array.isArray(value.recommendations) &&
-      Array.isArray(value.filesInspected)
+      Array.isArray(value.filesInspected) &&
+      (value.changedFiles === undefined || Array.isArray(value.changedFiles))
     );
   }
 

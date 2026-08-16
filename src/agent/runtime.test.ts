@@ -280,6 +280,7 @@ describe('AgentRuntime', () => {
             findings: [{ description: 'Minor issue' }],
             recommendations: ['Add test coverage'],
             filesInspected: ['src/index.ts'],
+            changedFiles: [],
           },
         };
       },
@@ -317,6 +318,47 @@ describe('AgentRuntime', () => {
     assert.strictEqual(result.state.subagentReports![0].kind, 'review');
     assert.ok(result.events.some((e) => e.type === 'subagent_started'));
     assert.ok(result.events.some((e) => e.type === 'subagent_completed'));
+  });
+
+  it('retains changed files across later tool calls', async () => {
+    const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-runtime-changes-')));
+    const registry = new ToolRegistry();
+    registry.register(writeFileTool);
+    registry.register(readFileTool);
+    const responses: ModelResponse[] = [
+      {
+        content: '',
+        toolCalls: [{
+          id: 'call_1',
+          type: 'function',
+          function: { name: 'write_file', arguments: JSON.stringify({ path: 'created.txt', content: 'created' }) },
+        }],
+        finishReason: 'tool_calls',
+      },
+      {
+        content: '',
+        toolCalls: [{
+          id: 'call_2',
+          type: 'function',
+          function: { name: 'read_file', arguments: JSON.stringify({ path: 'created.txt' }) },
+        }],
+        finishReason: 'tool_calls',
+      },
+      { content: 'Done.', finishReason: 'stop' },
+    ];
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: workspace,
+      objective: 'Write then inspect',
+      approvalMode: 'auto-edit',
+      autoValidate: false,
+      modelClient: new MockModelClient(responses),
+      toolRegistry: registry,
+    });
+
+    const result = await runtime.run();
+    assert.deepStrictEqual(result.state.changedFiles, ['created.txt']);
+    fs.rmSync(workspace, { recursive: true, force: true });
   });
 
   it('runs validation after an edit tool and reports success', async () => {
@@ -576,6 +618,23 @@ describe('AgentRuntime', () => {
     const followUp = await secondRuntime.sendUserMessage('Follow-up after resume');
     assert.strictEqual(followUp, 'resumed');
     assert.ok(secondRuntime.getState().messages.some((m) => m.role === 'user' && m.content === 'Follow-up after resume'));
+  });
+
+  it('rejects persisted state from a different workspace', () => {
+    const otherWorkspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-runtime-other-')));
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Current workspace',
+      modelClient: new MockModelClient([]),
+    });
+    const foreignState = {
+      ...runtime.getState(),
+      workspaceRoot: otherWorkspace,
+    };
+
+    assert.throws(() => runtime.loadState(foreignState), /different workspace/);
+    assert.strictEqual(runtime.getState().workspaceRoot, tmp);
+    fs.rmSync(otherWorkspace, { recursive: true, force: true });
   });
 
   it('emits session_completed only once even if complete is called after run', async () => {

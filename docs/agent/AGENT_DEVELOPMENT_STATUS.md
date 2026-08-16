@@ -441,3 +441,54 @@ Status: **Implementation complete.**
 ### Next Milestone
 
 Write-capable subagents after additional production hardening, or advanced TUI features such as inline diff review and media previews. Recommendation: write-capable subagents, because they extend the agent's ability to delegate independent work streams safely.
+
+## Phase 12 — Write-Capable Subagents and Runtime Hardening
+
+Status: **Implementation complete.**
+
+### Implemented
+
+| Component | Files | Tests |
+|-----------|-------|-------|
+| Explicit read-only/write subagent modes | `src/agent/subagents.ts`, `src/agent/types.ts` | `src/agent/subagents.test.ts` |
+| Shell-free write subagent registry | `src/tools/agent-meta/spawn-agent.ts` | `src/tools/agent-meta/spawn-agent.test.ts` |
+| Parent permission, checkpoint, changed-file, validation, and event integration | `src/agent/runtime.ts`, `src/agent/permissions.ts`, `src/agent/context.ts`, `src/agent/events.ts` | `src/agent/runtime.test.ts`, `src/agent/permissions.test.ts`, `src/ui/events.test.ts` |
+| Session-scoped changed-file accumulation | `src/agent/runtime.ts`, `src/agent/workspace.ts` | `src/agent/runtime.test.ts`, `src/agent/workspace.test.ts` |
+| Canonical workspace-scoped session resume | `src/agent/sessions.ts`, `src/ui/app.tsx`, `src/ui/session-picker.tsx`, `src/ui/slash-handlers.ts` | `src/agent/sessions.test.ts`, `src/agent/runtime.test.ts`, `src/ui/session-picker.test.tsx` |
+| E2EE secp256k1 dependency hardening | `src/lib/e2ee.ts`, `package.json`, `package-lock.json` | `src/lib/e2ee.test.ts`, `src/commands/chat.test.ts` |
+| Public and contributor documentation | `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `docs/architecture/agent-runtime.md` | README local-link check, CLI help smoke |
+| Published package hygiene | `.npmignore` | `npm pack --dry-run --json` |
+
+### Validation Results
+
+- `npm run build`: **PASS**
+- `npm run lint`: **PASS**
+- `npm test`: **PASS** (389 tests, 54 suites)
+- Focused agent/session/subagent/E2EE/UI tests: **PASS** (46 tests, 6 suites)
+- `npm audit --omit=dev`: **PASS** (0 vulnerabilities)
+- `npm audit`: **PASS** (0 vulnerabilities after updating `tsx`/`esbuild` and audited transitive dependencies)
+- README local-link validation: **PASS** (2 links checked, 0 missing)
+- `venice agent|mcp|skills --help`: **PASS**
+- `npm pack --dry-run --json`: **PASS** (402 entries; no compiled tests or MCP test server)
+
+### Security and Compatibility Notes
+
+- Write mode must be requested explicitly; read-only remains the default.
+- A write subagent receives only workspace read/search/Git-inspection and file write/edit/patch tools. It has no shell, network, MCP, media, validation, or nested-subagent tools.
+- The parent runtime classifies write subagents as write risk before launch, shares its checkpoint manager, records all affected files, and runs normal post-edit validation.
+- Changed-file state now survives later read/tool calls, closing a gap that could hide earlier edits and weaken the read-only subagent write detector.
+- Session list/resume operations canonicalize and restrict workspace roots; cross-workspace state loading is rejected before mutation.
+- `elliptic` was replaced with `@noble/curves` 1.9.x, which preserves Node 18 support. ECDH encryption/decryption, Ethereum address derivation, EIP-191 signature recovery, and chat E2EE regression coverage pass.
+- The published runtime remains Node 18 compatible; contributors need Node 20.19+ for the ESLint 10 toolchain (validation used Node 22.13.1/npm 10.9.2).
+- Existing E2EE and TEE source files were normalized from UTF-16 LE to UTF-8, closing the historical ESLint parser failure without changing runtime logic.
+
+### Deferred
+
+- Concurrent write-capable subagents and automatic merge/conflict handling.
+- Shell or network access inside subagents.
+- Inline diff/code review panes and media previews in the TUI.
+- Remaining placeholder slash commands (`/context`, `/compact`, `/new`, `/tools`, `/mcp`, `/skills`, `/permissions`, `/plan`, `/diff`, `/review`, `/git`, `/init`).
+
+### Next Milestone
+
+Implement inline diff/review UX and the remaining runtime-backed slash commands, beginning with `/diff`, `/review`, and `/init`, while keeping orchestration logic outside React components.

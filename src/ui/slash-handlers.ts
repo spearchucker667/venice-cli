@@ -94,7 +94,7 @@ export function handleSlashCommand(command: string, args: string, context: Slash
       break;
     }
     case 'sessions': {
-      const sessions = listSessions ? listSessions() : new SessionManager().list();
+      const sessions = listSessions ? listSessions() : new SessionManager().list(workspaceRoot);
       if (!sessions.length) {
         addEvent('No saved sessions.');
       } else {

@@ -50,6 +50,14 @@ describe('SessionManager', () => {
     assert.ok(list.some((s) => s.sessionId === 's2'));
   });
 
+  it('filters load and list operations by canonical workspace', () => {
+    manager.save(state('workspace-session'), []);
+    assert.strictEqual(manager.list('/tmp').some((s) => s.sessionId === 'workspace-session'), true);
+    assert.strictEqual(manager.list('/different-workspace').some((s) => s.sessionId === 'workspace-session'), false);
+    assert.ok(manager.load('workspace-session', '/tmp'));
+    assert.strictEqual(manager.load('workspace-session', '/different-workspace'), undefined);
+  });
+
   it('deletes a session', () => {
     manager.save(state('s3'), []);
     assert.strictEqual(manager.delete('s3'), true);

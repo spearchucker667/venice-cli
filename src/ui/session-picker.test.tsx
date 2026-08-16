@@ -51,4 +51,29 @@ describe('SessionPicker', () => {
     const frame = lastFrame() || '';
     assert.ok(frame.includes('No saved sessions'));
   });
+
+  it('hides sessions from other workspaces', () => {
+    manager.save(
+      {
+        sessionId: 'other-workspace',
+        workspaceRoot: '/tmp',
+        model: 'kimi-k2.5',
+        objective: 'Hidden session',
+        status: 'complete',
+        messages: [],
+        todos: [],
+        relevantFiles: [],
+        changedFiles: [],
+        toolHistory: [],
+        skillSummaries: [],
+        activeSkills: [],
+      },
+      []
+    );
+
+    const { lastFrame } = render(
+      <SessionPicker onSelect={() => {}} manager={manager} workspaceRoot="/different-workspace" />
+    );
+    assert.ok((lastFrame() || '').includes('No saved sessions'));
+  });
 });

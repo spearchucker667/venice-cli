@@ -55,12 +55,15 @@ export class SessionManager {
     fs.writeFileSync(eventsPath, events.map((e) => JSON.stringify(e)).join('\n') + '\n', { mode: 0o600 });
   }
 
-  load(sessionId: string): { state: AgentState; events: AgentEvent[] } | undefined {
+  load(sessionId: string, workspaceRoot?: string): { state: AgentState; events: AgentEvent[] } | undefined {
     const dir = path.join(this.root, sessionId);
     const sessionPath = path.join(dir, 'session.json');
     if (!fs.existsSync(sessionPath)) return undefined;
 
     const stored = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as StoredSession;
+    if (workspaceRoot && canonicalPath(stored.state.workspaceRoot) !== canonicalPath(workspaceRoot)) {
+      return undefined;
+    }
     const events: AgentEvent[] = [];
     const eventsPath = path.join(dir, 'events.jsonl');
     if (fs.existsSync(eventsPath)) {
@@ -70,7 +73,7 @@ export class SessionManager {
     return { state: stored.state, events };
   }
 
-  list(): StoredSession[] {
+  list(workspaceRoot?: string): StoredSession[] {
     this.ensureDir();
     const sessions: StoredSession[] = [];
     for (const entry of fs.readdirSync(this.root, { withFileTypes: true })) {
@@ -78,7 +81,10 @@ export class SessionManager {
       const sessionPath = path.join(this.root, entry.name, 'session.json');
       if (!fs.existsSync(sessionPath)) continue;
       try {
-        sessions.push(JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as StoredSession);
+        const stored = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as StoredSession;
+        if (!workspaceRoot || canonicalPath(stored.state.workspaceRoot) === canonicalPath(workspaceRoot)) {
+          sessions.push(stored);
+        }
       } catch {
         // skip corrupt
       }
@@ -91,5 +97,13 @@ export class SessionManager {
     if (!fs.existsSync(dir)) return false;
     fs.rmSync(dir, { recursive: true, force: true });
     return true;
+  }
+}
+
+function canonicalPath(input: string): string {
+  try {
+    return fs.realpathSync(input);
+  } catch {
+    return path.resolve(input);
   }
 }

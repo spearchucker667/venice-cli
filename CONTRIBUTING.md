@@ -10,7 +10,7 @@ Please be respectful and constructive in all interactions. We want Venice CLI to
 
 ### Prerequisites
 
-- Node.js 18.0.0 or higher
+- Node.js 20.19.0 or higher (required by the ESLint 10 development toolchain)
 - npm or yarn
 - A Venice AI API key for testing
 
@@ -32,8 +32,10 @@ Please be respectful and constructive in all interactions. We want Venice CLI to
    npm run build
    ```
 
-4. Test your changes:
+4. Validate your changes:
    ```bash
+   npm run lint
+   npm test
    npm run dev -- chat "Test message"
    ```
 
@@ -43,6 +45,7 @@ Please be respectful and constructive in all interactions. We want Venice CLI to
 venice-cli/
 ├── src/
 │   ├── index.ts           # CLI entry point
+│   ├── agent/             # Runtime, permissions, context, and sessions
 │   ├── commands/          # Command implementations
 │   │   ├── chat.ts        # Chat command
 │   │   ├── search.ts      # Search command
@@ -55,12 +58,16 @@ venice-cli/
 │   │   ├── embeddings.ts  # Embeddings generation
 │   │   ├── characters.ts  # Character personas
 │   │   └── completions.ts # Shell completions
-│   ├── lib/               # Shared utilities
+│   ├── lib/               # Shared API and CLI utilities
 │   │   ├── api.ts         # Venice API client
 │   │   ├── config.ts      # Config file management
 │   │   ├── output.ts      # Output formatting
 │   │   └── tools.ts       # Function calling tools
-│   └── types/             # TypeScript type definitions
+│   ├── mcp/               # MCP config, client, and adapters
+│   ├── skills/            # Agent skill discovery and parsing
+│   ├── tools/             # Agent tools and registry
+│   ├── ui/                # Ink terminal UI
+│   └── types/             # Shared TypeScript definitions
 ├── dist/                  # Compiled JavaScript (generated)
 ├── package.json
 ├── tsconfig.json
@@ -139,8 +146,9 @@ docs(readme): add shell completion instructions
 1. Create a feature branch from `main`
 2. Make your changes with clear commits
 3. Update documentation if needed
-4. Test your changes thoroughly
-5. Submit a PR with a clear description
+4. Run `npm run lint` and `npm test`
+5. Test user-visible behavior manually when applicable
+6. Submit a PR with a clear description
 
 #### PR Description Template
 

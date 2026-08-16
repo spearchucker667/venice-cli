@@ -9,6 +9,7 @@ import { SessionManager } from '../agent/sessions.js';
 export interface SessionPickerProps {
   onSelect: (sessionId: string) => void;
   manager?: SessionManager;
+  workspaceRoot?: string;
 }
 
 interface SessionItem {
@@ -17,9 +18,9 @@ interface SessionItem {
   value: string;
 }
 
-export function SessionPicker({ onSelect, manager }: SessionPickerProps): JSX.Element {
+export function SessionPicker({ onSelect, manager, workspaceRoot }: SessionPickerProps): JSX.Element {
   const resolved = manager || new SessionManager();
-  const sessions = resolved.list();
+  const sessions = resolved.list(workspaceRoot);
 
   if (!sessions.length) {
     return (

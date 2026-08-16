@@ -73,6 +73,11 @@ export class WorkspaceManager {
     this.changed.add(path.normalize(relativePath));
   }
 
+  replaceChangedFiles(relativePaths: string[]): void {
+    this.changed.clear();
+    for (const relativePath of relativePaths) this.markChanged(relativePath);
+  }
+
   isBinaryFile(absolutePath: string): boolean {
     const fd = fs.openSync(absolutePath, 'r');
     try {

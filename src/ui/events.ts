@@ -29,12 +29,12 @@ export function mapEventToMessage(event: AgentEvent): TuiMessage | undefined {
       };
     }
     case 'subagent_started':
-      return { id: event.eventId, role: 'event', content: `↳ subagent ${event.kind}: ${event.task}` };
+      return { id: event.eventId, role: 'event', content: `↳ ${event.mode} subagent ${event.kind}: ${event.task}` };
     case 'subagent_completed':
       return {
         id: event.eventId,
         role: 'event',
-        content: `↳ subagent ${event.status} (${event.findings} findings, ${event.filesInspected} files)`,
+        content: `↳ ${event.mode} subagent ${event.status} (${event.findings} findings, ${event.filesInspected} inspected, ${event.changedFiles} changed)`,
       };
     case 'approval_requested':
       return { id: event.eventId, role: 'event', content: `? approval required: ${event.toolName}` };

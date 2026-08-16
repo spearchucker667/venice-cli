@@ -52,6 +52,10 @@ describe('classifyRisk', () => {
     assert.strictEqual(classifyRisk('spawn_agent', { task: 'inspect' }), 'execute');
   });
 
+  it('classifies a write-capable subagent as write', () => {
+    assert.strictEqual(classifyRisk('spawn_agent', { task: 'edit', mode: 'write' }), 'write');
+  });
+
   it('classifies Venice media tools as network', () => {
     assert.strictEqual(classifyRisk('edit_image', { image: 'a.png', prompt: 'x', output: 'b.png' }), 'network');
     assert.strictEqual(classifyRisk('generate_video', { prompt: 'a clip' }), 'network');

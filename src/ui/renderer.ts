@@ -52,10 +52,10 @@ export class AgentRenderer {
         break;
       }
       case 'subagent_started':
-        console.log(c.magenta(`  ↳ subagent ${event.kind}: ${event.task}`));
+        console.log(c.magenta(`  ↳ ${event.mode} subagent ${event.kind}: ${event.task}`));
         break;
       case 'subagent_completed':
-        console.log(c.magenta(`    ↳ ${event.status} (${event.findings} findings, ${event.filesInspected} files)`));
+        console.log(c.magenta(`    ↳ ${event.status} (${event.findings} findings, ${event.filesInspected} inspected, ${event.changedFiles} changed)`));
         break;
       case 'approval_requested':
         console.log(c.yellow(`  ? approval required: ${event.toolName}`));

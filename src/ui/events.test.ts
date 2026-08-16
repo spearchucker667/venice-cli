@@ -44,6 +44,7 @@ describe('mapEventToMessage', () => {
       timestamp: '',
       eventId: '4',
       kind: 'review',
+      mode: 'read-only',
       task: 'Inspect auth',
       maxTurns: 6,
     };
@@ -52,9 +53,11 @@ describe('mapEventToMessage', () => {
       timestamp: '',
       eventId: '5',
       kind: 'review',
+      mode: 'read-only',
       status: 'complete',
       findings: 2,
       filesInspected: 4,
+      changedFiles: 0,
     };
     assert.ok(mapEventToMessage(started)?.content.includes('subagent review'));
     assert.ok(mapEventToMessage(completed)?.content.includes('2 findings'));

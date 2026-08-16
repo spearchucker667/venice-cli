@@ -2,9 +2,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
   buildReadOnlySubagentObjective,
+  buildSubagentObjective,
   collectSubagentFilesInspected,
   normalizeSubagentKind,
   normalizeSubagentMaxTurns,
+  normalizeSubagentMode,
   parseSubagentReport,
   SUBAGENT_DEFAULT_MAX_TURNS,
   SUBAGENT_MAX_TURNS_LIMIT,
@@ -15,9 +17,18 @@ describe('subagent helpers', () => {
   it('normalizes kind and max turns', () => {
     assert.strictEqual(normalizeSubagentKind('review'), 'review');
     assert.strictEqual(normalizeSubagentKind('unknown'), 'general');
+    assert.strictEqual(normalizeSubagentMode(undefined), 'read-only');
+    assert.strictEqual(normalizeSubagentMode('write'), 'write');
     assert.strictEqual(normalizeSubagentMaxTurns(undefined), SUBAGENT_DEFAULT_MAX_TURNS);
     assert.strictEqual(normalizeSubagentMaxTurns(0), 1);
     assert.strictEqual(normalizeSubagentMaxTurns(999), SUBAGENT_MAX_TURNS_LIMIT);
+  });
+
+  it('builds a shell-free write objective contract', () => {
+    const objective = buildSubagentObjective('Update auth flow', 'general', 'write');
+    assert.ok(objective.includes('write general subagent'));
+    assert.ok(objective.includes('edit files inside the workspace'));
+    assert.ok(objective.includes('cannot run shell commands'));
   });
 
   it('builds a read-only objective contract', () => {

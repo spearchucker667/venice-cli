@@ -12,8 +12,8 @@ export type AgentEvent =
   | { type: 'approval_granted'; timestamp: string; eventId: string; toolName: string; scope: string }
   | { type: 'tool_started'; timestamp: string; eventId: string; toolName: string; input: unknown }
   | { type: 'tool_completed'; timestamp: string; eventId: string; toolName: string; result: unknown }
-  | { type: 'subagent_started'; timestamp: string; eventId: string; kind: string; task: string; maxTurns: number }
-  | { type: 'subagent_completed'; timestamp: string; eventId: string; kind: string; status: string; findings: number; filesInspected: number }
+  | { type: 'subagent_started'; timestamp: string; eventId: string; kind: string; mode: string; task: string; maxTurns: number }
+  | { type: 'subagent_completed'; timestamp: string; eventId: string; kind: string; mode: string; status: string; findings: number; filesInspected: number; changedFiles: number }
   | { type: 'file_changed'; timestamp: string; eventId: string; path: string; operation: string }
   | { type: 'validation_started'; timestamp: string; eventId: string; command: string }
   | { type: 'validation_completed'; timestamp: string; eventId: string; command: string; exitCode: number; stdout?: string; stderr?: string }

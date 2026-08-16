@@ -93,8 +93,8 @@ export class ContextManager {
       lines.push('Recent subagent reports:');
       for (const report of state.subagentReports.slice(-3)) {
         lines.push(
-          `- [${report.kind}] ${report.summary} ` +
-          `(findings: ${report.findings.length}, files: ${report.filesInspected.length})`
+          `- [${report.mode}/${report.kind}] ${report.summary} ` +
+          `(findings: ${report.findings.length}, inspected: ${report.filesInspected.length}, changed: ${report.changedFiles?.length ?? 0})`
         );
       }
     }

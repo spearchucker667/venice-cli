@@ -53,6 +53,13 @@ describe('WorkspaceManager', () => {
     workspace.markChanged('src/app.ts');
     assert.ok(workspace.changedFiles.includes('src/app.ts'));
   });
+
+  it('replaces changed files when session state is loaded', () => {
+    const workspace = new WorkspaceManager(tmp);
+    workspace.markChanged('old.ts');
+    workspace.replaceChangedFiles(['new.ts']);
+    assert.deepStrictEqual(workspace.changedFiles, ['new.ts']);
+  });
 });
 
 describe('detectGitRoot', () => {

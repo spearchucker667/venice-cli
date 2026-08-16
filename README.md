@@ -65,8 +65,64 @@ npx veniceai-cli chat 'Hello, world!'
 - 📊 **Usage Tracking** for token monitoring
 - ⛓️ **Crypto RPC** for Ethereum, Base, Solana, and more
 - 🐚 **Shell Completions** for bash, zsh, fish
+- 🧭 **Workspace Agent** with guarded file edits, validation, resumable sessions, MCP, skills, and bounded subagents
 
 ## Commands
+
+### Workspace Agent
+
+Run the interactive coding and general-purpose agent from a project directory:
+
+```bash
+# Start the persistent terminal UI in the current Git workspace
+venice agent
+
+# Run one noninteractive task
+venice agent --no-interactive --prompt "Inspect this repository and fix the failing tests"
+
+# Select a model, approval policy, workspace, and turn limit
+venice agent --model kimi-k2-5 --approval auto-edit --cwd ./my-project --max-turns 40
+
+# Emit the final state as JSON for automation
+venice agent --no-interactive --json --prompt "Review the current diff"
+```
+
+The agent discovers the Git root, loads `AGENTS.md`, `VENICE.md`, and
+`.venice/instructions.md`, and keeps all built-in filesystem operations inside
+that workspace. It can inspect and edit files, search code, run approved shell
+commands, inspect Git state, validate changes, use Venice search/media tools,
+connect to MCP servers, load skills progressively, create checkpoints, and run
+bounded subagents.
+
+Approval policies are explicit:
+
+| Mode | Automatically allowed |
+|------|------------------------|
+| `suggest` | Nothing; every tool requires approval |
+| `auto-edit` | Workspace reads and writes, including write-capable subagents; shell and network calls still require approval |
+| `auto` | Reads, writes, and non-destructive local execution; network calls still require approval |
+| `yolo` | All non-destructive operations; destructive shell commands still require approval |
+
+Write-capable subagents are opt-in model tool calls. They can use only bounded
+workspace read/edit tools—never shell or network tools—and their edits flow
+through the parent session's changed-file tracking, checkpoints, and automatic
+validation. Read-only remains the default subagent mode.
+
+Interactive sessions support follow-up messages plus `/model`, `/models`,
+`/resume`, `/sessions`, `/status`, `/clear`, `/help`, and `/quit`. Agent session
+state and checkpoints are stored locally under `~/.venice/sessions/` with
+user-only permissions; resume/list operations are restricted to the current
+workspace.
+
+Configure MCP servers globally with `venice mcp add|remove|enable|disable|list|inspect`.
+The agent also merges workspace MCP configuration from `.venice/mcp.json`;
+never commit credentials in that file. Skills are discovered from
+`~/.config/venice/skills/<name>/SKILL.md` and
+`.venice/skills/<name>/SKILL.md`, and can be inspected with
+`venice skills list|show`.
+
+See [Agent Runtime Architecture](docs/architecture/agent-runtime.md) for the
+runtime, permission, persistence, and subagent boundaries.
 
 ### Chat
 
@@ -784,6 +840,9 @@ venice chat -m <tee-capable-model> "Verified secure execution"
 
 ## Development
 
+The published CLI supports Node.js 18+, while the current ESLint 10 development
+toolchain requires Node.js 20.19+.
+
 ```bash
 # Clone the repo
 git clone https://github.com/veniceai/venice-cli.git
@@ -794,6 +853,10 @@ npm install
 
 # Build
 npm run build
+
+# Lint and run the compiled test suite
+npm run lint
+npm test
 
 # Run locally
 npm run dev -- chat "Hello"

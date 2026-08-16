@@ -89,6 +89,12 @@ export class PermissionManager {
 }
 
 export function classifyRisk(toolName: string, input: unknown): RiskLevel {
+  if (toolName === 'spawn_agent') {
+    const mode = typeof input === 'object' && input !== null
+      ? (input as Record<string, unknown>).mode
+      : undefined;
+    return mode === 'write' ? 'write' : 'execute';
+  }
   if (toolName === 'shell') {
     const command = typeof input === 'object' && input !== null
       ? String((input as Record<string, unknown>).command || '')

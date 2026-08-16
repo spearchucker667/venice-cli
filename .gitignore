@@ -25,11 +25,16 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
+!.env.*.example
 
 # Cache
 .npm/
 .eslintcache
 .tscache/
+*.tsbuildinfo
+.cache/
 
 # Coverage
 coverage/

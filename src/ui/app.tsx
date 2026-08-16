@@ -194,9 +194,9 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
 
   const handleResumeSession = (sessionId: string) => {
     const manager = new SessionManager();
-    const stored = manager.load(sessionId);
+    const stored = manager.load(sessionId, workspaceRoot);
     if (!stored) {
-      addEvent(`Session not found: ${sessionId}`);
+      addEvent(`Session not found in this workspace: ${sessionId}`);
       return;
     }
     runtimeRef.current?.loadState(stored.state);
@@ -226,6 +226,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
         showModelPicker: () => setMode('model-picker'),
         showSessionPicker: () => setMode('session-picker'),
         resumeSession: handleResumeSession,
+        listSessions: () => new SessionManager().list(workspaceRoot),
       });
       return;
     }
@@ -290,6 +291,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
       )}
       {mode === 'session-picker' && (
         <SessionPicker
+          workspaceRoot={workspaceRoot}
           onSelect={(sessionId) => {
             handleResumeSession(sessionId);
             setMode('normal');

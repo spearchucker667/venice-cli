@@ -2,7 +2,7 @@
  * Shared helpers for read-only subagent execution and result normalization.
  */
 
-import type { SubagentFinding, SubagentKind, SubagentResult, ToolInvocation } from './types.js';
+import type { SubagentFinding, SubagentKind, SubagentMode, SubagentResult, ToolInvocation } from './types.js';
 
 export const SUBAGENT_DEFAULT_MAX_TURNS = 6;
 export const SUBAGENT_MAX_TURNS_LIMIT = 20;
@@ -16,6 +16,10 @@ export function normalizeSubagentKind(kind: unknown): SubagentKind {
   return 'general';
 }
 
+export function normalizeSubagentMode(mode: unknown): SubagentMode {
+  return mode === 'write' ? 'write' : 'read-only';
+}
+
 export function normalizeSubagentMaxTurns(maxTurns: unknown): number {
   if (!Number.isFinite(maxTurns)) return SUBAGENT_DEFAULT_MAX_TURNS;
   const parsed = Math.trunc(Number(maxTurns));
@@ -25,9 +29,16 @@ export function normalizeSubagentMaxTurns(maxTurns: unknown): number {
 }
 
 export function buildReadOnlySubagentObjective(task: string, kind: SubagentKind): string {
+  return buildSubagentObjective(task, kind, 'read-only');
+}
+
+export function buildSubagentObjective(task: string, kind: SubagentKind, mode: SubagentMode): string {
+  const accessContract = mode === 'write'
+    ? 'You may inspect and edit files inside the workspace. You cannot run shell commands or access paths outside the workspace.'
+    : 'You may inspect the workspace but must not modify files or run mutating commands.';
   return [
-    `You are a read-only ${kind} subagent.`,
-    'You may inspect the workspace but must not modify files or run mutating commands.',
+    `You are a ${mode} ${kind} subagent.`,
+    accessContract,
     'Use available tools to gather evidence, then return concise findings.',
     '',
     'Return a JSON object (no markdown) with this exact shape:',

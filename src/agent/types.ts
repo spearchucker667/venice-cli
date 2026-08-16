@@ -56,6 +56,7 @@ export interface ValidationResult {
 }
 
 export type SubagentKind = 'explore' | 'review' | 'research' | 'test' | 'general';
+export type SubagentMode = 'read-only' | 'write';
 
 export interface SubagentFinding {
   severity?: string;
@@ -65,7 +66,7 @@ export interface SubagentFinding {
 }
 
 export interface SubagentResult {
-  mode: 'read-only';
+  mode: SubagentMode;
   kind: SubagentKind;
   task: string;
   status: AgentStatus;
@@ -73,6 +74,7 @@ export interface SubagentResult {
   findings: SubagentFinding[];
   recommendations: string[];
   filesInspected: string[];
+  changedFiles?: string[];
 }
 
 export interface AgentState {
@@ -131,4 +133,3 @@ export interface ToolResultError {
   message: string;
   details?: unknown;
 }
-

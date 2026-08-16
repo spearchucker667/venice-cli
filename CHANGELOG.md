@@ -5,6 +5,34 @@ All notable changes to Venice CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Workspace-aware `venice agent` runtime with guarded filesystem, shell, Git,
+  validation, checkpoint, session, MCP, skill, and Venice-native media tools.
+- Persistent Ink terminal UI with follow-up chat, model selection, and session
+  resume.
+- Bounded subagents with read-only defaults and an opt-in, shell-free write mode
+  that shares parent changed-file tracking and checkpoints.
+
+### Changed
+
+- Documented the agent, MCP, skill, session, and approval workflows in the
+  README and added an agent runtime architecture reference.
+- Changed-file state now accumulates across a complete agent session instead of
+  being replaced after each tool call.
+- Session listing and resume are now restricted to the current canonical
+  workspace.
+- Published package contents exclude compiled tests and the MCP test server.
+
+### Fixed
+
+- Normalized E2EE and TEE TypeScript sources to UTF-8 so ESLint can parse them.
+- Made macOS secret-file tests compare canonical filesystem paths.
+- Replaced the vulnerable `elliptic` dependency with Noble's maintained
+  secp256k1 implementation while preserving E2EE wire behavior.
+
 ## [2.0.0] - 2026-02-25
 
 ### Added
