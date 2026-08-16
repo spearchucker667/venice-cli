@@ -136,7 +136,7 @@ export class SessionManager {
     let descriptor: number | undefined;
     try {
       this.fileOps.writeFileSync(tmpPath, data, { mode: 0o600 });
-      descriptor = this.fileOps.openSync(tmpPath, 'r');
+      descriptor = this.fileOps.openSync(tmpPath, 'r+');
       this.fileOps.fsyncSync(descriptor);
       this.fileOps.closeSync(descriptor);
       descriptor = undefined;
