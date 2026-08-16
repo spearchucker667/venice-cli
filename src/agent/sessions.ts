@@ -10,7 +10,7 @@ import { SecretRedactor, collectKnownSecrets } from '../lib/redactor.js';
 import type { AgentEvent } from './events.js';
 import type { AgentState } from './types.js';
 
-const SESSIONS_ROOT = path.join(os.homedir(), '.venice', 'sessions');
+export const SESSIONS_ROOT = path.join(os.homedir(), '.venice', 'sessions');
 
 export interface StoredSession {
   sessionId: string;

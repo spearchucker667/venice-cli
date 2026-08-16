@@ -34,6 +34,7 @@ import { registerMcpCommand } from './commands/mcp.js';
 import { registerSkillsCommand } from './commands/skills.js';
 import { registerInitCommand } from './commands/init.js';
 import { registerResponsesCommand } from './commands/responses.js';
+import { registerDoctorCommand } from './commands/doctor.js';
 import { formatError, getChalk } from './lib/output.js';
 import { getVersion } from './lib/version.js';
 
@@ -88,6 +89,7 @@ async function main() {
   registerSkillsCommand(program);
   registerInitCommand(program);
   registerResponsesCommand(program);
+  registerDoctorCommand(program);
 
   // The agent command is now the default command (see registerAgentCommand)
 

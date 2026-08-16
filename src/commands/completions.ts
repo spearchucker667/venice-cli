@@ -112,6 +112,12 @@ function filterModels(models: Array<{id: string, type?: string}>, typeFilter?: s
   return models.filter(m => !m.type || m.type === typeFilter || m.type === 'alias').map(m => m.id);
 }
 
+function getSubcommands(program: Command, cmdName: string): string {
+  const cmd = program.commands.find(c => c.name() === cmdName);
+  if (!cmd) return '';
+  return cmd.commands.map(c => c.name()).join(' ');
+}
+
 function generateBashCompletion(program: Command): string {
   const topLevelCommands = program.commands.map(cmd => cmd.name()).join(' ');
 
@@ -121,20 +127,14 @@ _venice_completion() {
     _init_completion || return
 
     local commands="${topLevelCommands}"
-    local config_cmds="show set get unset path init"
-    local history_cmds="list show clear export"
-    local video_cmds="generate quote status retrieve complete transcribe upscale models"
-    local voice_cmds="clone"
-    local music_cmds="generate quote status retrieve complete models"
-    local billing_cmds="balance usage analytics"
-    local keys_cmds="list create delete rate-limits"
+    local config_cmds="${getSubcommands(program, 'config')}"
+    local history_cmds="${getSubcommands(program, 'history')}"
+    local video_cmds="${getSubcommands(program, 'video')}"
+    local voice_cmds="${getSubcommands(program, 'voice')}"
+    local music_cmds="${getSubcommands(program, 'music')}"
+    local billing_cmds="${getSubcommands(program, 'billing')}"
+    local keys_cmds="${getSubcommands(program, 'keys')}"
     local formats="pretty json markdown raw"
-    local models="kimi-k2-5 zai-org-glm-4.7 zai-org-glm-4.6 claude-opus-4-6 claude-opus-45 claude-sonnet-4-6 openai-gpt-53-codex minimax-m25"
-    local image_models="flux-2-pro flux-2-max seedream-v5-lite recraft-v4 grok-imagine nano-banana-pro"
-    local edit_models="qwen-edit firered-image-edit qwen-edit-uncensored grok-imagine-edit grok-imagine-quality-edit qwen-image-2-edit qwen-image-2-pro-edit wan-2-7-pro-edit flux-2-max-edit gpt-image-2-edit gpt-image-1-5-edit nano-banana-2-edit nano-banana-pro-edit seedream-v5-lite-edit seedream-v5-pro-edit seedream-v4-edit qwen-image-3-edit qwen-image-3-pro-edit"
-    local video_models="wan-2.6-text-to-video wan-2.6-image-to-video veo3-fast-text-to-video sora2-text-to-video kling-v3-pro-text-to-video"
-    local music_models="elevenlabs-music elevenlabs-sound-effects-v2"
-    local asr_models="nvidia/parakeet-tdt-0.6b-v3 openai/whisper-large-v3"
     local voices="af_sky af_bella af_nicole am_adam am_michael bf_emma bf_isabella bm_george bm_lewis"
     local tools="calculator weather datetime random base64 hash"
 

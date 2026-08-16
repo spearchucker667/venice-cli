@@ -20,7 +20,7 @@ export function registerModelsCommand(program: Command): void {
     .option('--privacy', 'Show only privacy-preserving models')
     .option('-d, --details', 'Show detailed model specs and capabilities')
     .option('-c, --capability <cap>', 'Filter by capability (e.g., vision, webSearch, optimizedForCode, logProbs)')
-    .option('--sort <field>', 'Sort models by field (id|context)', 'id')
+    .option('--sort <field>', 'Sort models by field (id|context|price)', 'id')
     .option('-f, --format <format>', 'Output format (pretty|json)')
     .action(async (options) => {
       const format = detectOutputFormat(options.format);
@@ -71,6 +71,12 @@ export function registerModelsCommand(program: Command): void {
             const ctxA = a.model_spec?.availableContextTokens || 0;
             const ctxB = b.model_spec?.availableContextTokens || 0;
             return ctxB - ctxA; // Descending context window
+          });
+        } else if (options.sort === 'price') {
+          models.sort((a: Model, b: Model) => {
+            const pA = (a.model_spec?.pricing?.prompt || 0) + (a.model_spec?.pricing?.completion || 0);
+            const pB = (b.model_spec?.pricing?.prompt || 0) + (b.model_spec?.pricing?.completion || 0);
+            return pA - pB; // Ascending price
           });
         } else {
           // Sort by id (default)
