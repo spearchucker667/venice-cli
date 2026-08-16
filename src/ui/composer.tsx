@@ -9,6 +9,8 @@ export interface ComposerProps {
   onSubmit: (text: string) => void;
   workspaceRoot: string;
   disabled?: boolean;
+  maxSuggestions?: number;
+  columns?: number;
 }
 
 const IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', 'target', 'vendor']);
@@ -31,7 +33,7 @@ export async function findMentionCompletions(workspaceRoot: string, query: strin
     .map((entry) => `${directoryPart}${entry.name}${entry.isDirectory() ? '/' : ''}`);
 }
 
-export function Composer({ onSubmit, workspaceRoot, disabled }: ComposerProps): JSX.Element {
+export function Composer({ onSubmit, workspaceRoot, disabled, maxSuggestions = 8, columns = 80 }: ComposerProps): JSX.Element {
   const [value, setValue] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -53,7 +55,7 @@ export function Composer({ onSubmit, workspaceRoot, disabled }: ComposerProps): 
       findMentionCompletions(workspaceRoot, match[1])
         .then((options) => {
           if (lookupSequence.current === sequence) {
-            setAutocompleteOptions(options);
+            setAutocompleteOptions(options.slice(0, maxSuggestions));
             setAutocompleteIndex(0);
           }
         })
@@ -62,7 +64,7 @@ export function Composer({ onSubmit, workspaceRoot, disabled }: ComposerProps): 
         });
     }, 75);
     return () => clearTimeout(timer);
-  }, [value, workspaceRoot]);
+  }, [value, workspaceRoot, maxSuggestions]);
 
   const updateValue = (next: string) => {
     setValue(next);
@@ -123,7 +125,7 @@ export function Composer({ onSubmit, workspaceRoot, disabled }: ComposerProps): 
           <Text bold color="cyan">Files</Text>
           {autocompleteOptions.map((option, index) => (
             <Text key={option} color={index === autocompleteIndex ? 'green' : undefined}>
-              {index === autocompleteIndex ? '> ' : '  '}@{option}
+              {truncateSuggestion(`${index === autocompleteIndex ? '> ' : '  '}@${option}`, columns)}
             </Text>
           ))}
         </Box>
@@ -135,4 +137,9 @@ export function Composer({ onSubmit, workspaceRoot, disabled }: ComposerProps): 
       </Box>
     </Box>
   );
+}
+
+function truncateSuggestion(value: string, columns: number): string {
+  const width = Math.max(20, columns - 4);
+  return value.length > width ? `${value.slice(0, width - 1)}…` : value;
 }

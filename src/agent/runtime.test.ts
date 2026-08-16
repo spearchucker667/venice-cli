@@ -14,17 +14,21 @@ import { VeniceModelClient } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
 import type { AgentMessage } from './types.js';
 import { McpManager } from '../mcp/manager.js';
+import type { ToolDefinition } from '../types/index.js';
+import type { ModelProfile } from './model-profile.js';
 
 class MockModelClient extends VeniceModelClient {
   private responses: ModelResponse[];
   private callCount = 0;
+  readonly requestedTools: ToolDefinition[][] = [];
 
   constructor(responses: ModelResponse[]) {
     super({ model: 'mock' });
     this.responses = responses;
   }
 
-  async complete(_messages: AgentMessage[]): Promise<ModelResponse> {
+  async complete(_messages: AgentMessage[], tools: ToolDefinition[] = []): Promise<ModelResponse> {
+    this.requestedTools.push(tools);
     const response = this.responses[this.callCount] ?? { content: 'done', finishReason: 'stop' };
     this.callCount++;
     return response;
@@ -32,6 +36,10 @@ class MockModelClient extends VeniceModelClient {
 
   async getModelContextLimit(): Promise<number> {
     return 128000;
+  }
+
+  async getModelProfile(): Promise<ModelProfile | undefined> {
+    return undefined;
   }
 }
 
@@ -75,6 +83,44 @@ describe('AgentRuntime', () => {
     assert.strictEqual(result.state.status, 'complete');
     assert.ok(result.finalMessage.includes('successfully'));
     assert.strictEqual(result.state.toolHistory.length, 1);
+    assert.ok(result.events.some((event) => event.type === 'assistant_delta' && event.content?.includes('successfully')));
+  });
+
+  it('sends the live tool registry to agent-capable models', async () => {
+    const registry = new ToolRegistry();
+    registry.register(readFileTool);
+    const client = new MockModelClient([{ content: 'done', finishReason: 'stop' }]);
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Inspect files',
+      modelClient: client,
+      toolRegistry: registry,
+    });
+
+    await runtime.run();
+    assert.deepEqual(client.requestedTools[0].map((tool) => tool.function.name), ['read_file']);
+  });
+
+  it('withholds tools from models advertised as chat-only', async () => {
+    const registry = new ToolRegistry();
+    registry.register(readFileTool);
+    const client = new MockModelClient([{ content: 'chat response', finishReason: 'stop' }]);
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Talk without tools',
+      model: 'chat-model',
+      modelClient: client,
+      toolRegistry: registry,
+    });
+    runtime.setModelProfile({
+      id: 'chat-model',
+      mode: 'chat-only',
+      supportsFunctionCalling: false,
+    });
+
+    await runtime.run();
+    assert.deepEqual(client.requestedTools[0], []);
+    assert.equal(runtime.getState().agentMode, 'chat-only');
   });
 
   it('runs shell command with auto approval', async () => {

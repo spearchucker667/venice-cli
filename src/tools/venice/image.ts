@@ -5,11 +5,11 @@
 import type { AgentTool } from '../types.js';
 import { success, failure } from '../result.js';
 import { editImage, generateImage, removeImageBackground, upscaleImage } from '../../lib/api.js';
-import { resolveWorkspaceFile, writeWorkspaceBytes } from './io.js';
+import { imageFormatForPath, inspectImageArtifact, resolveWorkspaceFile, writeWorkspaceBytes, type ImageArtifact } from './io.js';
 
 export const generateImageTool: AgentTool<
-  { prompt: string; output: string; model?: string; width?: number; height?: number; count?: number },
-  string[]
+  { prompt: string; output: string; model?: string; width?: number; height?: number; count?: number; format?: 'png' | 'jpeg' | 'webp' },
+  ImageArtifact[]
 > = {
   name: 'generate_image',
   description: 'Generate an image using the Venice image API and save it inside the workspace.',
@@ -22,27 +22,35 @@ export const generateImageTool: AgentTool<
       width: { type: 'number' },
       height: { type: 'number' },
       count: { type: 'number' },
+      format: { type: 'string', enum: ['png', 'jpeg', 'webp'], description: 'Requested image encoding; must match the output extension' },
     },
     required: ['prompt', 'output'],
   },
   risk: 'network',
   async execute(input, context) {
     try {
+      const outputFormat = imageFormatForPath(input.output);
+      if (!outputFormat) return failure('INVALID_IMAGE_OUTPUT', 'Output must end in .png, .jpg, .jpeg, or .webp');
+      if (input.format && input.format !== outputFormat) {
+        return failure('IMAGE_FORMAT_MISMATCH', `Requested ${input.format} but output path expects ${outputFormat}`);
+      }
       const images = await generateImage(input.prompt, {
         model: input.model,
         width: input.width,
         height: input.height,
         count: input.count,
+        format: input.format ?? outputFormat,
       });
 
-      // Venice returns base64-encoded PNGs by default.
+      const bytes = Buffer.from(images[0], 'base64');
+      const artifact = inspectImageArtifact(input.output, bytes);
       const { relative } = writeWorkspaceBytes(
         context.workspaceRoot,
         input.output,
-        Buffer.from(images[0], 'base64')
+        bytes
       );
 
-      return success([relative], { affectedFiles: [relative] });
+      return success([{ ...artifact, path: relative }], { affectedFiles: [relative] });
     } catch (error) {
       return failure('IMAGE_GENERATION_ERROR', error instanceof Error ? error.message : String(error));
     }
@@ -78,6 +86,7 @@ export const editImageTool: AgentTool<
         enhancePrompt: input.enhancePrompt,
         safeMode: input.safeMode,
       });
+      inspectImageArtifact(input.output, bytes);
       const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, bytes);
       return success(relative, { affectedFiles: [relative] });
     } catch (error) {
@@ -111,6 +120,7 @@ export const upscaleImageTool: AgentTool<
       }
       const source = resolveWorkspaceFile(context.workspaceRoot, input.image);
       const result = await upscaleImage(source.absolute, { model: input.model, scale });
+      inspectImageArtifact(input.output, result.bytes);
       const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, result.bytes);
       return success(relative, { affectedFiles: [relative] });
     } catch (error) {
@@ -138,6 +148,7 @@ export const removeBackgroundTool: AgentTool<
     try {
       const source = resolveWorkspaceFile(context.workspaceRoot, input.image);
       const bytes = await removeImageBackground(source.absolute);
+      inspectImageArtifact(input.output, bytes);
       const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, bytes);
       return success(relative, { affectedFiles: [relative] });
     } catch (error) {

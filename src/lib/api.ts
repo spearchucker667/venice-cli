@@ -344,6 +344,7 @@ export interface ChatCompletionRequestOptions {
   reasoning_effort?: ReasoningEffort;
   prompt_cache_key?: string;
   prompt_cache_retention?: PromptCacheRetention;
+  showSpinner?: boolean;
 }
 
 export function buildChatCompletionBody(
@@ -416,6 +417,7 @@ export async function chatCompletion(
     method: 'POST',
     body,
     spinnerText: 'Thinking...',
+    showSpinner: options.showSpinner,
   });
 
   const choice = response.choices?.[0];

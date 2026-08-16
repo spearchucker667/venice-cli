@@ -25,6 +25,18 @@ describe('Transcript', () => {
       },
     ];
     const { lastFrame } = render(<Transcript messages={messages} />);
-    assert.ok((lastFrame() || '').includes('read_file'));
+    assert.ok((lastFrame() || '').includes('Reading package.json'));
+  });
+
+  it('bounds visible history for small terminals', () => {
+    const messages = Array.from({ length: 12 }, (_, index) => ({
+      id: String(index), role: 'event' as const, content: `event-${index}`,
+    }));
+    const { lastFrame } = render(<Transcript messages={messages} maxMessages={3} />);
+    const frame = lastFrame() || '';
+    assert.match(frame, /9 earlier entries hidden/);
+    assert.doesNotMatch(frame, /event-8/);
+    assert.match(frame, /event-9/);
+    assert.match(frame, /event-11/);
   });
 });

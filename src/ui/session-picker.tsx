@@ -10,6 +10,8 @@ export interface SessionPickerProps {
   onSelect: (sessionId: string) => void;
   manager?: SessionManager;
   workspaceRoot?: string;
+  limit?: number;
+  columns?: number;
 }
 
 interface SessionItem {
@@ -18,7 +20,7 @@ interface SessionItem {
   value: string;
 }
 
-export function SessionPicker({ onSelect, manager, workspaceRoot }: SessionPickerProps): JSX.Element {
+export function SessionPicker({ onSelect, manager, workspaceRoot, limit = 6, columns = 80 }: SessionPickerProps): JSX.Element {
   const resolved = manager || new SessionManager();
   const sessions = resolved.list(workspaceRoot);
 
@@ -36,7 +38,7 @@ export function SessionPicker({ onSelect, manager, workspaceRoot }: SessionPicke
     const preview = objective.length > 40 ? objective.slice(0, 37) + '…' : objective;
     return {
       key: session.sessionId,
-      label: `${date} — ${preview}`,
+      label: truncateLabel(`${date} — ${preview}`, Math.max(20, columns - 8)),
       value: session.sessionId,
     };
   });
@@ -45,8 +47,12 @@ export function SessionPicker({ onSelect, manager, workspaceRoot }: SessionPicke
     <Box flexDirection="column" borderStyle="single" padding={1}>
       <Text bold>Select session to resume</Text>
       <Text dimColor>{sessions.length} saved</Text>
-      <SelectInput items={items} onSelect={(item) => onSelect(item.value)} />
+      <SelectInput items={items} limit={limit} onSelect={(item) => onSelect(item.value)} />
       <Text dimColor>↑↓ to navigate, Enter to resume, Esc to cancel</Text>
     </Box>
   );
+}
+
+function truncateLabel(value: string, width: number): string {
+  return value.length > width ? `${value.slice(0, Math.max(1, width - 1))}…` : value;
 }

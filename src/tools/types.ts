@@ -12,6 +12,7 @@ export interface ToolContext {
   sessionId: string;
   objective: string;
   runtimeState: Readonly<AgentState>;
+  signal?: AbortSignal;
   checkpointManager?: CheckpointManager;
   skillRegistry?: SkillRegistry;
 }

@@ -4,6 +4,7 @@
 
 import type { MessageContent } from '../types/index.js';
 import type { SkillSummary } from '../skills/types.js';
+import type { AgentMode, ModelProfile } from './model-profile.js';
 
 export type AgentStatus =
   | 'idle'
@@ -81,6 +82,8 @@ export interface AgentState {
   sessionId: string;
   workspaceRoot: string;
   model: string;
+  agentMode?: AgentMode;
+  modelProfile?: ModelProfile;
   objective: string;
   status: AgentStatus;
   messages: AgentMessage[];

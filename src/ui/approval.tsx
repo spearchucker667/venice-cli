@@ -28,8 +28,8 @@ export function ApprovalPrompt({ toolName, input, risk, onDecision }: ApprovalPr
     try {
       const str = JSON.stringify(data, null, 2);
       const lines = str.split('\n');
-      if (lines.length > 10) {
-        return lines.slice(0, 10).join('\n') + '\n  ...';
+      if (lines.length > 4) {
+        return lines.slice(0, 4).join('\n') + '\n  ...';
       }
       return str;
     } catch {

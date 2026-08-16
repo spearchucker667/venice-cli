@@ -3,38 +3,36 @@
  */
 
 import { Box, Text } from 'ink';
+import { compactError, toolActivity, toolResultSummary } from './tool-format.js';
 
 export interface ToolCallEventProps {
   toolName: string;
   input: unknown;
   ok?: boolean;
   error?: string;
+  result?: unknown;
+  pending?: boolean;
 }
 
-export function ToolCallEvent({ toolName, input, ok, error }: ToolCallEventProps): JSX.Element {
-  const formatInput = (data: unknown) => {
-    try {
-      const str = JSON.stringify(data);
-      if (str.length > 80) {
-        return str.substring(0, 77) + '...';
-      }
-      return str;
-    } catch {
-      return '[object Object]';
-    }
-  };
-
-  const formatError = (err?: string) => {
-    if (!err) return 'failed';
-    return err.split('\n')[0];
-  };
-
+export function ToolCallEvent({ toolName, input, ok, error, result, pending }: ToolCallEventProps): JSX.Element {
+  const resultLike = (result && typeof result === 'object')
+    ? result as { ok?: boolean; data?: unknown; error?: { message?: string } }
+    : { ok, error: error ? { message: error } : undefined };
+  const shellData = toolName === 'shell' && resultLike.data && typeof resultLike.data === 'object'
+    ? resultLike.data as { exitCode?: number | null; stdout?: string; stderr?: string }
+    : undefined;
+  const failed = ok === false || (typeof shellData?.exitCode === 'number' && shellData.exitCode !== 0);
+  const failureOutput = error || (failed ? shellData?.stderr || shellData?.stdout : undefined);
+  const failureLines = shellData ? compactError(failureOutput).slice(0, 2) : compactError(failureOutput).slice(1);
+  const summary = toolResultSummary(toolName, resultLike);
   return (
-    <Box flexDirection="column" paddingLeft={2}>
-      <Text dimColor>• {toolName}</Text>
-      <Text dimColor>{formatInput(input)}</Text>
-      {ok === true && <Text color="green">✓ done</Text>}
-      {ok === false && <Text color="red">✗ {formatError(error)}</Text>}
+    <Box flexDirection="column" paddingLeft={1}>
+      <Text wrap="truncate-end" color={failed ? 'red' : ok === true ? 'green' : undefined}>
+        {failed ? '✗' : ok === true ? '✓' : '●'} {toolActivity(toolName, input)}{pending ? '' : ` · ${summary}`}
+      </Text>
+      {failed && failureLines.map((line) => (
+        <Text key={line} color="red" dimColor wrap="truncate-end">  {line}</Text>
+      ))}
     </Box>
   );
 }

@@ -11,6 +11,14 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  abortHandler?: () => void;
+}
+
+export interface McpClientOptions {
+  startTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  stopGraceMs?: number;
 }
 
 export class McpStdioClient {
@@ -20,15 +28,20 @@ export class McpStdioClient {
   private requestId = 0;
   private readonly pending = new Map<string | number, PendingRequest>();
   private initialized = false;
-  private readonly startTimeoutMs = 30000;
-  private readonly requestTimeoutMs = 30000;
+  private readonly startTimeoutMs: number;
+  private readonly requestTimeoutMs: number;
+  private readonly stopGraceMs: number;
   private stderrBuffer = '';
 
-  constructor(config: McpServerConfig) {
+  constructor(config: McpServerConfig, options: McpClientOptions = {}) {
     this.config = config;
+    this.startTimeoutMs = options.startTimeoutMs ?? 30000;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 30000;
+    this.stopGraceMs = options.stopGraceMs ?? 500;
   }
 
   async start(): Promise<void> {
+    if (this.process) throw new Error('MCP client already started');
     return new Promise((resolve, reject) => {
       const args = this.config.args || [];
       const env = { ...process.env, ...this.config.env };
@@ -41,18 +54,24 @@ export class McpStdioClient {
 
       this.process.on('error', (error) => {
         clearTimeout(startupTimer);
+        this.rejectPending(new Error(`MCP server process error: ${error.message}`));
         reject(new Error(`MCP server failed to start: ${error.message}`));
       });
 
       this.process.on('exit', (code) => {
         clearTimeout(startupTimer);
-        if (!this.initialized) {
+        const wasInitialized = this.initialized;
+        this.process = undefined;
+        this.initialized = false;
+        const error = new Error(
+          `MCP server exited${wasInitialized ? '' : ' before initialization'} (code ${code ?? 'unknown'})${
+            this.stderrBuffer ? `: ${this.stderrBuffer.trim()}` : ''
+          }`
+        );
+        this.rejectPending(error);
+        if (!wasInitialized) {
           reject(
-            new Error(
-              `MCP server exited before initialization (code ${code ?? 'unknown'})${
-                this.stderrBuffer ? `: ${this.stderrBuffer.trim()}` : ''
-              }`
-            )
+            error
           );
         }
       });
@@ -74,7 +93,7 @@ export class McpStdioClient {
         protocolVersion: '2024-11-05',
         capabilities: {},
         clientInfo: { name: 'venice-cli', version: '2.1.0' },
-      })
+      }, undefined, this.startTimeoutMs)
         .then(async () => {
           this.initialized = true;
           clearTimeout(startupTimer);
@@ -90,21 +109,21 @@ export class McpStdioClient {
   }
 
   async stop(): Promise<void> {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('MCP client stopped'));
-    }
-    this.pending.clear();
-    if (this.process && !this.process.killed) {
-      this.process.kill('SIGTERM');
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      if (this.process && !this.process.killed) {
-        this.process.kill('SIGKILL');
+    this.rejectPending(new Error('MCP client stopped'));
+    const child = this.process;
+    this.process = undefined;
+    if (child && child.exitCode === null) {
+      const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      child.kill('SIGTERM');
+      await Promise.race([exited, delay(this.stopGraceMs)]);
+      if (child.exitCode === null) {
+        child.kill('SIGKILL');
+        await Promise.race([exited, delay(this.stopGraceMs)]);
       }
     }
-    this.process = undefined;
     this.initialized = false;
     this.stderrBuffer = '';
+    this.buffer = '';
   }
 
   async listTools(): Promise<McpTool[]> {
@@ -112,8 +131,16 @@ export class McpStdioClient {
     return response.tools || [];
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-    return await this.sendRequest('tools/call', { name, arguments: args });
+  async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    return await this.sendRequest('tools/call', { name, arguments: args }, signal);
+  }
+
+  isRunning(): boolean {
+    return this.process !== undefined && this.process.exitCode === null;
+  }
+
+  getProcessId(): number | undefined {
+    return this.process?.pid;
   }
 
   private flushLines(): void {
@@ -133,8 +160,7 @@ export class McpStdioClient {
         if (message.id !== undefined) {
           const pending = this.pending.get(message.id);
           if (!pending) continue;
-          clearTimeout(pending.timer);
-          this.pending.delete(message.id);
+          this.removePending(message.id, pending);
           if (message.error) {
             pending.reject(new Error(`MCP error ${message.error.code}: ${message.error.message}`));
           } else {
@@ -142,7 +168,9 @@ export class McpStdioClient {
           }
         }
       } catch {
-        // Ignore malformed lines.
+        const error = new Error('MCP server sent malformed JSON-RPC');
+        this.rejectPending(error);
+        this.process?.kill('SIGTERM');
       }
     }
   }
@@ -153,20 +181,56 @@ export class McpStdioClient {
     this.process.stdin.write(message);
   }
 
-  private sendRequest(method: string, params: unknown): Promise<unknown> {
+  private sendRequest(method: string, params: unknown, signal?: AbortSignal, timeoutMs = this.requestTimeoutMs): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      if (!this.process?.stdin) {
+      if (!this.process?.stdin || this.process.stdin.destroyed) {
         reject(new Error('MCP client not started'));
+        return;
+      }
+      if (signal?.aborted) {
+        reject(new Error(`MCP request '${method}' cancelled`));
         return;
       }
       const id = ++this.requestId;
       const timer = setTimeout(() => {
-        this.pending.delete(id);
+        const pending = this.pending.get(id);
+        if (pending) this.removePending(id, pending);
         reject(new Error(`MCP request '${method}' timed out`));
-      }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      }, timeoutMs);
+      const pending: PendingRequest = { resolve, reject, timer, signal };
+      if (signal) {
+        pending.abortHandler = () => {
+          this.removePending(id, pending);
+          reject(new Error(`MCP request '${method}' cancelled`));
+        };
+        signal.addEventListener('abort', pending.abortHandler, { once: true });
+      }
+      this.pending.set(id, pending);
       const message = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
-      this.process.stdin.write(message);
+      this.process.stdin.write(message, (error) => {
+        if (!error) return;
+        if (this.pending.get(id) === pending) this.removePending(id, pending);
+        reject(new Error(`MCP request '${method}' could not be written: ${error.message}`));
+      });
     });
   }
+
+  private removePending(id: string | number, pending: PendingRequest): void {
+    clearTimeout(pending.timer);
+    if (pending.signal && pending.abortHandler) {
+      pending.signal.removeEventListener('abort', pending.abortHandler);
+    }
+    this.pending.delete(id);
+  }
+
+  private rejectPending(error: Error): void {
+    for (const [id, pending] of this.pending) {
+      this.removePending(id, pending);
+      pending.reject(error);
+    }
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

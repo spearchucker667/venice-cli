@@ -8,6 +8,7 @@ describe('Venice image tools', () => {
     assert.strictEqual(generateImageTool.risk, 'network');
     assert.ok(generateImageTool.inputSchema.required?.includes('prompt'));
     assert.ok(generateImageTool.inputSchema.required?.includes('output'));
+    assert.ok('format' in generateImageTool.inputSchema.properties);
   });
 
   it('edit_image has correct schema and risk', () => {

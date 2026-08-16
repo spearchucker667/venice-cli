@@ -33,6 +33,19 @@ describe('ContextManager', () => {
     assert.strictEqual(messages[2].role, 'assistant');
   });
 
+  it('keeps assistant tool calls immediately before their tool results', () => {
+    const manager = new ContextManager();
+    manager.addConversationMessage({ role: 'user', content: 'inspect' });
+    manager.addConversationMessage({
+      role: 'assistant', content: '',
+      tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{"path":"package.json"}' } }],
+    });
+    manager.addToolResult('call-1', '{"name":"veniceai-cli"}');
+    const messages = manager.buildMessages();
+    assert.deepEqual(messages.slice(-3).map((message) => message.role), ['user', 'assistant', 'tool']);
+    assert.equal(messages.at(-1)?.tool_call_id, 'call-1');
+  });
+
   it('estimates tokens', () => {
     const ctx = new ContextManager();
     ctx.addConversationMessage({ role: 'user', content: 'Hello world' });

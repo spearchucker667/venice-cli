@@ -8,12 +8,16 @@ import { ToolCallEvent } from './tool-call.js';
 
 export interface TranscriptProps {
   messages: TuiMessage[];
+  maxMessages?: number;
 }
 
-export function Transcript({ messages }: TranscriptProps): JSX.Element {
+export function Transcript({ messages, maxMessages }: TranscriptProps): JSX.Element {
+  const visible = maxMessages && messages.length > maxMessages ? messages.slice(-maxMessages) : messages;
+  const hidden = messages.length - visible.length;
   return (
     <Box flexDirection="column" flexGrow={1}>
-      {messages.map((message) => {
+      {hidden > 0 && <Text dimColor>… {hidden} earlier entries hidden</Text>}
+      {visible.map((message) => {
         switch (message.role) {
           case 'user':
             return (
@@ -36,6 +40,8 @@ export function Transcript({ messages }: TranscriptProps): JSX.Element {
                 input={message.metadata?.input}
                 ok={message.metadata?.ok as boolean | undefined}
                 error={message.metadata?.error as string | undefined}
+                result={message.metadata?.result}
+                pending={message.metadata?.pending as boolean | undefined}
               />
             );
           case 'event':

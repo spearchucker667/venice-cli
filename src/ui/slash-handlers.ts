@@ -9,6 +9,7 @@ import { gitDiffTool } from '../tools/git/diff.js';
 import { gitStatusTool } from '../tools/git/status.js';
 import type { ToolContext } from '../tools/types.js';
 import type { ApprovalMode } from '../agent/permissions.js';
+import type { ModelProfile } from '../agent/model-profile.js';
 
 export interface SlashHandlerContext {
   exit: () => void;
@@ -18,7 +19,7 @@ export interface SlashHandlerContext {
   approvalMode: string;
   setApprovalMode?: (mode: ApprovalMode) => void;
   workspaceRoot: string;
-  setModel?: (model: string) => void;
+  setModel?: (model: string) => void | ModelProfile | Promise<void | ModelProfile>;
   showModelPicker?: () => void;
   showSessionPicker?: () => void;
   resumeSession?: (sessionId: string) => void | Promise<void>;
@@ -102,8 +103,10 @@ export async function handleSlashCommand(command: string, args: string, context:
           addEvent('Current model: ' + model);
         }
       } else if (setModel) {
-        setModel(requested);
-        addEvent(`Model set to ${requested}.`);
+        const profile = await setModel(requested);
+        addEvent(profile?.mode === 'chat-only'
+          ? `Model set to ${requested}. Chat only — agent tools unavailable.`
+          : `Model set to ${requested}.`);
       } else {
         addEvent('Current model: ' + model);
       }
@@ -177,7 +180,11 @@ export async function handleSlashCommand(command: string, args: string, context:
         const review = await runtime.reviewChanges();
         const lines = [`Review: ${review.summary}`];
         if (review.findings.length === 0) lines.push('No actionable findings.');
-        else lines.push(...review.findings.map((finding) => `  • ${finding}`));
+        else lines.push(...review.findings.map((finding) => {
+          const location = finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ''}` : undefined;
+          const prefix = [finding.severity?.toUpperCase(), location].filter(Boolean).join(' · ');
+          return `  • ${prefix ? `${prefix}: ` : ''}${finding.description}`;
+        }));
         if (review.recommendations.length) lines.push('Recommendations:', ...review.recommendations.map((item) => `  • ${item}`));
         addEvent(lines.join('\n'));
       } catch (error) {

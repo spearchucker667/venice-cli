@@ -6,12 +6,13 @@ export type AgentEvent =
   | { type: 'session_started'; timestamp: string; eventId: string; sessionId: string; objective: string }
   | { type: 'user_message'; timestamp: string; eventId: string; content: string }
   | { type: 'model_request'; timestamp: string; eventId: string; messageCount: number }
+  | { type: 'model_profile_updated'; timestamp: string; eventId: string; profile: import('./model-profile.js').ModelProfile }
   | { type: 'assistant_delta'; timestamp: string; eventId: string; content?: string; toolCalls?: unknown[] }
   | { type: 'tool_requested'; timestamp: string; eventId: string; toolName: string; input: unknown }
   | { type: 'approval_requested'; timestamp: string; eventId: string; toolName: string; risk: string }
   | { type: 'approval_granted'; timestamp: string; eventId: string; toolName: string; scope: string }
-  | { type: 'tool_started'; timestamp: string; eventId: string; toolName: string; input: unknown }
-  | { type: 'tool_completed'; timestamp: string; eventId: string; toolName: string; result: unknown }
+  | { type: 'tool_started'; timestamp: string; eventId: string; toolCallId?: string; toolName: string; input: unknown }
+  | { type: 'tool_completed'; timestamp: string; eventId: string; toolCallId?: string; toolName: string; input?: unknown; result: unknown }
   | { type: 'subagent_started'; timestamp: string; eventId: string; kind: string; mode: string; task: string; maxTurns: number }
   | { type: 'subagent_completed'; timestamp: string; eventId: string; kind: string; mode: string; status: string; findings: number; filesInspected: number; changedFiles: number }
   | { type: 'file_changed'; timestamp: string; eventId: string; path: string; operation: string }

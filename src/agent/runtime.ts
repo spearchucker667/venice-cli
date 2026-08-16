@@ -25,6 +25,7 @@ import { SkillRegistry, getGlobalSkillsDir, getProjectSkillsDir } from '../skill
 import type { Skill } from '../skills/types.js';
 import { detectValidationCommands } from './validation.js';
 import { runValidationTool } from '../tools/validation/run.js';
+import type { ModelProfile } from './model-profile.js';
 
 export interface AgentRuntimeOptions {
   workspaceRoot: string;
@@ -67,12 +68,14 @@ export class AgentRuntime {
   private readonly workspace: WorkspaceManager;
   private readonly skills: SkillRegistry;
   private sessionCompletedEmitted = false;
+  private started = false;
 
   constructor(options: AgentRuntimeOptions) {
     this.state = {
       sessionId: options.sessionId || randomUUID(),
       workspaceRoot: options.workspaceRoot,
       model: options.model || getDefaultModel(),
+      agentMode: 'agent',
       objective: options.objective,
       status: 'idle',
       messages: [],
@@ -132,6 +135,7 @@ export class AgentRuntime {
       sessionId: this.state.sessionId,
       objective: this.state.objective,
       runtimeState: this.state,
+      signal: this.signal,
       checkpointManager: this.checkpoints,
       skillRegistry: this.skills,
     });
@@ -146,6 +150,29 @@ export class AgentRuntime {
   setModel(model: string): void {
     this.state.model = model;
     this.modelClient.setModel(model);
+    this.state.modelProfile = undefined;
+    this.state.agentMode = 'agent';
+  }
+
+  setModelProfile(profile: ModelProfile): void {
+    if (profile.id !== this.state.model) {
+      this.setModel(profile.id);
+    }
+    this.state.modelProfile = profile;
+    this.state.agentMode = profile.mode;
+    if (profile.contextLimit) this.context.setModelContextLimit(profile.contextLimit);
+    this.emit({
+      type: 'model_profile_updated',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      profile,
+    });
+  }
+
+  async refreshModelProfile(): Promise<ModelProfile | undefined> {
+    const profile = await this.modelClient.getModelProfile(this.state.model);
+    if (profile) this.setModelProfile(profile);
+    return profile;
   }
 
   updateSignal(signal: AbortSignal): void {
@@ -202,9 +229,8 @@ export class AgentRuntime {
   }
 
   async start(): Promise<void> {
-    if (this.state.status !== 'idle') {
-      return;
-    }
+    if (this.started) return;
+    this.started = true;
 
     this.emit({
       type: 'session_started',
@@ -222,19 +248,21 @@ export class AgentRuntime {
     }
 
     try {
-      const contextLimit = await this.modelClient.getModelContextLimit();
-      this.context.setModelContextLimit(contextLimit);
+      await this.refreshModelProfile();
     } catch {
-      // Keep default context budget.
+      try {
+        const contextLimit = await this.modelClient.getModelContextLimit();
+        this.context.setModelContextLimit(contextLimit);
+      } catch {
+        // Keep the default context budget when model discovery is unavailable.
+      }
     }
 
     await this.startMcpServers();
   }
 
   async sendUserMessage(content: string, attachedContext?: string): Promise<string> {
-    if (this.state.status === 'idle') {
-      await this.start();
-    }
+    await this.start();
 
     this.sessionCompletedEmitted = false;
     this.state.status = 'thinking';
@@ -270,6 +298,10 @@ export class AgentRuntime {
 
     this.persist();
     return { state: this.state, events: this.events.events, finalMessage };
+  }
+
+  async shutdown(): Promise<void> {
+    await this.mcpManager?.stop();
   }
 
   async run(): Promise<AgentRuntimeResult> {
@@ -373,7 +405,7 @@ export class AgentRuntime {
             createMcpToolAdapter(serverName, tool, (name, args) => {
               const server = this.mcpManager!.getServerStates().find((s) => s.name === serverName);
               if (!server) throw new Error(`MCP server '${serverName}' is not running`);
-              return server.client.callTool(name, args);
+              return server.client.callTool(name, args, this.signal);
             })
           );
         } catch (error) {
@@ -385,16 +417,19 @@ export class AgentRuntime {
           });
         }
       }
-      this.emit({
-        type: 'mcp_ready',
-        timestamp: new Date().toISOString(),
-        eventId: randomUUID(),
-        servers: this.mcpManager.getServerStates().map((s) => ({
-          name: s.name,
-          toolCount: s.tools.length,
-          error: s.error,
-        })),
-      });
+      const servers = this.mcpManager.getServerStates().map((s) => ({
+        name: s.name,
+        toolCount: s.tools.length,
+        error: s.error,
+      }));
+      if (servers.length) {
+        this.emit({
+          type: 'mcp_ready',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          servers,
+        });
+      }
     } catch (error) {
       this.emit({
         type: 'mcp_failed',
@@ -413,7 +448,8 @@ export class AgentRuntime {
       eventId: randomUUID(),
       messageCount: messages.length,
     });
-    return await this.modelClient.complete(messages);
+    const tools = this.state.agentMode === 'chat-only' ? [] : this.registry.definitions();
+    return await this.modelClient.complete(messages, tools);
   }
 
   private async handleToolCall(toolCall: { id: string; type: 'function'; function: { name: string; arguments: string } }): Promise<boolean> {
@@ -472,6 +508,7 @@ export class AgentRuntime {
         type: 'tool_started',
         timestamp: new Date().toISOString(),
         eventId: randomUUID(),
+        toolCallId: toolCall.id,
         toolName,
         input,
       });
@@ -497,6 +534,7 @@ export class AgentRuntime {
         sessionId: this.state.sessionId,
         objective: this.state.objective,
         runtimeState: this.state,
+        signal: this.signal,
         checkpointManager: this.checkpoints,
         skillRegistry: this.skills,
       });
@@ -516,14 +554,6 @@ export class AgentRuntime {
       }
 
       this.state.changedFiles = this.workspace.changedFiles;
-
-      this.emit({
-        type: 'tool_completed',
-        timestamp: new Date().toISOString(),
-        eventId: randomUUID(),
-        toolName,
-        result,
-      });
 
       if (toolName === 'todo_write' && result.ok && Array.isArray(result.data)) {
         this.state.todos = result.data;
@@ -574,6 +604,15 @@ export class AgentRuntime {
     approved: boolean,
     durationMs: number
   ): void {
+    this.emit({
+      type: 'tool_completed',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      toolCallId: id,
+      toolName,
+      input,
+      result,
+    });
     this.state.toolHistory.push({
       id,
       toolName,
@@ -600,6 +639,7 @@ export class AgentRuntime {
       sessionId: this.state.sessionId,
       objective: this.state.objective,
       runtimeState: this.state,
+      signal: this.signal,
       checkpointManager: this.checkpoints,
       skillRegistry: this.skills,
     };
@@ -771,6 +811,14 @@ export class AgentRuntime {
   private addAssistantMessage(message: AgentMessage): void {
     this.state.messages.push(message);
     this.context.addConversationMessage(message);
+    if (typeof message.content === 'string' && message.content) {
+      this.emit({
+        type: 'assistant_delta',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        content: message.content,
+      });
+    }
   }
 
   private addToolResult(toolCallId: string, result: ToolResult<unknown>): void {

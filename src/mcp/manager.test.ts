@@ -19,6 +19,17 @@ describe('McpManager', () => {
     }
   });
 
+  it('is idempotent when start is called more than once', async () => {
+    const manager = new McpManager({ mcpServers: { echo: { command: 'node', args: [fakeServer] } } });
+    await Promise.all([manager.start(), manager.start()]);
+    try {
+      assert.strictEqual(manager.getServerStates().length, 1);
+      assert.strictEqual(manager.getTools().length, 1);
+    } finally {
+      await manager.stop();
+    }
+  });
+
   it('skips disabled servers', async () => {
     const manager = new McpManager({
       mcpServers: { echo: { command: 'node', args: [fakeServer], disabled: true } },

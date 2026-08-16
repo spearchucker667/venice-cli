@@ -5,6 +5,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import type { AgentEvent } from './events.js';
 import type { AgentState } from './types.js';
 
@@ -15,12 +16,22 @@ export interface StoredSession {
   state: AgentState;
   createdAt: string;
   updatedAt: string;
+  events?: AgentEvent[];
+}
+
+interface SessionFileOps {
+  writeFileSync: typeof fs.writeFileSync;
+  renameSync: typeof fs.renameSync;
+  unlinkSync: typeof fs.unlinkSync;
+  openSync: typeof fs.openSync;
+  fsyncSync: typeof fs.fsyncSync;
+  closeSync: typeof fs.closeSync;
 }
 
 export class SessionManager {
   readonly root: string;
 
-  constructor(root = SESSIONS_ROOT) {
+  constructor(root = SESSIONS_ROOT, private readonly fileOps: SessionFileOps = fs) {
     this.root = root;
   }
 
@@ -32,45 +43,50 @@ export class SessionManager {
 
   save(state: AgentState, events: AgentEvent[]): void {
     this.ensureDir();
-    const dir = path.join(this.root, state.sessionId);
+    const dir = this.sessionDir(state.sessionId);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 
+    const existing = this.readStored(path.join(dir, 'session.json'));
     const stored: StoredSession = {
       sessionId: state.sessionId,
       state,
-      createdAt: fs.existsSync(path.join(dir, 'session.json'))
-        ? (JSON.parse(fs.readFileSync(path.join(dir, 'session.json'), 'utf-8')) as StoredSession).createdAt
-        : new Date().toISOString(),
+      createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      events,
     };
 
-    const writeAtomic = (filePath: string, data: string) => {
-      const tmpPath = `${filePath}.tmp.${Date.now()}`;
-      fs.writeFileSync(tmpPath, data, { mode: 0o600 });
-      fs.renameSync(tmpPath, filePath);
-    };
-
-    writeAtomic(path.join(dir, 'session.json'), JSON.stringify(stored, null, 2));
-    writeAtomic(path.join(dir, 'messages.jsonl'), state.messages.map((m) => JSON.stringify(m)).join('\n') + '\n');
-    writeAtomic(path.join(dir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    this.removeStaleTemps(dir);
+    this.writeAtomic(path.join(dir, 'session.json'), JSON.stringify(stored, null, 2));
+    // These files are convenient for inspection, but session.json is the canonical
+    // commit record so an interruption cannot mix state and events generations.
+    try {
+      this.writeAtomic(path.join(dir, 'messages.jsonl'), state.messages.map((m) => JSON.stringify(m)).join('\n') + '\n');
+      this.writeAtomic(path.join(dir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    } catch {
+      // A future save repairs projections from the canonical record.
+    }
   }
 
   load(sessionId: string, workspaceRoot?: string): { state: AgentState; events: AgentEvent[] } | undefined {
-    const dir = path.join(this.root, sessionId);
+    let dir: string;
+    try { dir = this.sessionDir(sessionId); } catch { return undefined; }
     const sessionPath = path.join(dir, 'session.json');
     if (!fs.existsSync(sessionPath)) return undefined;
 
-    const stored = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as StoredSession;
+    const stored = this.readStored(sessionPath);
+    if (!stored) return undefined;
     if (workspaceRoot && canonicalPath(stored.state.workspaceRoot) !== canonicalPath(workspaceRoot)) {
       return undefined;
     }
-    const events: AgentEvent[] = [];
+    const events: AgentEvent[] = Array.isArray(stored.events) ? stored.events : [];
     const eventsPath = path.join(dir, 'events.jsonl');
-    if (fs.existsSync(eventsPath)) {
+    if (!stored.events && fs.existsSync(eventsPath)) {
       const lines = fs.readFileSync(eventsPath, 'utf-8').split('\n').filter(Boolean);
-      for (const line of lines) events.push(JSON.parse(line));
+      for (const line of lines) {
+        try { events.push(JSON.parse(line) as AgentEvent); } catch { /* skip corrupt projection lines */ }
+      }
     }
     return { state: stored.state, events };
   }
@@ -95,10 +111,60 @@ export class SessionManager {
   }
 
   delete(sessionId: string): boolean {
-    const dir = path.join(this.root, sessionId);
+    let dir: string;
+    try { dir = this.sessionDir(sessionId); } catch { return false; }
     if (!fs.existsSync(dir)) return false;
     fs.rmSync(dir, { recursive: true, force: true });
     return true;
+  }
+
+  private readStored(filePath: string): StoredSession | undefined {
+    if (!fs.existsSync(filePath)) return undefined;
+    try {
+      const value = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Partial<StoredSession>;
+      if (!value || typeof value !== 'object' || typeof value.sessionId !== 'string' ||
+          typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string' ||
+          !value.state || typeof value.state !== 'object') return undefined;
+      return value as StoredSession;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private writeAtomic(filePath: string, data: string): void {
+    const tmpPath = `${filePath}.tmp.${process.pid}.${randomUUID()}`;
+    let descriptor: number | undefined;
+    try {
+      this.fileOps.writeFileSync(tmpPath, data, { mode: 0o600 });
+      descriptor = this.fileOps.openSync(tmpPath, 'r');
+      this.fileOps.fsyncSync(descriptor);
+      this.fileOps.closeSync(descriptor);
+      descriptor = undefined;
+      this.fileOps.renameSync(tmpPath, filePath);
+    } catch (error) {
+      if (descriptor !== undefined) {
+        try { this.fileOps.closeSync(descriptor); } catch { /* preserve original error */ }
+      }
+      try { this.fileOps.unlinkSync(tmpPath); } catch { /* temp may not exist */ }
+      throw error;
+    }
+  }
+
+  private removeStaleTemps(dir: string): void {
+    for (const entry of fs.readdirSync(dir)) {
+      if (!/^(session\.json|messages\.jsonl|events\.jsonl)\.tmp\./.test(entry)) continue;
+      const target = path.join(dir, entry);
+      try {
+        if (Date.now() - fs.statSync(target).mtimeMs > 5 * 60 * 1000) fs.unlinkSync(target);
+      } catch { /* best-effort cleanup */ }
+    }
+  }
+
+  private sessionDir(sessionId: string): string {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(sessionId) || sessionId === '.' || sessionId === '..') {
+      throw new Error('Invalid session ID');
+    }
+    return path.join(this.root, sessionId);
   }
 }
 

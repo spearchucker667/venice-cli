@@ -67,4 +67,71 @@ describe('SessionManager', () => {
   it('returns undefined for missing session', () => {
     assert.strictEqual(manager.load('missing'), undefined);
   });
+
+  it('returns undefined for corrupt canonical session JSON', () => {
+    const dir = path.join(tmp, 'corrupt');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'session.json'), '{not-json');
+    assert.strictEqual(manager.load('corrupt'), undefined);
+    assert.doesNotThrow(() => manager.list());
+  });
+
+  it('removes stale temporary files on the next save', () => {
+    const dir = path.join(tmp, 'stale-temp');
+    fs.mkdirSync(dir, { recursive: true });
+    const stale = path.join(dir, 'session.json.tmp.stale');
+    fs.writeFileSync(stale, 'partial');
+    const old = new Date(Date.now() - 10 * 60 * 1000);
+    fs.utimesSync(stale, old, old);
+    manager.save(state('stale-temp'), []);
+    assert.strictEqual(fs.existsSync(stale), false);
+    assert.ok(manager.load('stale-temp'));
+  });
+
+  it('rejects session IDs that could escape the session root', () => {
+    assert.strictEqual(manager.load('../../outside'), undefined);
+    assert.throws(() => manager.save(state('../outside'), []), /Invalid session ID/);
+    assert.strictEqual(manager.delete('/tmp/outside'), false);
+  });
+
+  it('keeps the previous canonical generation when rename fails', () => {
+    const original = state('rename-failure');
+    manager.save(original, []);
+    const failing = new SessionManager(tmp, {
+      writeFileSync: fs.writeFileSync,
+      openSync: fs.openSync,
+      fsyncSync: fs.fsyncSync,
+      closeSync: fs.closeSync,
+      unlinkSync: fs.unlinkSync,
+      renameSync: (source, destination) => {
+        if (String(destination).endsWith('session.json')) throw new Error('simulated rename failure');
+        fs.renameSync(source, destination);
+      },
+    });
+    const updated = { ...original, objective: 'must not become visible' };
+    assert.throws(() => failing.save(updated, []), /simulated rename failure/);
+    assert.strictEqual(manager.load('rename-failure')?.state.objective, 'test');
+    assert.strictEqual(fs.readdirSync(path.join(tmp, 'rename-failure')).some((name) => name.includes('.tmp.')), false);
+  });
+
+  it('loads state and events from the same canonical generation', () => {
+    const restored = state('restore-all');
+    restored.model = 'restored-model';
+    restored.changedFiles = ['src/a.ts'];
+    restored.activeSkills = ['review'];
+    restored.checkpointIndex = 2;
+    restored.checkpointCount = 3;
+    const events: AgentEvent[] = [{
+      type: 'session_started', timestamp: new Date().toISOString(), eventId: 'generation-event',
+      sessionId: restored.sessionId, objective: restored.objective,
+    }];
+    manager.save(restored, events);
+    fs.writeFileSync(path.join(tmp, 'restore-all', 'events.jsonl'), '{corrupt projection}\n');
+    const loaded = manager.load('restore-all');
+    assert.strictEqual(loaded?.state.model, 'restored-model');
+    assert.deepEqual(loaded?.state.changedFiles, ['src/a.ts']);
+    assert.deepEqual(loaded?.state.activeSkills, ['review']);
+    assert.strictEqual(loaded?.state.checkpointIndex, 2);
+    assert.strictEqual(loaded?.events[0].eventId, 'generation-event');
+  });
 });

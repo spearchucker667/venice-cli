@@ -12,5 +12,9 @@ export interface TuiOptions extends Omit<AppProps, 'onExit'> {
 
 export async function runTui(options: TuiOptions): Promise<void> {
   const app = render(<App {...options} onExit={() => app.unmount()} />);
-  await app.waitUntilExit();
+  try {
+    await app.waitUntilExit();
+  } finally {
+    await options.mcpManager?.stop().catch(() => {});
+  }
 }

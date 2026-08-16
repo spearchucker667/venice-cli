@@ -2,7 +2,7 @@ import type { AgentTool, ToolContext } from '../tools/types.js';
 import type { ToolResult } from '../agent/types.js';
 import type { McpTool } from './client.js';
 
-export type McpCallToolFn = (name: string, args: Record<string, unknown>) => Promise<unknown>;
+export type McpCallToolFn = (name: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
 
 export function createMcpToolAdapter(
   serverName: string,
@@ -16,13 +16,13 @@ export function createMcpToolAdapter(
       tool.description || `MCP tool '${tool.name}' from server '${serverName}'`,
     inputSchema: normalizeSchema(tool.inputSchema),
     risk: 'execute',
-    async execute(input: unknown, _context: ToolContext): Promise<ToolResult<unknown>> {
+    async execute(input: unknown, context: ToolContext): Promise<ToolResult<unknown>> {
       try {
         const args =
           typeof input === 'object' && input !== null
             ? (input as Record<string, unknown>)
             : {};
-        const result = await callTool(tool.name, args);
+        const result = await callTool(tool.name, args, context.signal);
         return { ok: true, data: result };
       } catch (error) {
         return {

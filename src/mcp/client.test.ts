@@ -31,4 +31,84 @@ describe('McpStdioClient', () => {
     const client = new McpStdioClient({ command: 'definitely-not-a-real-command-12345', args: [] });
     await assert.rejects(() => client.start(), /failed to start/);
   });
+
+  it('enforces a bounded startup timeout and terminates the server', async () => {
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', 'setInterval(() => {}, 1000)'] },
+      { startTimeoutMs: 40, stopGraceMs: 20 }
+    );
+    await assert.rejects(() => client.start(), /startup timed out/);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.strictEqual(client.isRunning(), false);
+  });
+
+  it('rejects malformed JSON-RPC instead of silently waiting', async () => {
+    const script = `process.stdin.once('data',()=>process.stdout.write('not-json\\n')); setInterval(()=>{},1000);`;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 500, requestTimeoutMs: 500, stopGraceMs: 20 }
+    );
+    await assert.rejects(() => client.start(), /malformed JSON-RPC/);
+    await client.stop();
+  });
+
+  it('rejects pending requests when a running server exits', async () => {
+    const script = jsonRpcScript(`if(request.method==='tools/call'){process.exit(7);}`);
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { requestTimeoutMs: 500, stopGraceMs: 20 }
+    );
+    await client.start();
+    await assert.rejects(() => client.callTool('crash', {}), /exited \(code 7\)/);
+    assert.strictEqual(client.isRunning(), false);
+  });
+
+  it('times out and cancels pending tool calls', async () => {
+    const script = jsonRpcScript(`if(request.method==='tools/call'){return;}`);
+    const timeoutClient = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { requestTimeoutMs: 40, stopGraceMs: 20 }
+    );
+    await timeoutClient.start();
+    await assert.rejects(() => timeoutClient.callTool('slow', {}), /timed out/);
+    await timeoutClient.stop();
+
+    const cancelledClient = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { requestTimeoutMs: 1000, stopGraceMs: 20 }
+    );
+    await cancelledClient.start();
+    const controller = new AbortController();
+    const request = cancelledClient.callTool('slow', {}, controller.signal);
+    controller.abort();
+    await assert.rejects(() => request, /cancelled/);
+    await cancelledClient.stop();
+  });
+
+  it('does not leave its child running after stop', async () => {
+    const client = new McpStdioClient({ command: 'node', args: [fakeServer] }, { stopGraceMs: 50 });
+    await client.start();
+    assert.ok(client.getProcessId());
+    assert.strictEqual(client.isRunning(), true);
+    await client.stop();
+    assert.strictEqual(client.isRunning(), false);
+  });
 });
+
+function jsonRpcScript(extra: string): string {
+  return `
+    let buffer='';
+    const send=(value)=>process.stdout.write(JSON.stringify(value)+'\\n');
+    process.stdin.on('data',(chunk)=>{
+      buffer+=chunk.toString();
+      let index;
+      while((index=buffer.indexOf('\\n'))!==-1){
+        const line=buffer.slice(0,index).trim(); buffer=buffer.slice(index+1);
+        if(!line) continue;
+        const request=JSON.parse(line);
+        if(request.method==='initialize') send({jsonrpc:'2.0',id:request.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'test',version:'1'}}});
+        ${extra}
+      }
+    });
+  `;
+}

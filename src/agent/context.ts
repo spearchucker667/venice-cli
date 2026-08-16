@@ -27,7 +27,6 @@ export class ContextManager {
   private workingMemory: string;
   private conversation: AgentMessage[] = [];
   private fileContext: AgentMessage[] = [];
-  private toolResults: AgentMessage[] = [];
   private summary?: StructuredSummary;
   private activeSkills: Skill[] = [];
 
@@ -132,7 +131,7 @@ export class ContextManager {
   }
 
   addToolResult(toolCallId: string, content: MessageContent): void {
-    this.toolResults.push({ role: 'tool', content, tool_call_id: toolCallId });
+    this.conversation.push({ role: 'tool', content, tool_call_id: toolCallId });
   }
 
   buildMessages(): Message[] {
@@ -154,7 +153,6 @@ export class ContextManager {
     const messages: Message[] = [systemMessage];
 
     for (const msg of this.fileContext) messages.push(this.toApiMessage(msg));
-    for (const msg of this.toolResults) messages.push(this.toApiMessage(msg));
     for (const msg of this.conversation) messages.push(this.toApiMessage(msg));
 
     return messages;
@@ -175,7 +173,6 @@ export class ContextManager {
     this.summary = summary;
     this.conversation = [];
     this.fileContext = [];
-    this.toolResults = [];
   }
 
   private renderSummary(summary: StructuredSummary): string {

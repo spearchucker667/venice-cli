@@ -26,6 +26,7 @@ import type { TuiMessage } from './types.js';
 import { ModelPicker } from './model-picker.js';
 import { SessionPicker } from './session-picker.js';
 import { SessionManager } from '../agent/sessions.js';
+import type { ModelProfile } from '../agent/model-profile.js';
 
 export interface AppProps {
   workspaceRoot: string;
@@ -107,6 +108,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
   const [currentModel, setCurrentModel] = useState(model);
+  const [currentModelProfile, setCurrentModelProfile] = useState<ModelProfile | undefined>();
   const [currentApprovalMode, setCurrentApprovalMode] = useState<ApprovalMode>(approvalMode);
   const [mode, setMode] = useState<PickerMode>('normal');
   const [gitBranch] = useState(() => getGitBranch(workspaceRoot));
@@ -147,9 +149,22 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     let runtime: AgentRuntime;
 
     const unsubscribe = events.on((event: AgentEvent) => {
+      if (event.type === 'model_profile_updated') {
+        setCurrentModelProfile(event.profile);
+      }
+      if (event.type === 'model_request') setStatus('thinking');
+      if (event.type === 'approval_requested') setStatus('awaiting_approval');
+      if (event.type === 'tool_started') setStatus('executing_tool');
+      if (event.type === 'validation_started') setStatus('verifying');
       const mapped = mapEventToMessage(event);
       if (mapped) {
-        setMessages((prev) => [...prev, mapped]);
+        setMessages((prev) => {
+          const toolCallId = mapped.metadata?.toolCallId;
+          const withoutPending = event.type === 'tool_completed' && toolCallId
+            ? prev.filter((message) => !(message.metadata?.toolCallId === toolCallId && message.metadata?.pending === true))
+            : prev;
+          return [...withoutPending, mapped];
+        });
       }
       if (event.type === 'session_started' || event.type === 'session_completed') {
         setStatus(runtime?.getState().status ?? 'idle');
@@ -189,6 +204,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     return () => {
       unsubscribe();
       controller.abort();
+      runtimeRef.current?.shutdown().catch(() => {});
       runtimeRef.current = null;
       setPendingApproval((current) => {
         if (current) {
@@ -216,6 +232,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
       sessionId: runtimeRef.current?.getState().sessionId || 'tui',
       objective: runtimeRef.current?.getState().objective || '',
       runtimeState: runtimeRef.current?.getState() ?? minimalAgentState(workspaceRoot),
+      signal: abortControllerRef.current?.signal,
     };
     const result = await shellTool.execute({ command }, context);
     if (result.ok) {
@@ -228,9 +245,18 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     }
   };
 
-  const handleSetModel = (nextModel: string) => {
+  const handleSetModel = async (nextModel: string, profile?: ModelProfile): Promise<ModelProfile | undefined> => {
     setCurrentModel(nextModel);
     runtimeRef.current?.setModel(nextModel);
+    if (profile) {
+      setCurrentModelProfile(profile);
+      runtimeRef.current?.setModelProfile(profile);
+    } else {
+      const discovered = await runtimeRef.current?.refreshModelProfile().catch(() => undefined);
+      setCurrentModelProfile(discovered);
+      return discovered;
+    }
+    return profile;
   };
 
   const handleResumeSession = (sessionId: string) => {
@@ -242,8 +268,27 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     }
     runtimeRef.current?.loadState(stored.state);
     setCurrentModel(stored.state.model);
+    setCurrentModelProfile(stored.state.modelProfile);
     setStatus(stored.state.status);
-    addEvent(`Resumed session ${sessionId}: ${stored.state.objective || 'No objective'}`);
+    runtimeRef.current?.refreshModelProfile().then((profile) => {
+      if (profile) setCurrentModelProfile(profile);
+    }).catch(() => {});
+    const restoredMessages: TuiMessage[] = stored.state.messages.slice(-50).flatMap((message, index) => {
+      if (message.role !== 'user' && message.role !== 'assistant') return [];
+      return [{
+        id: `restored-${index}`,
+        role: message.role,
+        content: typeof message.content === 'string' ? message.content : '[multimodal message]',
+      }];
+    });
+    setMessages([
+      ...restoredMessages,
+      {
+        id: `resume-${sessionId}`,
+        role: 'event',
+        content: `Resumed session ${sessionId} · ${stored.state.messages.length} messages restored`,
+      },
+    ]);
   };
 
   const handleSubmit = async (text: string) => {
@@ -322,7 +367,7 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
 
   return (
     <Box flexDirection="column" height={rows} width={columns}>
-      <Transcript messages={messages} />
+      <Transcript messages={messages} maxMessages={Math.max(3, rows - 8)} />
       {error && (
         <Box paddingX={1}>
           <Text color="red">Error: {error}</Text>
@@ -330,16 +375,22 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
       )}
       {mode === 'model-picker' && (
         <ModelPicker
+          limit={Math.max(3, Math.min(8, rows - 12))}
+          columns={columns}
           currentModel={currentModel}
-          onSelect={(selected) => {
-            handleSetModel(selected);
-            addEvent(`Model set to ${selected}.`);
+          onSelect={(selected, profile) => {
+            handleSetModel(selected, profile).catch(() => {});
+            addEvent(profile.mode === 'chat-only'
+              ? `Model set to ${selected}. Chat only — agent tools unavailable.`
+              : `Model set to ${selected}. Agent tools enabled.`);
             setMode('normal');
           }}
         />
       )}
       {mode === 'session-picker' && (
         <SessionPicker
+          limit={Math.max(3, Math.min(6, rows - 12))}
+          columns={columns}
           workspaceRoot={workspaceRoot}
           onSelect={(sessionId) => {
             handleResumeSession(sessionId);
@@ -355,12 +406,21 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
           onDecision={handleApprovalDecision}
         />
       )}
-      <Composer onSubmit={handleSubmit} workspaceRoot={workspaceRoot} disabled={pendingApproval !== null || mode !== 'normal'} />
+      <Composer
+        onSubmit={handleSubmit}
+        workspaceRoot={workspaceRoot}
+        disabled={pendingApproval !== null || mode !== 'normal'}
+        maxSuggestions={Math.max(3, Math.min(8, rows - 11))}
+        columns={columns}
+      />
       <StatusBar
+        columns={columns}
         state={{
           messages,
           status,
           model: currentModel,
+          agentMode: currentModelProfile?.mode ?? runtimeRef.current?.getState().agentMode ?? 'agent',
+          modelProfile: currentModelProfile ?? runtimeRef.current?.getState().modelProfile,
           workspaceRoot,
           approvalMode: currentApprovalMode,
           contextTokens: runtimeRef.current?.getContextManager().estimateTokens() ?? 0,

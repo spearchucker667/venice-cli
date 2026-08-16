@@ -17,12 +17,19 @@ export interface DiscoveredTool {
 export class McpManager {
   private readonly config: McpConfig;
   private readonly servers: ServerState[] = [];
+  private startPromise?: Promise<void>;
 
   constructor(config: McpConfig) {
     this.config = config;
   }
 
   async start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startServers();
+    return this.startPromise;
+  }
+
+  private async startServers(): Promise<void> {
     for (const [name, config] of Object.entries(this.config.mcpServers)) {
       if (config.disabled) continue;
       const client = new McpStdioClient(config);
@@ -45,6 +52,7 @@ export class McpManager {
   async stop(): Promise<void> {
     await Promise.all(this.servers.map((s) => s.client.stop().catch(() => {})));
     this.servers.length = 0;
+    this.startPromise = undefined;
   }
 
   getTools(): DiscoveredTool[] {

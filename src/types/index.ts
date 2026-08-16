@@ -208,6 +208,7 @@ export interface UsageRecord {
 
 export interface ModelCapabilities {
   privacy?: boolean;
+  supportsFunctionCalling?: boolean;
   supportsTeeAttestation?: boolean;
   supportsE2EE?: boolean;
   supportsResponseSchema?: boolean;
@@ -226,6 +227,9 @@ export interface Model {
   id: string;
   type?: string;
   model_spec?: {
+    availableContextTokens?: number;
+    maxCompletionTokens?: number;
+    privacy?: string;
     description?: string;
     capabilities?: ModelCapabilities;
     voices?: string[];

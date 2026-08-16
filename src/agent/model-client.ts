@@ -7,8 +7,10 @@
 
 import type { AgentMessage, TokenUsage } from './types.js';
 import type { Message } from '../types/index.js';
+import type { ToolDefinition } from '../types/index.js';
 import { chatCompletion, chatCompletionStream, listModels, type VeniceApiError } from '../lib/api.js';
 import { getDefaultModel } from '../lib/config.js';
+import { profileModel, type ModelProfile } from './model-profile.js';
 
 export interface ModelClientOptions {
   model?: string;
@@ -41,10 +43,13 @@ export class VeniceModelClient {
     this.options.model = model;
   }
 
-  async complete(messages: AgentMessage[]): Promise<ModelResponse> {
+  async complete(messages: AgentMessage[], tools: ToolDefinition[] = []): Promise<ModelResponse> {
     const apiMessages = messages.map((m) => this.toApiMessage(m));
     const result = await chatCompletion(apiMessages, {
       model: this.options.model || getDefaultModel(),
+      tools,
+      tool_choice: tools.length ? 'auto' : 'none',
+      showSpinner: false,
     });
 
     return {
@@ -55,10 +60,13 @@ export class VeniceModelClient {
     };
   }
 
-  async *stream(messages: AgentMessage[]): AsyncGenerator<StreamingDelta> {
+  async *stream(messages: AgentMessage[], tools: ToolDefinition[] = []): AsyncGenerator<StreamingDelta> {
     const apiMessages = messages.map((m) => this.toApiMessage(m));
     for await (const delta of chatCompletionStream(apiMessages, {
       model: this.options.model || getDefaultModel(),
+      tools,
+      tool_choice: tools.length ? 'auto' : 'none',
+      showSpinner: false,
     })) {
       yield {
         content: delta.content,
@@ -77,9 +85,8 @@ export class VeniceModelClient {
       const models = await listModels({ showSpinner: false });
       const model = models.find((m) => m.id === targetId);
       if (model?.model_spec) {
-        const spec = model.model_spec as Record<string, unknown>;
-        if (typeof spec.context_size === 'number') {
-          return spec.context_size;
+        if (typeof model.model_spec.availableContextTokens === 'number') {
+          return model.model_spec.availableContextTokens;
         }
       }
     } catch {
@@ -92,6 +99,13 @@ export class VeniceModelClient {
     if (lower.includes('32k')) return 32000;
     if (lower.includes('8k')) return 8192;
     return 128000;
+  }
+
+  async getModelProfile(modelId?: string): Promise<ModelProfile | undefined> {
+    const targetId = modelId || this.options.model || getDefaultModel();
+    const models = await listModels({ showSpinner: false });
+    const model = models.find((candidate) => candidate.id === targetId);
+    return model ? profileModel(model) : undefined;
   }
 
   private toApiMessage(message: AgentMessage): Message {
