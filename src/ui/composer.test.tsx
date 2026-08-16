@@ -9,15 +9,17 @@ describe('Composer', () => {
     assert.ok(lastFrame()?.includes('>'));
   });
 
-  it('submits trimmed text', () => {
+  it('submits trimmed text', async () => {
     let submitted = false;
     const { stdin, lastFrame } = render(<Composer onSubmit={(text) => {
       assert.strictEqual(text, 'hello');
       submitted = true;
     }} />);
     stdin.write('hello');
+    await new Promise(r => setTimeout(r, 50));
     assert.ok(lastFrame()?.includes('hello'));
     stdin.write('\r');
+    await new Promise(r => setTimeout(r, 50));
     assert.ok(submitted);
   });
 });

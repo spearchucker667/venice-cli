@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 
@@ -12,8 +12,25 @@ export function Composer({ onSubmit, disabled }: ComposerProps): JSX.Element {
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
 
+  const valueRef = useRef(value);
+
+  // Keep ref in sync to avoid stale closure in useInput
+  useEffect(() => {
+    valueRef.current = value;
+  }, [value]);
+
   useInput((_input, key) => {
     if (disabled) return;
+
+    if (key.return) {
+      const trimmed = valueRef.current.trim();
+      if (!trimmed) return;
+      onSubmit(trimmed);
+      setHistory((prev) => [trimmed, ...prev]);
+      setHistoryIndex(-1);
+      setValue('');
+      return;
+    }
 
     if (key.upArrow) {
       if (history.length > 0 && historyIndex < history.length - 1) {
@@ -37,19 +54,10 @@ export function Composer({ onSubmit, disabled }: ComposerProps): JSX.Element {
     }
   });
 
-  const handleSubmit = () => {
-    const trimmed = value.trim();
-    if (!trimmed || disabled) return;
-    onSubmit(trimmed);
-    setHistory((prev) => [trimmed, ...prev]);
-    setHistoryIndex(-1);
-    setValue('');
-  };
-
   return (
     <Box>
       <Text bold>{'> '}</Text>
-      <TextInput value={value} onChange={setValue} onSubmit={handleSubmit} />
+      <TextInput value={value} onChange={setValue} />
     </Box>
   );
 }
