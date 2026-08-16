@@ -29,6 +29,9 @@ import { registerRpcCommand } from './commands/rpc.js';
 import { registerBillingCommand } from './commands/billing.js';
 import { registerKeysCommand } from './commands/keys.js';
 import { registerAugmentCommands } from './commands/augment.js';
+import { registerAgentCommand } from './commands/agent.js';
+import { registerMcpCommand } from './commands/mcp.js';
+import { registerSkillsCommand } from './commands/skills.js';
 import { formatError, getChalk } from './lib/output.js';
 import { getVersion } from './lib/version.js';
 
@@ -78,6 +81,9 @@ async function main() {
   registerBillingCommand(program);
   registerKeysCommand(program);
   registerAugmentCommands(program);
+  registerAgentCommand(program);
+  registerMcpCommand(program);
+  registerSkillsCommand(program);
 
   // Handle errors gracefully
   program.exitOverride();

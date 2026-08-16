@@ -1,0 +1,43 @@
+/**
+ * Append-only event bus for the agent runtime.
+ */
+
+export type AgentEvent =
+  | { type: 'session_started'; timestamp: string; eventId: string; sessionId: string; objective: string }
+  | { type: 'user_message'; timestamp: string; eventId: string; content: string }
+  | { type: 'model_request'; timestamp: string; eventId: string; messageCount: number }
+  | { type: 'assistant_delta'; timestamp: string; eventId: string; content?: string; toolCalls?: unknown[] }
+  | { type: 'tool_requested'; timestamp: string; eventId: string; toolName: string; input: unknown }
+  | { type: 'approval_requested'; timestamp: string; eventId: string; toolName: string; risk: string }
+  | { type: 'approval_granted'; timestamp: string; eventId: string; toolName: string; scope: string }
+  | { type: 'tool_started'; timestamp: string; eventId: string; toolName: string; input: unknown }
+  | { type: 'tool_completed'; timestamp: string; eventId: string; toolName: string; result: unknown }
+  | { type: 'subagent_started'; timestamp: string; eventId: string; kind: string; task: string; maxTurns: number }
+  | { type: 'subagent_completed'; timestamp: string; eventId: string; kind: string; status: string; findings: number; filesInspected: number }
+  | { type: 'file_changed'; timestamp: string; eventId: string; path: string; operation: string }
+  | { type: 'validation_started'; timestamp: string; eventId: string; command: string }
+  | { type: 'validation_completed'; timestamp: string; eventId: string; command: string; exitCode: number; stdout?: string; stderr?: string }
+  | { type: 'context_compacted'; timestamp: string; eventId: string; summary: unknown }
+  | { type: 'mcp_ready'; timestamp: string; eventId: string; servers: Array<{ name: string; toolCount: number; error?: string }> }
+  | { type: 'mcp_failed'; timestamp: string; eventId: string; message: string }
+  | { type: 'session_completed'; timestamp: string; eventId: string; status: string };
+
+export class EventBus {
+  private listeners: Array<(event: AgentEvent) => void> = [];
+  public readonly events: AgentEvent[] = [];
+
+  emit(event: AgentEvent): void {
+    this.events.push(event);
+    for (const listener of this.listeners) {
+      listener(event);
+    }
+  }
+
+  on(listener: (event: AgentEvent) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      const index = this.listeners.indexOf(listener);
+      if (index !== -1) this.listeners.splice(index, 1);
+    };
+  }
+}

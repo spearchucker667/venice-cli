@@ -1,0 +1,652 @@
+/**
+ * Agent runtime — iterative tool loop for the Venice CLI agent.
+ */
+
+import { randomUUID } from 'node:crypto';
+import type { AgentState, AgentMessage, SubagentResult, ToolResult } from './types.js';
+import type { AgentEvent } from './events.js';
+import { EventBus } from './events.js';
+import type { ToolRegistry } from '../tools/registry.js';
+import { createDefaultRegistry } from '../tools/registry.js';
+import type { ToolContext } from '../tools/types.js';
+import { PermissionManager, classifyRisk } from './permissions.js';
+import type { ApprovalCallback } from './permissions.js';
+import { ContextManager, buildStructuredSummary } from './context.js';
+import { SessionManager } from './sessions.js';
+import { VeniceModelClient } from './model-client.js';
+import type { ModelResponse } from './model-client.js';
+import { loadInstructions } from './instructions.js';
+import { WorkspaceManager, detectGitRoot } from './workspace.js';
+import { getDefaultModel } from '../lib/config.js';
+import { McpManager } from '../mcp/manager.js';
+import { createMcpToolAdapter } from '../mcp/adapter.js';
+import { CheckpointManager } from './checkpoints.js';
+import { SkillRegistry, getGlobalSkillsDir, getProjectSkillsDir } from '../skills/registry.js';
+import type { Skill } from '../skills/types.js';
+import { detectValidationCommands } from './validation.js';
+import { runValidationTool } from '../tools/validation/run.js';
+
+export interface AgentRuntimeOptions {
+  workspaceRoot: string;
+  objective: string;
+  model?: string;
+  approvalMode?: 'suggest' | 'auto-edit' | 'auto' | 'yolo';
+  maxTurns?: number;
+  sessionId?: string;
+  autoValidate?: boolean;
+  modelClient?: VeniceModelClient;
+  toolRegistry?: ToolRegistry;
+  permissionManager?: PermissionManager;
+  contextManager?: ContextManager;
+  sessionManager?: SessionManager;
+  eventBus?: EventBus;
+  signal?: AbortSignal;
+  mcpManager?: McpManager;
+}
+
+export interface AgentRuntimeResult {
+  state: AgentState;
+  events: AgentEvent[];
+  finalMessage: string;
+}
+
+export class AgentRuntime {
+  private readonly state: AgentState;
+  private readonly modelClient: VeniceModelClient;
+  private readonly registry: ToolRegistry;
+  private readonly permissions: PermissionManager;
+  private readonly context: ContextManager;
+  private readonly sessions: SessionManager;
+  private readonly events: EventBus;
+  private readonly maxTurns: number;
+  private readonly autoValidate: boolean;
+  private readonly signal?: AbortSignal;
+  private readonly mcpManager?: McpManager;
+  private readonly checkpoints: CheckpointManager;
+  private readonly skills: SkillRegistry;
+
+  constructor(options: AgentRuntimeOptions) {
+    this.state = {
+      sessionId: options.sessionId || randomUUID(),
+      workspaceRoot: options.workspaceRoot,
+      model: options.model || getDefaultModel(),
+      objective: options.objective,
+      status: 'idle',
+      messages: [],
+      todos: [],
+      relevantFiles: [],
+      changedFiles: [],
+      toolHistory: [],
+      skillSummaries: [],
+      activeSkills: [],
+      subagentReports: [],
+    };
+    this.modelClient = options.modelClient || new VeniceModelClient({ model: this.state.model });
+    this.registry = options.toolRegistry || createDefaultRegistry();
+    this.permissions = options.permissionManager || new PermissionManager(options.approvalMode || 'suggest');
+    this.context = options.contextManager || new ContextManager();
+    this.sessions = options.sessionManager || new SessionManager();
+    this.events = options.eventBus || new EventBus();
+    this.maxTurns = options.maxTurns ?? 25;
+    this.autoValidate = options.autoValidate ?? true;
+    this.signal = options.signal;
+    this.mcpManager = options.mcpManager;
+    this.checkpoints = new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
+    this.skills = new SkillRegistry(getGlobalSkillsDir(), getProjectSkillsDir(this.state.workspaceRoot));
+    this.skills.discover();
+    this.state.skillSummaries = this.skills.list();
+
+    this.context.setWorkingMemory(this.state);
+  }
+
+  getState(): Readonly<AgentState> {
+    return this.state;
+  }
+
+  setApprovalCallback(callback: ApprovalCallback): void {
+    this.permissions.setApprover(callback);
+  }
+
+  async run(): Promise<AgentRuntimeResult> {
+    this.state.status = 'thinking';
+    this.emit({
+      type: 'session_started',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      sessionId: this.state.sessionId,
+      objective: this.state.objective,
+    });
+
+    try {
+      const instructions = await loadInstructions(this.state.workspaceRoot);
+      this.context.setProjectInstructions(instructions.text);
+    } catch {
+      // Instructions are best-effort in Phase 2.
+    }
+
+    try {
+      const contextLimit = await this.modelClient.getModelContextLimit();
+      this.context.setModelContextLimit(contextLimit);
+    } catch {
+      // Keep default context budget.
+    }
+
+    await this.startMcpServers();
+
+    this.addUserMessage(this.state.objective);
+
+    let turns = 0;
+    let finalMessage = '';
+
+    try {
+      while (turns < this.maxTurns) {
+        if (this.signal?.aborted) {
+          this.state.status = 'cancelled';
+          break;
+        }
+
+        if (this.context.shouldCompact()) {
+          const summary = buildStructuredSummary(this.state);
+          this.context.compact(summary);
+          this.emit({
+            type: 'context_compacted',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            summary,
+          });
+        }
+
+        this.state.status = 'thinking';
+        const response = await this.callModel();
+        finalMessage = response.content || '';
+
+        const assistantMessage: AgentMessage = {
+          role: 'assistant',
+          content: response.content || '',
+        };
+        if (response.toolCalls?.length) {
+          assistantMessage.tool_calls = response.toolCalls;
+        }
+        this.addAssistantMessage(assistantMessage);
+
+        if (!response.toolCalls?.length) {
+          this.state.status = 'complete';
+          break;
+        }
+
+        let editedThisTurn = false;
+        for (const toolCall of response.toolCalls) {
+          if (this.signal?.aborted) {
+            this.state.status = 'cancelled';
+            break;
+          }
+          const changedFiles = await this.handleToolCall(toolCall);
+          if (changedFiles) editedThisTurn = true;
+        }
+
+        if (this.state.status === 'cancelled') break;
+
+        if (editedThisTurn && this.autoValidate) {
+          await this.runValidation();
+        }
+
+        turns++;
+      }
+
+      if (turns >= this.maxTurns && this.state.status !== 'complete') {
+        finalMessage = `${finalMessage}\n\n(Reached maximum turn limit.)`;
+        this.state.status = 'complete';
+      }
+    } catch (error) {
+      this.state.status = 'failed';
+      finalMessage = `Agent failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    this.emit({
+      type: 'session_completed',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      status: this.state.status,
+    });
+
+    finalMessage = this.appendValidationSummary(finalMessage);
+
+    this.persist();
+    return { state: this.state, events: this.events.events, finalMessage };
+  }
+
+  private async startMcpServers(): Promise<void> {
+    if (!this.mcpManager) return;
+    try {
+      await this.mcpManager.start();
+      for (const { serverName, tool } of this.mcpManager.getTools()) {
+        try {
+          this.registry.register(
+            createMcpToolAdapter(serverName, tool, (name, args) => {
+              const server = this.mcpManager!.getServerStates().find((s) => s.name === serverName);
+              if (!server) throw new Error(`MCP server '${serverName}' is not running`);
+              return server.client.callTool(name, args);
+            })
+          );
+        } catch (error) {
+          this.emit({
+            type: 'mcp_failed',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      this.emit({
+        type: 'mcp_ready',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        servers: this.mcpManager.getServerStates().map((s) => ({
+          name: s.name,
+          toolCount: s.tools.length,
+          error: s.error,
+        })),
+      });
+    } catch (error) {
+      this.emit({
+        type: 'mcp_failed',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async callModel(): Promise<ModelResponse> {
+    const messages = this.context.buildMessages();
+    this.emit({
+      type: 'model_request',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      messageCount: messages.length,
+    });
+    return await this.modelClient.complete(messages);
+  }
+
+  private async handleToolCall(toolCall: { id: string; type: 'function'; function: { name: string; arguments: string } }): Promise<boolean> {
+    const toolName = toolCall.function.name;
+    const tool = this.registry.get(toolName);
+
+    this.emit({
+      type: 'tool_requested',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      toolName,
+      input: toolCall.function.arguments,
+    });
+
+    let input: unknown = toolCall.function.arguments;
+    let result: ToolResult<unknown>;
+    let approved = true;
+    let changedFilesThisCall = false;
+    const start = Date.now();
+    const workspace = new WorkspaceManager(this.state.workspaceRoot);
+
+    if (!tool) {
+      result = { ok: false, error: { code: 'UNKNOWN_TOOL', message: `Tool not found: ${toolName}` } };
+    } else {
+      try {
+        input = JSON.parse(toolCall.function.arguments || '{}');
+      } catch {
+        result = { ok: false, error: { code: 'INVALID_ARGUMENTS', message: 'Tool arguments are not valid JSON' } };
+        this.recordToolCall(toolCall.id, toolName, input, result, approved, Date.now() - start);
+        return false;
+      }
+
+      const risk = classifyRisk(toolName, input);
+      approved = await this.permissions.isApproved(toolName, input, risk);
+
+      if (!approved) {
+        this.emit({
+          type: 'approval_requested',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          toolName,
+          risk,
+        });
+        const decision = await this.permissions.requestApproval(toolName, input, risk);
+        if (!decision.approved) {
+          result = { ok: false, error: { code: 'PERMISSION_DENIED', message: `Approval denied for ${toolName}` } };
+          this.recordToolCall(toolCall.id, toolName, input, result, false, Date.now() - start);
+          return false;
+        }
+        if (decision.scope) {
+          this.permissions.grant(decision.scope, toolName);
+        }
+        approved = true;
+      }
+
+      this.emit({
+        type: 'tool_started',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        toolName,
+        input,
+      });
+
+      if (toolName === 'spawn_agent') {
+        const subagentInput = this.parseSubagentInput(input);
+        if (subagentInput) {
+          this.emit({
+            type: 'subagent_started',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            kind: subagentInput.kind,
+            task: subagentInput.task,
+            maxTurns: subagentInput.maxTurns,
+          });
+        }
+      }
+
+      this.state.status = 'executing_tool';
+      result = await tool.execute(input, {
+        workspaceRoot: this.state.workspaceRoot,
+        sessionId: this.state.sessionId,
+        objective: this.state.objective,
+        runtimeState: this.state,
+        checkpointManager: this.checkpoints,
+        skillRegistry: this.skills,
+      });
+
+      if (result.metadata?.affectedFiles) {
+        for (const file of result.metadata.affectedFiles) {
+          workspace.markChanged(file);
+          changedFilesThisCall = true;
+          this.emit({
+            type: 'file_changed',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            path: file,
+            operation: toolName,
+          });
+        }
+      }
+
+      this.state.changedFiles = workspace.changedFiles;
+
+      this.emit({
+        type: 'tool_completed',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        toolName,
+        result,
+      });
+
+      if (toolName === 'todo_write' && result.ok && Array.isArray(result.data)) {
+        this.state.todos = result.data;
+      }
+
+      if (toolName === 'skill_load' && result.ok && result.data && typeof result.data === 'object' && 'name' in result.data) {
+        const skillName = String((result.data as { name: string }).name);
+        if (!this.state.activeSkills.includes(skillName)) {
+          this.state.activeSkills.push(skillName);
+          this.context.setActiveSkills(
+            this.state.activeSkills
+              .map((name) => this.skills.load(name))
+              .filter((skill): skill is Skill => skill !== undefined)
+          );
+        }
+      }
+
+      if (toolName === 'spawn_agent' && result.ok && this.isSubagentResult(result.data)) {
+        this.state.subagentReports ||= [];
+        this.state.subagentReports.push(result.data);
+        this.emit({
+          type: 'subagent_completed',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          kind: result.data.kind,
+          status: result.data.status,
+          findings: result.data.findings.length,
+          filesInspected: result.data.filesInspected.length,
+        });
+      }
+    }
+
+    this.syncCheckpointState();
+    this.context.setWorkingMemory(this.state);
+
+    const durationMs = Date.now() - start;
+    this.recordToolCall(toolCall.id, toolName, input, result, approved, durationMs);
+    return changedFilesThisCall;
+  }
+
+  private recordToolCall(
+    id: string,
+    toolName: string,
+    input: unknown,
+    result: ToolResult<unknown>,
+    approved: boolean,
+    durationMs: number
+  ): void {
+    this.state.toolHistory.push({
+      id,
+      toolName,
+      input,
+      result,
+      approved,
+      durationMs,
+      timestamp: new Date().toISOString(),
+    });
+    this.addToolResult(id, result);
+  }
+
+  private syncCheckpointState(): void {
+    const state = this.checkpoints.state();
+    this.state.checkpointIndex = state.index;
+    this.state.checkpointCount = state.count;
+    this.state.canUndoCheckpoints = state.canUndo;
+    this.state.canRedoCheckpoints = state.canRedo;
+  }
+
+  private buildToolContext(): ToolContext {
+    return {
+      workspaceRoot: this.state.workspaceRoot,
+      sessionId: this.state.sessionId,
+      objective: this.state.objective,
+      runtimeState: this.state,
+      checkpointManager: this.checkpoints,
+      skillRegistry: this.skills,
+    };
+  }
+
+  private async runValidation(): Promise<void> {
+    const commands = await detectValidationCommands(this.state.workspaceRoot);
+    if (!commands.length) return;
+
+    const results: { command: string; exitCode: number; stdout: string; stderr: string }[] = [];
+    let overallSuccess = true;
+
+    this.state.status = 'verifying';
+
+    for (const { command } of commands) {
+      if (this.signal?.aborted) break;
+
+      this.emit({
+        type: 'validation_started',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        command,
+      });
+
+      let approved = await this.permissions.isApproved('run_validation', { command }, 'execute');
+      if (!approved) {
+        this.emit({
+          type: 'approval_requested',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          toolName: 'run_validation',
+          risk: 'execute',
+        });
+        const decision = await this.permissions.requestApproval('run_validation', { command }, 'execute');
+        if (!decision.approved) {
+          this.emit({
+            type: 'validation_completed',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            command,
+            exitCode: -1,
+            stdout: '',
+            stderr: 'Approval denied for validation command',
+          });
+          overallSuccess = false;
+          results.push({ command, exitCode: -1, stdout: '', stderr: 'Approval denied for validation command' });
+          continue;
+        }
+        if (decision.scope) {
+          this.permissions.grant(decision.scope, 'run_validation');
+        }
+      }
+
+      const result = await runValidationTool.execute(
+        { command, cwd: this.state.workspaceRoot, timeoutMs: 120000 },
+        this.buildToolContext()
+      );
+
+      if (result.ok) {
+        const data = result.data as { exitCode: number; stdout: string; stderr: string };
+        results.push({ command, exitCode: data.exitCode, stdout: data.stdout, stderr: data.stderr });
+        if (data.exitCode !== 0) overallSuccess = false;
+        this.emit({
+          type: 'validation_completed',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          command,
+          exitCode: data.exitCode,
+          stdout: this.truncateForEvent(data.stdout),
+          stderr: this.truncateForEvent(data.stderr),
+        });
+      } else {
+        overallSuccess = false;
+        results.push({
+          command,
+          exitCode: -1,
+          stdout: '',
+          stderr: result.error?.message || 'Validation execution failed',
+        });
+        this.emit({
+          type: 'validation_completed',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          command,
+          exitCode: -1,
+          stdout: '',
+          stderr: result.error?.message || 'Validation execution failed',
+        });
+      }
+    }
+
+    this.state.lastValidation = {
+      commands: results,
+      overallSuccess,
+      timestamp: new Date().toISOString(),
+    };
+    this.context.setWorkingMemory(this.state);
+  }
+
+  private truncateForEvent(text: string, maxLength = 2000): string {
+    if (text.length <= maxLength) return text;
+    const half = Math.floor(maxLength / 2);
+    return `${text.slice(0, half)}\n... [truncated] ...\n${text.slice(-half)}`;
+  }
+
+  private appendValidationSummary(finalMessage: string): string {
+    if (!this.state.lastValidation || !this.state.changedFiles.length) return finalMessage;
+
+    const { overallSuccess, commands } = this.state.lastValidation;
+    const lines: string[] = [''];
+    lines.push('---');
+    lines.push(`Validation: ${overallSuccess ? 'PASS' : 'FAIL'}`);
+    for (const { command, exitCode, stdout, stderr } of commands) {
+      const status = exitCode === 0 ? 'PASS' : 'FAIL';
+      lines.push(`- [${status}] ${command} (exit ${exitCode})`);
+      if (exitCode !== 0) {
+        const output = (stdout + '\n' + stderr).trim();
+        if (output) {
+          lines.push('  Output:');
+          for (const line of this.truncateForEvent(output, 1000).split('\n')) {
+            lines.push(`    ${line}`);
+          }
+        }
+      }
+    }
+
+    return finalMessage + lines.join('\n');
+  }
+
+  private parseSubagentInput(input: unknown): { task: string; kind: string; maxTurns: number } | undefined {
+    if (!input || typeof input !== 'object') return undefined;
+    const value = input as Record<string, unknown>;
+    const task = typeof value.task === 'string' ? value.task.trim() : '';
+    if (!task) return undefined;
+    const kind = typeof value.kind === 'string' ? value.kind : 'general';
+    const maxTurns = Number.isFinite(value.maxTurns) ? Math.trunc(Number(value.maxTurns)) : 6;
+    return { task, kind, maxTurns };
+  }
+
+  private isSubagentResult(data: unknown): data is SubagentResult {
+    if (!data || typeof data !== 'object') return false;
+    const value = data as Record<string, unknown>;
+    return (
+      value.mode === 'read-only' &&
+      typeof value.task === 'string' &&
+      typeof value.kind === 'string' &&
+      typeof value.status === 'string' &&
+      typeof value.summary === 'string' &&
+      Array.isArray(value.findings) &&
+      Array.isArray(value.recommendations) &&
+      Array.isArray(value.filesInspected)
+    );
+  }
+
+  private addUserMessage(content: string): void {
+    const message: AgentMessage = { role: 'user', content };
+    this.state.messages.push(message);
+    this.context.addConversationMessage(message);
+    this.emit({
+      type: 'user_message',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      content,
+    });
+  }
+
+  private addAssistantMessage(message: AgentMessage): void {
+    this.state.messages.push(message);
+    this.context.addConversationMessage(message);
+  }
+
+  private addToolResult(toolCallId: string, result: ToolResult<unknown>): void {
+    const text = result.ok
+      ? JSON.stringify(result.data)
+      : `Error: ${result.error?.code} - ${result.error?.message}`;
+    const message: AgentMessage = {
+      role: 'tool',
+      content: text,
+      tool_call_id: toolCallId,
+    };
+    this.state.messages.push(message);
+    this.context.addToolResult(toolCallId, text);
+  }
+
+  private emit(event: AgentEvent): void {
+    this.events.emit(event);
+  }
+
+  private persist(): void {
+    try {
+      this.sessions.save(this.state, this.events.events);
+    } catch {
+      // Session persistence is best-effort in Phase 1
+    }
+  }
+}
+
+export function detectWorkspaceRoot(cwd: string): string {
+  return detectGitRoot(cwd) || cwd;
+}

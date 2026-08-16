@@ -1,0 +1,49 @@
+import type { AgentTool, ToolContext } from '../tools/types.js';
+import type { ToolResult } from '../agent/types.js';
+import type { McpTool } from './client.js';
+
+export type McpCallToolFn = (name: string, args: Record<string, unknown>) => Promise<unknown>;
+
+export function createMcpToolAdapter(
+  serverName: string,
+  tool: McpTool,
+  callTool: McpCallToolFn
+): AgentTool {
+  const namespacedName = `mcp:${serverName}:${tool.name}`;
+  return {
+    name: namespacedName,
+    description:
+      tool.description || `MCP tool '${tool.name}' from server '${serverName}'`,
+    inputSchema: normalizeSchema(tool.inputSchema),
+    risk: 'execute',
+    async execute(input: unknown, _context: ToolContext): Promise<ToolResult<unknown>> {
+      try {
+        const args =
+          typeof input === 'object' && input !== null
+            ? (input as Record<string, unknown>)
+            : {};
+        const result = await callTool(tool.name, args);
+        return { ok: true, data: result };
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            code: 'MCP_TOOL_ERROR',
+            message: error instanceof Error ? error.message : String(error),
+          },
+        };
+      }
+    },
+  };
+}
+
+function normalizeSchema(schema: unknown): AgentTool['inputSchema'] {
+  if (
+    schema &&
+    typeof schema === 'object' &&
+    (schema as Record<string, unknown>).type === 'object'
+  ) {
+    return schema as AgentTool['inputSchema'];
+  }
+  return { type: 'object', properties: {} };
+}
