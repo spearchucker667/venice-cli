@@ -51,4 +51,10 @@ describe('classifyRisk', () => {
   it('classifies spawn_agent as execute', () => {
     assert.strictEqual(classifyRisk('spawn_agent', { task: 'inspect' }), 'execute');
   });
+
+  it('classifies Venice media tools as network', () => {
+    assert.strictEqual(classifyRisk('edit_image', { image: 'a.png', prompt: 'x', output: 'b.png' }), 'network');
+    assert.strictEqual(classifyRisk('generate_video', { prompt: 'a clip' }), 'network');
+    assert.strictEqual(classifyRisk('text_to_speech', { text: 'hi', output: 'out.mp3' }), 'network');
+  });
 });

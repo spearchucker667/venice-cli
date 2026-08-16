@@ -119,6 +119,10 @@ export class ContextManager {
     this.conversation.push(message);
   }
 
+  resetConversation(): void {
+    this.conversation = [];
+  }
+
   setFileContext(messages: AgentMessage[]): void {
     this.fileContext = messages;
   }

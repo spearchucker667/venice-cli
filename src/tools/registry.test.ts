@@ -38,4 +38,19 @@ describe('ToolRegistry', () => {
     const registry = createDefaultRegistry();
     assert.ok(registry.has('spawn_agent'));
   });
+
+  it('default registry includes Venice media tools', () => {
+    const registry = createDefaultRegistry();
+    for (const name of [
+      'edit_image',
+      'upscale_image',
+      'remove_background',
+      'generate_video',
+      'image_to_video',
+      'transcribe_audio',
+      'text_to_speech',
+    ]) {
+      assert.ok(registry.has(name), `missing ${name}`);
+    }
+  });
 });

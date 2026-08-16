@@ -64,6 +64,7 @@ export class AgentRuntime {
   private readonly mcpManager?: McpManager;
   private readonly checkpoints: CheckpointManager;
   private readonly skills: SkillRegistry;
+  private sessionCompletedEmitted = false;
 
   constructor(options: AgentRuntimeOptions) {
     this.state = {
@@ -107,8 +108,32 @@ export class AgentRuntime {
     this.permissions.setApprover(callback);
   }
 
-  async run(): Promise<AgentRuntimeResult> {
-    this.state.status = 'thinking';
+  setModel(model: string): void {
+    this.state.model = model;
+    this.modelClient.setModel(model);
+  }
+
+  loadState(state: AgentState): void {
+    Object.assign(this.state, state);
+    this.sessionCompletedEmitted = state.status === 'complete' || state.status === 'failed' || state.status === 'cancelled';
+    this.modelClient.setModel(this.state.model);
+    this.context.setWorkingMemory(this.state);
+    this.context.resetConversation();
+    for (const message of this.state.messages) {
+      this.context.addConversationMessage(message);
+    }
+    this.context.setActiveSkills(
+      this.state.activeSkills
+        .map((name) => this.skills.load(name))
+        .filter((skill): skill is Skill => skill !== undefined)
+    );
+  }
+
+  async start(): Promise<void> {
+    if (this.state.status !== 'idle') {
+      return;
+    }
+
     this.emit({
       type: 'session_started',
       timestamp: new Date().toISOString(),
@@ -132,9 +157,62 @@ export class AgentRuntime {
     }
 
     await this.startMcpServers();
+  }
 
+  async sendUserMessage(content: string): Promise<string> {
+    if (this.state.status === 'idle') {
+      await this.start();
+    }
+
+    this.sessionCompletedEmitted = false;
+    this.state.status = 'thinking';
+    this.addUserMessage(content);
+    const finalMessage = await this.processTurns();
+    this.persist();
+    return finalMessage;
+  }
+
+  async complete(): Promise<AgentRuntimeResult> {
+    let finalMessage = '';
+    const lastAssistant = [...this.state.messages].reverse().find((m) => m.role === 'assistant');
+    finalMessage = typeof lastAssistant?.content === 'string' ? lastAssistant.content : '';
+    finalMessage = this.appendValidationSummary(finalMessage);
+
+    if (!this.sessionCompletedEmitted) {
+      this.sessionCompletedEmitted = true;
+      this.emit({
+        type: 'session_completed',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        status: this.state.status,
+      });
+    }
+
+    this.persist();
+    return { state: this.state, events: this.events.events, finalMessage };
+  }
+
+  async run(): Promise<AgentRuntimeResult> {
+    await this.start();
     this.addUserMessage(this.state.objective);
+    let finalMessage = await this.processTurns();
+    finalMessage = this.appendValidationSummary(finalMessage);
 
+    if (!this.sessionCompletedEmitted) {
+      this.sessionCompletedEmitted = true;
+      this.emit({
+        type: 'session_completed',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        status: this.state.status,
+      });
+    }
+
+    this.persist();
+    return { state: this.state, events: this.events.events, finalMessage };
+  }
+
+  private async processTurns(): Promise<string> {
     let turns = 0;
     let finalMessage = '';
 
@@ -202,17 +280,7 @@ export class AgentRuntime {
       finalMessage = `Agent failed: ${error instanceof Error ? error.message : String(error)}`;
     }
 
-    this.emit({
-      type: 'session_completed',
-      timestamp: new Date().toISOString(),
-      eventId: randomUUID(),
-      status: this.state.status,
-    });
-
-    finalMessage = this.appendValidationSummary(finalMessage);
-
-    this.persist();
-    return { state: this.state, events: this.events.events, finalMessage };
+    return finalMessage;
   }
 
   private async startMcpServers(): Promise<void> {

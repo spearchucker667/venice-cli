@@ -30,7 +30,9 @@ import { skillLoadTool } from './agent-meta/skill-load.js';
 import { spawnAgentTool } from './agent-meta/spawn-agent.js';
 import { runValidationTool } from './validation/run.js';
 import { webSearchTool, webScrapeTool } from './venice/search.js';
-import { generateImageTool } from './venice/image.js';
+import { editImageTool, generateImageTool, removeBackgroundTool, upscaleImageTool } from './venice/image.js';
+import { textToSpeechTool, transcribeAudioTool } from './venice/audio.js';
+import { generateVideoTool, imageToVideoTool } from './venice/video.js';
 
 export class ToolRegistry {
   private readonly tools = new Map<string, AgentTool>();
@@ -91,5 +93,12 @@ export function createDefaultRegistry(): ToolRegistry {
   registry.register(webSearchTool);
   registry.register(webScrapeTool);
   registry.register(generateImageTool);
+  registry.register(editImageTool);
+  registry.register(upscaleImageTool);
+  registry.register(removeBackgroundTool);
+  registry.register(generateVideoTool);
+  registry.register(imageToVideoTool);
+  registry.register(transcribeAudioTool);
+  registry.register(textToSpeechTool);
   return registry;
 }

@@ -493,4 +493,106 @@ describe('AgentRuntime', () => {
     assert.ok(!result.events.some((e) => e.type === 'validation_started'));
     assert.ok(result.state.changedFiles.includes('new.txt'));
   });
+
+  it('supports persistent follow-up messages in the same runtime', async () => {
+    const registry = new ToolRegistry();
+    registry.register(readFileTool);
+
+    const responses: ModelResponse[] = [
+      { content: 'First response.', finishReason: 'stop' },
+      { content: 'Second response.', finishReason: 'stop' },
+    ];
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Initial task',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: new MockModelClient(responses),
+      toolRegistry: registry,
+    });
+
+    const first = await runtime.sendUserMessage('Initial task');
+    assert.strictEqual(first, 'First response.');
+    assert.strictEqual(runtime.getState().messages.filter((m) => m.role === 'user').length, 1);
+
+    const second = await runtime.sendUserMessage('Follow-up');
+    assert.strictEqual(second, 'Second response.');
+    assert.strictEqual(runtime.getState().messages.filter((m) => m.role === 'user').length, 2);
+    assert.strictEqual(runtime.getState().messages.filter((m) => m.role === 'assistant').length, 2);
+    assert.strictEqual(runtime.getState().status, 'complete');
+
+    const result = await runtime.complete();
+    assert.ok(result.events.some((e) => e.type === 'session_completed'));
+    assert.strictEqual(result.state.sessionId, runtime.getState().sessionId);
+  });
+
+  it('can change model mid-session', async () => {
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Test model switch',
+      approvalMode: 'auto-edit',
+      maxTurns: 2,
+      modelClient: new MockModelClient([{ content: 'done', finishReason: 'stop' }]),
+    });
+
+    runtime.setModel('another-model');
+    assert.strictEqual(runtime.getState().model, 'another-model');
+
+    await runtime.run();
+    assert.strictEqual(runtime.getState().model, 'another-model');
+  });
+
+  it('loads persisted state and continues', async () => {
+    const registry = new ToolRegistry();
+    registry.register(readFileTool);
+
+    const firstRuntime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Original objective',
+      approvalMode: 'auto-edit',
+      maxTurns: 2,
+      modelClient: new MockModelClient([{ content: 'original', finishReason: 'stop' }]),
+      toolRegistry: registry,
+    });
+
+    await firstRuntime.run();
+    const persisted = firstRuntime.getState();
+    assert.ok(persisted.messages.length > 0);
+
+    const secondRuntime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: '',
+      approvalMode: 'auto-edit',
+      maxTurns: 2,
+      modelClient: new MockModelClient([{ content: 'resumed', finishReason: 'stop' }]),
+      toolRegistry: registry,
+    });
+
+    secondRuntime.loadState(persisted);
+    assert.strictEqual(secondRuntime.getState().sessionId, persisted.sessionId);
+    assert.strictEqual(secondRuntime.getState().objective, persisted.objective);
+
+    const followUp = await secondRuntime.sendUserMessage('Follow-up after resume');
+    assert.strictEqual(followUp, 'resumed');
+    assert.ok(secondRuntime.getState().messages.some((m) => m.role === 'user' && m.content === 'Follow-up after resume'));
+  });
+
+  it('emits session_completed only once even if complete is called after run', async () => {
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Test completion',
+      approvalMode: 'auto-edit',
+      maxTurns: 2,
+      modelClient: new MockModelClient([{ content: 'done', finishReason: 'stop' }]),
+    });
+
+    const first = await runtime.run();
+    const completedCount = first.events.filter((e) => e.type === 'session_completed').length;
+    assert.strictEqual(completedCount, 1);
+
+    const second = await runtime.complete();
+    const secondCompletedCount = second.events.filter((e) => e.type === 'session_completed').length;
+    assert.strictEqual(secondCompletedCount, 1);
+  });
 });

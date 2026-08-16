@@ -37,6 +37,10 @@ export interface StreamingDelta {
 export class VeniceModelClient {
   constructor(private readonly options: ModelClientOptions = {}) {}
 
+  setModel(model: string): void {
+    this.options.model = model;
+  }
+
   async complete(messages: AgentMessage[]): Promise<ModelResponse> {
     const apiMessages = messages.map((m) => this.toApiMessage(m));
     const result = await chatCompletion(apiMessages, {

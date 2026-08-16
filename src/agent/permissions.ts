@@ -121,5 +121,21 @@ export function classifyRisk(toolName: string, input: unknown): RiskLevel {
     return 'read';
   }
   if (toolName === 'ask_user') return 'read';
+  if (
+    [
+      'web_search',
+      'web_scrape',
+      'generate_image',
+      'edit_image',
+      'upscale_image',
+      'remove_background',
+      'generate_video',
+      'image_to_video',
+      'transcribe_audio',
+      'text_to_speech',
+    ].includes(toolName)
+  ) {
+    return 'network';
+  }
   return 'execute';
 }

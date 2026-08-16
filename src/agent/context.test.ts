@@ -82,6 +82,15 @@ describe('ContextManager', () => {
     assert.ok(system.includes('src/app.ts'));
     assert.ok(system.includes('test failed'));
   });
+
+  it('resets conversation', () => {
+    const ctx = new ContextManager();
+    ctx.addConversationMessage({ role: 'user', content: 'Hello' });
+    ctx.resetConversation();
+    const messages = ctx.buildMessages();
+    assert.strictEqual(messages.length, 1);
+    assert.strictEqual(messages[0].role, 'system');
+  });
 });
 
 describe('buildStructuredSummary', () => {

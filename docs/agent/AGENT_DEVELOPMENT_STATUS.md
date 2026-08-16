@@ -368,3 +368,76 @@ Status: **Implementation complete.**
 ### Next Milestone
 
 Phase 10 — Additional Venice-native media tools (`edit_image`, `upscale_image`, `remove_background`, `generate_video`, `image_to_video`, `transcribe_audio`, `text_to_speech`) exposed through the same tool registry and permission system.
+
+## Phase 10 — Additional Venice-Native Media Tools
+
+Status: **Implementation complete.**
+
+### Implemented
+
+| Component | Files | Tests |
+|-----------|-------|-------|
+| Image edit / upscale / background-remove tools | `src/tools/venice/image.ts`, `src/tools/venice/io.ts` | `src/tools/venice/image.test.ts` |
+| Video generation + image-to-video tools | `src/tools/venice/video.ts` | `src/tools/venice/video.test.ts` |
+| Audio TTS + transcription tools | `src/tools/venice/audio.ts` | `src/tools/venice/audio.test.ts` |
+| Registry + permission classification | `src/tools/registry.ts`, `src/agent/permissions.ts` | `src/tools/registry.test.ts`, `src/agent/permissions.test.ts` |
+
+### Validation Results
+
+- `npm run build`: **PASS**
+- `npm run lint`: **FAIL** (pre-existing: `src/lib/e2ee.ts` and `src/lib/tee.ts` are UTF-16 LE and cannot be parsed by ESLint)
+- `npm test`: **360 pass, 3 fail** (failures are pre-existing macOS `/private/var` vs `/var` path canonicalization issues in `src/commands/account.test.ts`)
+
+### Design Notes
+
+- All new tools reuse existing official Venice API helpers in `src/lib/api.ts`. No request logic was duplicated.
+- Image/audio/video outputs are written only inside the workspace and reported via `affectedFiles`.
+- `generate_video` and `image_to_video` queue by default. `wait: true` polls with the existing video status helper and saves the completed file.
+- Venice media tools are classified as `network` risk so they still require approval in `suggest` and `auto-edit` modes.
+
+### Deferred to Later Phases
+
+- Write-capable subagents
+- Full follow-up chat within a single TUI runtime session
+- Model picker / session resume UIs
+- Additional music-generation agent tools
+
+## Phase 11 — TUI Follow-Up Chat, Model Picker, and Session Resume
+
+Status: **Implementation complete.**
+
+### Implemented
+
+| Component | Files | Tests |
+|-----------|-------|-------|
+| Persistent multi-turn runtime API | `src/agent/runtime.ts`, `src/agent/model-client.ts` | `src/agent/runtime.test.ts` |
+| Interactive model picker | `src/ui/model-picker.tsx` | `src/ui/model-picker.test.tsx` |
+| Interactive session picker | `src/ui/session-picker.tsx` | `src/ui/session-picker.test.tsx` |
+| Slash command wiring for `/model`, `/models`, `/resume`, `/sessions` | `src/ui/slash-handlers.ts`, `src/ui/slash-commands.ts` | `src/ui/slash-handlers.test.ts` |
+| Persistent TUI runtime session | `src/ui/app.tsx`, `src/ui/tui.tsx` | `src/ui/app.test.tsx` |
+
+### Validation Results
+
+- `npm run build`: **PASS**
+- `npm run lint`: **FAIL** (pre-existing: `src/lib/e2ee.ts` and `src/lib/tee.ts` are UTF-16 LE and cannot be parsed by ESLint)
+- `npm test`: **372 pass, 3 fail** (failures are pre-existing macOS `/private/var` vs `/var` path canonicalization issues in `src/commands/account.test.ts`)
+
+### Design Notes
+
+- `AgentRuntime` now exposes `start()`, `sendUserMessage(content)`, `complete()`, `loadState(state)`, and `setModel(model)` for persistent interactive sessions while keeping `run()` unchanged for one-shot/noninteractive use.
+- The TUI creates a single runtime instance and reuses it across user turns instead of launching a new runtime per objective.
+- `/model` opens an interactive picker when called without arguments; `/model <id>` sets the model directly.
+- `/resume` opens an interactive session picker when called without arguments; `/resume <session-id>` resumes that session directly.
+- `/sessions` lists saved sessions inline.
+- Resuming a session restores messages, model, todos, changed files, active skills, and subagent reports into the current runtime.
+
+### Deferred to Later Phases
+
+- Write-capable subagents
+- Inline diff/code review panes
+- Image/media previews in the TUI
+- Additional music-generation agent tools
+
+### Next Milestone
+
+Write-capable subagents after additional production hardening, or advanced TUI features such as inline diff review and media previews. Recommendation: write-capable subagents, because they extend the agent's ability to delegate independent work streams safely.

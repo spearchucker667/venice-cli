@@ -22,6 +22,9 @@ import { parseSlashCommand } from './slash-commands.js';
 import { handleSlashCommand } from './slash-handlers.js';
 import { resolveMentions } from './mentions.js';
 import type { TuiMessage } from './types.js';
+import { ModelPicker } from './model-picker.js';
+import { SessionPicker } from './session-picker.js';
+import { SessionManager } from '../agent/sessions.js';
 
 export interface AppProps {
   workspaceRoot: string;
@@ -39,6 +42,8 @@ interface PendingApproval {
   risk: string;
   resolve: (decision: ApprovalDecision) => void;
 }
+
+type PickerMode = 'normal' | 'model-picker' | 'session-picker';
 
 function minimalAgentState(workspaceRoot: string): AgentState {
   return {
@@ -68,16 +73,22 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
   ]);
   const [status, setStatus] = useState<AgentStatus>('idle');
   const [isRunning, setIsRunning] = useState(false);
-  const [objective, setObjective] = useState<string | undefined>(initialObjective);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
+  const [currentModel, setCurrentModel] = useState(model);
+  const [mode, setMode] = useState<PickerMode>('normal');
 
   useInput((_input, key) => {
-    const k = key as { ctrl?: boolean; name?: string };
+    const k = key as { ctrl?: boolean; name?: string; escape?: boolean };
     if (k.ctrl && k.name === 'c') {
       abortControllerRef.current?.abort();
+      runtimeRef.current?.complete().catch(() => {});
       exit();
       onExit();
+      return;
+    }
+    if (k.escape && mode !== 'normal') {
+      setMode('normal');
     }
   });
 
@@ -88,18 +99,6 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
   });
 
   useEffect(() => {
-    if (!objective) return;
-
-    setIsRunning(true);
-    setStatus('thinking');
-    setError(undefined);
-    setPendingApproval((current) => {
-      if (current) {
-        current.resolve({ approved: false });
-      }
-      return null;
-    });
-
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
@@ -111,15 +110,15 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
       if (mapped) {
         setMessages((prev) => [...prev, mapped]);
       }
-      if (event.type === 'session_completed' || event.type === 'session_started') {
+      if (event.type === 'session_started' || event.type === 'session_completed') {
         setStatus(runtime?.getState().status ?? 'idle');
       }
     });
 
     runtime = new AgentRuntimeClass({
       workspaceRoot,
-      objective,
-      model,
+      objective: initialObjective || '',
+      model: currentModel,
       approvalMode,
       maxTurns,
       eventBus: events,
@@ -129,17 +128,22 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     });
     runtimeRef.current = runtime;
 
-    runtime
-      .run()
-      .then(() => {
-        setStatus(runtime.getState().status);
-        setIsRunning(false);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : String(err));
-        setStatus('failed');
-        setIsRunning(false);
-      });
+    if (initialObjective?.trim()) {
+      setIsRunning(true);
+      runtime
+        .sendUserMessage(initialObjective.trim())
+        .then(() => {
+          setStatus(runtime.getState().status);
+          setIsRunning(false);
+        })
+        .catch((err) => {
+          setError(err instanceof Error ? err.message : String(err));
+          setStatus('failed');
+          setIsRunning(false);
+        });
+    } else {
+      runtime.start().catch(() => {});
+    }
 
     return () => {
       unsubscribe();
@@ -152,7 +156,8 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
         return null;
       });
     };
-  }, [objective, workspaceRoot, model, approvalMode, maxTurns, mcpManager]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceRoot, model, approvalMode, maxTurns, mcpManager]);
 
   const addEvent = (content: string) => {
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'event', content }]);
@@ -182,6 +187,24 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     }
   };
 
+  const handleSetModel = (nextModel: string) => {
+    setCurrentModel(nextModel);
+    runtimeRef.current?.setModel(nextModel);
+  };
+
+  const handleResumeSession = (sessionId: string) => {
+    const manager = new SessionManager();
+    const stored = manager.load(sessionId);
+    if (!stored) {
+      addEvent(`Session not found: ${sessionId}`);
+      return;
+    }
+    runtimeRef.current?.loadState(stored.state);
+    setCurrentModel(stored.state.model);
+    setStatus(stored.state.status);
+    addEvent(`Resumed session ${sessionId}: ${stored.state.objective || 'No objective'}`);
+  };
+
   const handleSubmit = (text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -190,14 +213,19 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     if (slash) {
       handleSlashCommand(slash.command, slash.args, {
         exit: () => {
+          runtimeRef.current?.complete().catch(() => {});
           exit();
           onExit();
         },
         setMessages,
         status,
-        model,
+        model: currentModel,
         approvalMode,
         workspaceRoot,
+        setModel: handleSetModel,
+        showModelPicker: () => setMode('model-picker'),
+        showSessionPicker: () => setMode('session-picker'),
+        resumeSession: handleResumeSession,
       });
       return;
     }
@@ -221,7 +249,20 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
     }
 
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'user', content: resolvedText }]);
-    setObjective(resolvedText);
+    setIsRunning(true);
+    setError(undefined);
+
+    runtimeRef.current
+      ?.sendUserMessage(resolvedText)
+      .then(() => {
+        setStatus(runtimeRef.current?.getState().status ?? 'idle');
+        setIsRunning(false);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+        setStatus('failed');
+        setIsRunning(false);
+      });
   };
 
   const handleApprovalDecision = (decision: ApprovalDecision) => {
@@ -237,7 +278,25 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
           <Text color="red">Error: {error}</Text>
         </Box>
       )}
-      {pendingApproval && (
+      {mode === 'model-picker' && (
+        <ModelPicker
+          currentModel={currentModel}
+          onSelect={(selected) => {
+            handleSetModel(selected);
+            addEvent(`Model set to ${selected}.`);
+            setMode('normal');
+          }}
+        />
+      )}
+      {mode === 'session-picker' && (
+        <SessionPicker
+          onSelect={(sessionId) => {
+            handleResumeSession(sessionId);
+            setMode('normal');
+          }}
+        />
+      )}
+      {pendingApproval && mode === 'normal' && (
         <ApprovalPrompt
           toolName={pendingApproval.toolName}
           input={pendingApproval.input}
@@ -245,12 +304,12 @@ export function App({ workspaceRoot, model, approvalMode, maxTurns, mcpManager, 
           onDecision={handleApprovalDecision}
         />
       )}
-      <Composer onSubmit={handleSubmit} disabled={isRunning && pendingApproval !== null} />
+      <Composer onSubmit={handleSubmit} disabled={pendingApproval !== null || mode !== 'normal'} />
       <StatusBar
         state={{
           messages,
           status,
-          model,
+          model: currentModel,
           workspaceRoot,
           approvalMode,
           contextTokens: 0,
