@@ -486,9 +486,28 @@ Status: **Implementation complete.**
 
 - Concurrent write-capable subagents and automatic merge/conflict handling.
 - Shell or network access inside subagents.
-- Inline diff/code review panes and media previews in the TUI.
-- Remaining placeholder slash commands (`/context`, `/compact`, `/new`, `/tools`, `/mcp`, `/skills`, `/permissions`, `/plan`, `/diff`, `/review`, `/git`, `/init`).
 
-### Next Milestone
+## Phase 13 — Slash Command Architecture, Scaffolding, and Runtime Hardening
 
-Implement inline diff/review UX and the remaining runtime-backed slash commands, beginning with `/diff`, `/review`, and `/init`, while keeping orchestration logic outside React components.
+Status: **Implementation complete.**
+
+### Implemented
+
+| Component | Files | Tests |
+|-----------|-------|-------|
+| Workspace scaffolding command | `src/commands/init.ts` | `src/commands/init.test.ts` |
+| Runtime-backed slash commands (`/diff`, `/review`, `/plan`, `/compact`, `/tools`, `/mcp`, `/skills`, `/permissions`, `/git`, `/init`, `/context`, `/new`) | `src/ui/slash-handlers.ts`, `src/ui/slash-commands.ts` | `src/ui/slash-handlers.test.ts` |
+| Secure `@file` mentions with canonicalization and size boundaries | `src/ui/mentions.ts` | `src/ui/mentions.test.ts` |
+| Dual-stage `Ctrl+C` cancellation and session preservation | `src/ui/app.tsx` | Interactive verification |
+| Dynamic context telemetry with `unknown` fallback | `src/agent/context.ts`, `src/ui/status.tsx`, `src/ui/app.tsx` | `src/agent/context.test.ts`, `src/ui/status.test.tsx` |
+| Machine-clean non-interactive JSON stdout | `src/ui/renderer.ts`, `src/commands/agent.ts` | CLI automation tests |
+| Bare `venice` dispatch without Commander index dumping | `src/commands/agent.ts`, `src/index.ts` | CLI dispatch tests |
+| Architecture Decision Records (ADR-001 through ADR-005) | `docs/architecture/adr/*.md` | Doc verification |
+| Complete topic guides and plan specifications | `docs/*.md`, `docs/AGENT_RUNTIME_PLAN.md` | Doc verification |
+
+### Validation Results
+
+- `npm run build`: **PASS** (0 errors)
+- `npm run lint`: **PASS** (0 warnings, 0 errors)
+- `npm test`: **PASS** (391 tests, 54 suites, 0 failures)
+
