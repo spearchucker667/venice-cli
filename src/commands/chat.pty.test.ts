@@ -17,6 +17,22 @@ const PLAIN_MODEL = 'plain-pty-model';
 const PROMPT = 'you> ';
 const TEST_TIMEOUT_MS = 8_000;
 
+function probePtyAvailable(): boolean {
+  try {
+    const terminal = spawnPty(process.execPath, ['-e', 'process.exit(0)'], {
+      cols: 80,
+      rows: 24,
+      cwd: process.cwd(),
+    });
+    terminal.kill();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const ptyAvailable = probePtyAvailable();
+
 interface CapturedRequest {
   messages: Message[];
   venice_parameters?: Record<string, unknown>;
@@ -294,7 +310,7 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
-test('actual PTY chat keeps context, handles commands, and exits cleanly', async () => {
+test('actual PTY chat keeps context, handles commands, and exits cleanly', { skip: !ptyAvailable }, async () => {
   const mock = startMockApi();
   const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-pty-'));
   try {
@@ -335,7 +351,7 @@ test('actual PTY chat keeps context, handles commands, and exits cleanly', async
   }
 });
 
-test('actual REPL failure rolls back the turn before retry', async () => {
+test('actual REPL failure rolls back the turn before retry', { skip: !ptyAvailable }, async () => {
   const mock = startMockApi({ failFirstToolTurn: true });
   const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-pty-retry-'));
   try {
@@ -390,7 +406,7 @@ test('actual REPL failure rolls back the turn before retry', async () => {
 
 for (const privacy of ['e2ee', 'tee'] as const) {
   for (const path of ['one-shot', 'repl'] as const) {
-    test(`${privacy.toUpperCase()} ${path} chat never persists history`, async () => {
+    test(`${privacy.toUpperCase()} ${path} chat never persists history`, { skip: !ptyAvailable }, async () => {
       const mock = startMockApi();
       const homeDir = mkdtempSync(join(tmpdir(), `venice-chat-${privacy}-${path}-`));
       try {
@@ -422,7 +438,7 @@ for (const privacy of ['e2ee', 'tee'] as const) {
 }
 
 for (const [name, input] of [['Ctrl-C', '\x03'], ['EOF', '\x04']] as const) {
-  test(`actual PTY ${name} closes the REPL without hanging`, async () => {
+  test(`actual PTY ${name} closes the REPL without hanging`, { skip: !ptyAvailable }, async () => {
     const mock = startMockApi();
     const homeDir = mkdtempSync(join(tmpdir(), `venice-chat-${name.toLowerCase()}-`));
     try {
@@ -447,7 +463,7 @@ for (const [name, inputs] of [
   ['Ctrl-C', ['\x03']],
   ['EOF', ['\x04']],
 ] as const) {
-  test(`--continue with ${name} does not duplicate existing history`, async () => {
+  test(`--continue with ${name} does not duplicate existing history`, { skip: !ptyAvailable }, async () => {
     const mock = startMockApi();
     const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-continue-no-turn-'));
     try {
@@ -483,7 +499,7 @@ for (const [name, inputs] of [
 }
 
 for (const [name, input] of [['Ctrl-C', '\x03'], ['Ctrl-D', '\x04']] as const) {
-  test(`${name} aborts a stalled in-flight completion without saving or retrying`, async () => {
+  test(`${name} aborts a stalled in-flight completion without saving or retrying`, { skip: !ptyAvailable }, async () => {
     const mock = startMockApi({ stallFirstCompletion: true });
     const homeDir = mkdtempSync(join(tmpdir(), 'venice-chat-cancel-turn-'));
     try {

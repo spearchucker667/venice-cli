@@ -123,7 +123,7 @@ test('chat cancellation remains active while a streaming body is consumed', asyn
   }
 });
 
-test('stream request timeout ends after headers while cancellation listener lasts through body', async () => {
+test('returning a streaming response releases the external abort listener while the body stays readable', async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.VENICE_API_KEY;
   const controller = new AbortController();
@@ -154,7 +154,7 @@ test('stream request timeout ends after headers while cancellation listener last
       timeoutMs: 10,
       signal: controller.signal,
     });
-    assert.equal(listenerTracker.active(), 1);
+    assert.equal(listenerTracker.active(), 0);
     assert.equal(await response.text(), 'data: healthy\n\n');
     assert.equal(listenerTracker.active(), 0);
   } finally {
@@ -168,7 +168,7 @@ test('stream request timeout ends after headers while cancellation listener last
   }
 });
 
-test('JSON request timeout ends after headers while a healthy body is consumed', async () => {
+test('JSON request timeout bounds body consumption', async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.VENICE_API_KEY;
   process.env.VENICE_API_KEY = 'test-key';
@@ -179,21 +179,35 @@ test('JSON request timeout ends after headers while a healthy body is consumed',
   )) as typeof fetch;
 
   try {
+    // A body slower than the request timeout must not be allowed to run past
+    // it: the fork's apiRequest bounds non-stream body consumption by the
+    // per-attempt timeout.
     const startedAt = Date.now();
-    const result = await apiRequest<{ status: string }>('/delayed-json-test', {
+    await assert.rejects(
+      apiRequest<{ status: string }>('/delayed-json-test', {
+        showSpinner: false,
+        retries: 0,
+        timeoutMs: 10,
+      }),
+      (error: unknown) =>
+        error instanceof Error && /Request timed out/.test(error.message)
+    );
+    assert.ok(Date.now() - startedAt < 2_000);
+
+    // A body faster than the timeout completes normally.
+    const fast = await apiRequest<{ status: string }>('/delayed-json-fast-test', {
       showSpinner: false,
       retries: 0,
-      timeoutMs: 10,
+      timeoutMs: 1000,
     });
-    assert.deepEqual(result, { status: 'healthy' });
-    assert.ok(Date.now() - startedAt >= 30);
+    assert.deepEqual(fast, { status: 'healthy' });
   } finally {
     globalThis.fetch = originalFetch;
     restoreEnv('VENICE_API_KEY', originalApiKey);
   }
 });
 
-test('JSON request timeout ends after headers while an HTTP error body is consumed', async () => {
+test('JSON error body is read and surfaced as VeniceApiError within the request timeout', async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.VENICE_API_KEY;
   process.env.VENICE_API_KEY = 'test-key';
@@ -210,7 +224,7 @@ test('JSON request timeout ends after headers while an HTTP error body is consum
       apiRequest('/delayed-error-test', {
         showSpinner: false,
         retries: 0,
-        timeoutMs: 10,
+        timeoutMs: 1000,
       }),
       (error: unknown) => {
         assert.ok(error instanceof VeniceApiError);
@@ -243,7 +257,7 @@ test('external abort remains active during JSON body consumption and cleans up',
     const request = apiRequest('/cancel-delayed-json-test', {
       showSpinner: false,
       retries: 0,
-      timeoutMs: 5,
+      timeoutMs: 1000,
       signal: controller.signal,
     });
     setTimeout(() => controller.abort(), 20);
@@ -258,7 +272,7 @@ test('external abort remains active during JSON body consumption and cleans up',
   }
 });
 
-test('cancelling a streaming response removes its external abort listener', async () => {
+test('returning a streaming response removes its external abort listener and cancel propagates', async () => {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.VENICE_API_KEY;
   const controller = new AbortController();
@@ -279,7 +293,7 @@ test('cancelling a streaming response removes its external abort listener', asyn
       timeoutMs: 10,
       signal: controller.signal,
     });
-    assert.equal(listenerTracker.active(), 1);
+    assert.equal(listenerTracker.active(), 0);
     await response.body?.cancel();
     assert.equal(sourceCancelled, true);
     assert.equal(listenerTracker.active(), 0);
