@@ -40,9 +40,44 @@ export const COMPACT_LOGO = [
   ' (_) (_)',
 ] as const;
 
-/** Progressive-reveal frame steps (count of visible logo rows). */
+/**
+ * Progressive-reveal frame steps (count of visible logo rows).
+ *
+ * Steps land on semantic groups so each reads clearly: the two warded heads
+ * and their interlocking teeth (rows 1-2), then the converging shafts, then
+ * the X cross, and finally the complete mark with the bow rings.
+ */
 export const FULL_FRAMES = [2, 4, 6, 7] as const;
 export const COMPACT_FRAMES = [2, 4, 5] as const;
+
+/**
+ * Single-line crossed-keys glyph for the status bar: two bow rings flanking
+ * the crossed shafts. Plain ASCII so it renders on any terminal.
+ */
+export const STATUS_MARK = '(_)X(_)';
+
+/** Interval (ms) between entrance frames; shared by reveal and accent sweep. */
+export const GREETING_FRAME_MS = 60;
+
+/** Columns the accent pass lights per sweep tick. */
+export const SWEEP_COLUMNS_PER_TICK = 2;
+
+/**
+ * Number of ticks for a one-pass accent sweep across the mark's widest line.
+ * The sweep advances `SWEEP_COLUMNS_PER_TICK` columns per tick.
+ */
+export function accentSweepStepCount(maxWidth: number): number {
+  return Math.max(1, Math.ceil(maxWidth / SWEEP_COLUMNS_PER_TICK));
+}
+
+/**
+ * Column lit by the accent sweep at a 1-based sweep tick. The final tick
+ * lights the rightmost column so the wash completes before settling.
+ */
+export function getAccentSweepCol(maxWidth: number, tick: number, sweepSteps: number): number {
+  if (tick >= sweepSteps) return maxWidth - 1;
+  return Math.min(maxWidth - 1, (tick - 1) * SWEEP_COLUMNS_PER_TICK);
+}
 
 export type GreetingVariant = 'full' | 'compact' | 'minimal';
 

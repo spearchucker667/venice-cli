@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { render } from 'ink-testing-library';
 import { StatusBar } from './status.js';
+import { STATUS_MARK } from './brand.js';
 
 describe('StatusBar', () => {
   it('renders model, workspace, and context usage', () => {
@@ -23,6 +24,38 @@ describe('StatusBar', () => {
     assert.ok(frame.includes('kimi-k2.5'));
     assert.ok(frame.includes('/tmp'));
     assert.ok(frame.includes('auto-edit'));
+  });
+
+  it('shows the crossed-keys brand mark', () => {
+    const { lastFrame } = render(
+      <StatusBar
+        state={{
+          messages: [],
+          status: 'idle',
+          model: 'kimi-k2.5',
+          agentMode: 'agent',
+          workspaceRoot: '/tmp',
+          approvalMode: 'suggest',
+          contextTokens: 0,
+          maxTokens: 0,
+        }}
+      />
+    );
+    const frame = lastFrame() || '';
+    assert.ok(frame.includes(STATUS_MARK));
+  });
+
+  it('drops the brand mark on very narrow terminals', () => {
+    const { lastFrame } = render(
+      <StatusBar columns={40} state={{
+        messages: [], status: 'idle', model: 'kimi-k2.5', agentMode: 'agent',
+        workspaceRoot: '/tmp', approvalMode: 'suggest',
+        contextTokens: 0, maxTokens: 0,
+      }} />
+    );
+    const frame = lastFrame() || '';
+    assert.ok(!frame.includes(STATUS_MARK));
+    assert.ok(frame.includes('kimi-k2.5'));
   });
 
   it('shows chat-only mode and shortens long non-Git paths', () => {

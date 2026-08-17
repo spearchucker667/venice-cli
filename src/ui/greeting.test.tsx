@@ -7,6 +7,8 @@ import {
   FULL_LOGO,
   VENICE_BRAND,
   VENICE_SLOGAN,
+  accentSweepStepCount,
+  getAccentSweepCol,
   getGreetingVariant,
   getLogoFrame,
   isDarkBackground,
@@ -125,6 +127,24 @@ describe('brand display policy', () => {
     assert.equal(getGreetingVariant(80, 10), 'minimal');
   });
 
+  it('accentSweepStepCount covers the full logo width in two-column steps', () => {
+    assert.equal(accentSweepStepCount(12), 6);
+    assert.equal(accentSweepStepCount(9), 5);
+    assert.equal(accentSweepStepCount(1), 1);
+    assert.equal(accentSweepStepCount(0), 1);
+  });
+
+  it('getAccentSweepCol advances two columns per tick and completes the wash', () => {
+    const steps = accentSweepStepCount(12);
+    assert.equal(getAccentSweepCol(12, 1, steps), 0);
+    assert.equal(getAccentSweepCol(12, 2, steps), 2);
+    assert.equal(getAccentSweepCol(12, 3, steps), 4);
+    // The final tick lights the rightmost column so the mark is fully washed.
+    assert.equal(getAccentSweepCol(12, steps, steps), 11);
+    // A column never exceeds the logo width.
+    assert.ok(getAccentSweepCol(12, 99, steps) <= 11);
+  });
+
   it('getLogoFrame pads remaining rows to avoid layout jump', () => {
     const frame = getLogoFrame(FULL_LOGO, 2);
     assert.deepEqual(frame.slice(0, 2), [FULL_LOGO[0], FULL_LOGO[1]]);
@@ -191,6 +211,32 @@ describe('Greeting', () => {
     const frame = lastFrame() ?? '';
     assert.ok(frame.includes('chat-only'));
     assert.ok(!frame.includes('agent +'));
+    unmount();
+  });
+
+  it('animation settles on the complete mark after reveal and sweep', async () => {
+    const { lastFrame, unmount } = render(
+      <Greeting {...baseProps} animate accentColor={VENICE_BRAND.accentDark} columns={120} rows={40} />,
+    );
+    // Reveal (4 ticks) + sweep (6 ticks) at 60 ms each, with slack for the
+    // interval timer under load.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    const frame = lastFrame() ?? '';
+    for (const line of FULL_LOGO) {
+      assert.ok(frame.includes(line), `settled frame must contain ${JSON.stringify(line)}`);
+    }
+    unmount();
+  });
+
+  it('no accent color means no sweep phase and a stable plain mark', async () => {
+    const { lastFrame, unmount } = render(
+      <Greeting {...baseProps} animate columns={120} rows={40} />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const frame = lastFrame() ?? '';
+    for (const line of FULL_LOGO) {
+      assert.ok(frame.includes(line), `settled frame must contain ${JSON.stringify(line)}`);
+    }
     unmount();
   });
 });
