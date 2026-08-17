@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentState, AgentMessage, PlanArtifact, SubagentResult, ToolResult, UserQuestionRequest, ValidationResult } from './types.js';
+import type { AgentState, AgentMessage, SubagentResult, ToolResult, ValidationResult } from './types.js';
 import type { AgentEvent } from './events.js';
 import { EventBus } from './events.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -14,6 +14,7 @@ import type { ToolContext } from '../tools/types.js';
 import { PermissionManager } from './permissions.js';
 import type { ApprovalCallback, ApprovalMode, PlanApprovalCallback, UserQuestionCallback } from './permissions.js';
 import { ContextManager, buildStructuredSummary } from './context.js';
+import { interpretEffects, type ToolEffectServices } from './effects.js';
 import { SessionManager } from './sessions.js';
 import { VeniceModelClient, UNKNOWN_CONTEXT_LIMIT } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
@@ -80,6 +81,7 @@ export interface AgentRuntimeOptions {
   checkpointManager?: CheckpointManager;
   contextManager?: ContextManager;
   sessionManager?: SessionManager;
+  eventBus?: EventBus;
   signal?: AbortSignal;
   mcpManager?: McpManager;
   approver?: import('./permissions.js').Approver;
@@ -115,7 +117,7 @@ interface ToolRunOutcome {
 }
 
 export class AgentRuntime {
-  private readonly state: AgentState;
+  private state: AgentState;
   private readonly modelClient: VeniceModelClient;
   private readonly registry: ToolRegistry;
   private readonly permissions: PermissionManager;
@@ -252,15 +254,6 @@ export class AgentRuntime {
 
   getState(): Readonly<AgentState> {
     return this.state;
-  }
-
-  /**
-   * Authoritative busy signal for the TUI's slash-command gate (VCL-003).
-   * True from the moment a turn starts preparing until its `finally` completes,
-   * so state-mutating commands can never run beneath an active turn.
-   */
-  isBusy(): boolean {
-    return this.turnInProgress || this.state.status === 'thinking';
   }
 
   /** Expose the checkpoint manager (used by tests and direct undo/redo). */
@@ -1522,20 +1515,9 @@ export class AgentRuntime {
       input: this.redactor.redact(input),
     });
 
-    if (toolName === 'spawn_agent') {
-      const subagentInput = this.parseSubagentInput(input);
-      if (subagentInput) {
-        this.emit({
-          type: 'subagent_started',
-          timestamp: new Date().toISOString(),
-          eventId: randomUUID(),
-          kind: subagentInput.kind,
-          mode: subagentInput.mode,
-          task: subagentInput.task,
-          maxTurns: subagentInput.maxTurns,
-        });
-      }
-    }
+    // Pre-execution side effects (e.g. subagentStarted) are declared by the
+    // tool and interpreted here, so the runtime never special-cases names.
+    await interpretEffects(tool.startEffects?.(input) ?? [], this.buildEffectServices());
 
     this.state.status = 'executing_tool';
     let result: ToolResult<unknown>;
@@ -1570,150 +1552,12 @@ export class AgentRuntime {
 
     this.state.changedFiles = this.workspace.changedFiles;
 
-    // Structured user questions (VC-KIMI-058): ask_user emits a question, and
-    // the runtime collects a real answer through the installed handler before
-    // returning it to the model. Without a handler the call fails with
-    // INTERACTION_REQUIRED instead of echoing the question back.
-    if (toolName === 'ask_user' && result.ok) {
-      const question = result.data as { question: string; options?: string[]; multiSelect?: boolean };
-      const request: UserQuestionRequest = {
-        id: randomUUID(),
-        questions: [{
-          prompt: question.question,
-          options: question.options,
-          multiSelect: question.multiSelect,
-        }],
-      };
-      this.emit({
-        type: 'user_question_requested',
-        timestamp: new Date().toISOString(),
-        eventId: randomUUID(),
-        request,
-      });
-      const response = await this.permissions.requestUserAnswer(request);
-      if (!response) {
-        result = {
-          ok: false,
-          error: { code: 'INTERACTION_REQUIRED', message: 'User interaction is required but no answer collector is available' },
-        };
-      } else {
-        result = {
-          ok: true,
-          data: {
-            question: question.question,
-            options: question.options,
-            multiSelect: question.multiSelect,
-            answers: response.answers,
-          },
-        };
-      }
-    }
-
-    if (toolName === 'todo_write' && result.ok && Array.isArray(result.data)) {
-      this.state.todos = result.data;
-    }
-
-    if (toolName === 'skill_load' && result.ok && result.data && typeof result.data === 'object' && 'name' in result.data) {
-      const skillName = String((result.data as { name: string }).name);
-      if (!this.state.activeSkills.includes(skillName)) {
-        this.state.activeSkills.push(skillName);
-        this.context.setActiveSkills(
-          this.state.activeSkills
-            .map((name) => this.skills.load(name))
-            .filter((skill): skill is Skill => skill !== undefined)
-        );
-      }
-    }
-
-    if (toolName === 'spawn_agent' && result.ok && this.isSubagentResult(result.data)) {
-      this.state.subagentReports ||= [];
-      this.state.subagentReports.push(result.data);
-      this.emit({
-        type: 'subagent_completed',
-        timestamp: new Date().toISOString(),
-        eventId: randomUUID(),
-        kind: result.data.kind,
-        mode: result.data.mode,
-        status: result.data.status,
-        findings: result.data.findings.length,
-        filesInspected: result.data.filesInspected.length,
-        changedFiles: result.data.changedFiles?.length ?? 0,
-      });
-    }
-
-    // Plan-mode lifecycle (work order §9).
-    if (toolName === 'enter_plan_mode' && result.ok) {
-      if (this.state.mode.operatingMode !== 'plan') {
-        this.setMode({ operatingMode: 'plan' });
-      }
-    }
-
-    if (toolName === 'write_plan' && result.ok) {
-      const plan = (result.data as { plan?: PlanArtifact } | undefined)?.plan;
-      if (plan) {
-        this.state.plan = plan;
-        this.emit({
-          type: 'plan_updated',
-          timestamp: new Date().toISOString(),
-          eventId: randomUUID(),
-          plan,
-        });
-      }
-    }
-
-    if (toolName === 'exit_plan_mode' && result.ok) {
-      const plan = this.state.plan;
-      if (plan) {
-        // Exiting with a proposed plan requires explicit user approval — a
-        // policy separate from ordinary tool approval that even YOLO cannot
-        // bypass (work order §9 rule 7). Fails closed without an approver.
-        this.emit({
-          type: 'plan_exit_requested',
-          timestamp: new Date().toISOString(),
-          eventId: randomUUID(),
-          plan,
-        });
-        const approved = await this.permissions.requestPlanApproval(plan, this.activeTurnSignal);
-        if (this.activeTurnSignal?.aborted) {
-          this.state.status = 'cancelled';
-          result = {
-            ok: false,
-            error: {
-              code: 'CANCELLED',
-              message: 'Plan approval was cancelled by user.',
-            },
-          };
-          this.emit({
-            type: 'plan_exit_denied',
-            timestamp: new Date().toISOString(),
-            eventId: randomUUID(),
-          });
-          return { result, approved: false, changedFiles: changedFilesThisCall };
-        }
-        if (approved) {
-          this.setMode({ operatingMode: 'agent' });
-          this.emit({
-            type: 'plan_exit_approved',
-            timestamp: new Date().toISOString(),
-            eventId: randomUUID(),
-          });
-        } else {
-          result = {
-            ok: false,
-            error: {
-              code: 'PLAN_EXIT_DENIED',
-              message: 'The plan was not approved. Revise the plan and call exit_plan_mode again.',
-            },
-          };
-          this.emit({
-            type: 'plan_exit_denied',
-            timestamp: new Date().toISOString(),
-            eventId: randomUUID(),
-          });
-        }
-      } else {
-        this.setMode({ operatingMode: 'agent' });
-      }
+    // Tool lifecycle effects (plan, skills, todos, subagent reports, user
+    // questions) are declared by the tool and applied by one interpreter, so
+    // the runtime never special-cases tool names.
+    const effectsOutcome = await interpretEffects(tool.effects?.(result) ?? [], this.buildEffectServices());
+    if (effectsOutcome.resultOverride) {
+      result = effectsOutcome.resultOverride;
     }
 
     this.syncCheckpointState();
@@ -1773,6 +1617,17 @@ export class AgentRuntime {
     this.state.checkpointCount = state.count;
     this.state.canUndoCheckpoints = state.canUndo;
     this.state.canRedoCheckpoints = state.canRedo;
+  }
+
+  private buildEffectServices(): ToolEffectServices {
+    return {
+      state: this.state,
+      context: this.context,
+      permissions: this.permissions,
+      skills: this.skills,
+      events: this.events,
+      signal: this.activeTurnSignal,
+    };
   }
 
   private buildToolContext(): ToolContext {
@@ -1956,33 +1811,6 @@ export class AgentRuntime {
     }
 
     return finalMessage + lines.join('\n');
-  }
-
-  private parseSubagentInput(input: unknown): { task: string; kind: string; mode: string; maxTurns: number } | undefined {
-    if (!input || typeof input !== 'object') return undefined;
-    const value = input as Record<string, unknown>;
-    const task = typeof value.task === 'string' ? value.task.trim() : '';
-    if (!task) return undefined;
-    const kind = typeof value.kind === 'string' ? value.kind : 'general';
-    const mode = value.mode === 'write' ? 'write' : 'read-only';
-    const maxTurns = Number.isFinite(value.maxTurns) ? Math.trunc(Number(value.maxTurns)) : 6;
-    return { task, kind, mode, maxTurns };
-  }
-
-  private isSubagentResult(data: unknown): data is SubagentResult {
-    if (!data || typeof data !== 'object') return false;
-    const value = data as Record<string, unknown>;
-    return (
-      (value.mode === 'read-only' || value.mode === 'write') &&
-      typeof value.task === 'string' &&
-      typeof value.kind === 'string' &&
-      typeof value.status === 'string' &&
-      typeof value.summary === 'string' &&
-      Array.isArray(value.findings) &&
-      Array.isArray(value.recommendations) &&
-      Array.isArray(value.filesInspected) &&
-      (value.changedFiles === undefined || Array.isArray(value.changedFiles))
-    );
   }
 
   private addUserMessage(content: string): void {

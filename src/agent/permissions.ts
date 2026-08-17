@@ -31,6 +31,9 @@ export type ApprovalCallback = (
   risk: RiskLevel
 ) => Promise<ApprovalDecision>;
 
+/** Shorthand for the tool-approval callback installed on the runtime. */
+export type Approver = ApprovalCallback;
+
 /**
  * Separate policy for plan-exit approval. This is intentionally distinct
  * from ordinary tool approval: YOLO mode must NOT bypass plan approval
@@ -38,6 +41,9 @@ export type ApprovalCallback = (
  * closed.
  */
 export type PlanApprovalCallback = (plan: import('./types.js').PlanArtifact) => Promise<boolean>;
+
+/** Shorthand for the plan-approval callback installed on the runtime. */
+export type PlanApprover = PlanApprovalCallback;
 
 /**
  * Handler that actually collects a structured answer from the user for an

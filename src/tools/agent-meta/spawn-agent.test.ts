@@ -140,6 +140,32 @@ describe('spawn_agent tool', () => {
     assert.strictEqual(receivedMaxTurns, 20);
   });
 
+  it('declares subagentStarted and recordSubagentReport effects', async () => {
+    const tool = createSpawnAgentTool({
+      runSubagent: async () => ({
+        finalMessage: '{"summary":"done"}',
+        state: { status: 'complete', changedFiles: [], toolHistory: [] },
+      }),
+    });
+
+    const start = tool.startEffects!({ task: 'inspect', kind: 'review', mode: 'read-only', maxTurns: 10 });
+    assert.strictEqual(start.length, 1);
+    assert.strictEqual(start[0].type, 'subagentStarted');
+    if (start[0].type === 'subagentStarted') {
+      assert.strictEqual(start[0].kind, 'review');
+      assert.strictEqual(start[0].mode, 'read-only');
+      assert.strictEqual(start[0].task, 'inspect');
+    }
+
+    const result = await tool.execute({ task: 'inspect', kind: 'review' }, context);
+    const effects = tool.effects!(result);
+    assert.strictEqual(effects.length, 1);
+    assert.strictEqual(effects[0].type, 'recordSubagentReport');
+    if (effects[0].type === 'recordSubagentReport') {
+      assert.strictEqual(effects[0].report.kind, 'review');
+    }
+  });
+
   it('allows write mode and reports affected files', async () => {
     let receivedMode = '';
     const tool = createSpawnAgentTool({

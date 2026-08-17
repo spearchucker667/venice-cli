@@ -7,6 +7,7 @@ import type { AgentState, ToolResult } from '../agent/types.js';
 import type { CheckpointManager } from '../agent/checkpoints.js';
 import type { SkillRegistry } from '../skills/registry.js';
 import type { RiskLevel } from '../agent/permissions.js';
+import type { ToolEffect } from '../agent/effects.js';
 
 export interface ToolContext {
   workspaceRoot: string;
@@ -41,6 +42,17 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   planSafe?: boolean;
   parallelSafe?: boolean;
   execute(input: TInput, context: ToolContext): Promise<ToolResult<TOutput>>;
+  /**
+   * Declarative reactions applied before `execute` (e.g. `subagentStarted`).
+   * Defaults to no-op for tools with no pre-execution side effects.
+   */
+  startEffects?(input: TInput): ToolEffect[];
+  /**
+   * Declarative reactions applied after `execute`, derived only from the
+   * tool's own result (plan, skill, todo, subagent-report, ask_user). Keeps
+   * lifecycle locality in the tool module instead of the runtime's name switch.
+   */
+  effects?(result: ToolResult<TOutput>): ToolEffect[];
 }
 
 export function toToolDefinition(tool: AgentTool): ToolDefinition {

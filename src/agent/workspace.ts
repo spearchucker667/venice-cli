@@ -39,17 +39,17 @@ export function normalizeFileRef(ref: WorkspaceFileRef | string, primaryRoot: st
 
 export class WorkspaceManager {
   private readonly root: string;
-  private readonly additionalRoots: string[];
+  private readonly extraRoots: string[];
   private readonly changed = new Set<string>();
 
   constructor(root: string, additionalRoots: string[] = []) {
     this.root = fs.realpathSync(root);
-    this.additionalRoots = [];
+    this.extraRoots = [];
     for (const additional of additionalRoots) {
       if (!additional) continue;
       const real = fs.realpathSync(additional);
-      if (real !== this.root && !this.additionalRoots.includes(real)) {
-        this.additionalRoots.push(real);
+      if (real !== this.root && !this.extraRoots.includes(real)) {
+        this.extraRoots.push(real);
       }
     }
   }
@@ -58,9 +58,19 @@ export class WorkspaceManager {
     return this.root;
   }
 
+  /** The primary workspace root (realpath), the canonical `primaryRoot` id. */
+  get primaryRoot(): string {
+    return this.root;
+  }
+
+  /** Additional approved roots (realpaths), de-duplicated against the primary root. */
+  get additionalRoots(): string[] {
+    return this.extraRoots;
+  }
+
   /** All registered roots: primary first, then additional (VC-KIMI-044). */
   get roots(): string[] {
-    return [this.root, ...this.additionalRoots];
+    return [this.root, ...this.extraRoots];
   }
 
   get changedFiles(): WorkspaceFileRef[] {

@@ -66,6 +66,9 @@ export const enterPlanModeTool: AgentTool<Record<string, never>, { mode: 'plan' 
   async execute() {
     return success({ mode: 'plan' as const });
   },
+  effects(result) {
+    return result.ok ? [{ type: 'enterPlanMode' }] : [];
+  },
 };
 
 export const writePlanTool: AgentTool<WritePlanInput, { plan: PlanArtifact }> = {
@@ -180,6 +183,10 @@ export const writePlanTool: AgentTool<WritePlanInput, { plan: PlanArtifact }> = 
 
     return success({ plan }, { affectedFiles: [affectedFile] });
   },
+  effects(result) {
+    if (!result.ok || !result.data?.plan) return [];
+    return [{ type: 'setPlan', plan: result.data.plan }];
+  },
 };
 
 export const exitPlanModeTool: AgentTool<Record<string, never>, { plan: PlanArtifact | null }> = {
@@ -192,5 +199,10 @@ export const exitPlanModeTool: AgentTool<Record<string, never>, { plan: PlanArti
   async execute(_input, context) {
     const plan = (context.runtimeState as Readonly<AgentState>).plan;
     return success({ plan: plan ?? null });
+  },
+  effects(result) {
+    if (!result.ok) return [];
+    const plan = result.data?.plan;
+    return plan ? [{ type: 'exitPlanMode', plan }] : [{ type: 'leavePlanMode' }];
   },
 };

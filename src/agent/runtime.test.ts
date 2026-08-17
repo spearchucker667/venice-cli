@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { AgentRuntime, detectWorkspaceRoot } from './runtime.js';
+import { EventBus } from './events.js';
 import { PermissionManager } from './permissions.js';
 import { SessionManager } from './sessions.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -14,12 +15,13 @@ import { shellTool } from '../tools/shell/execute.js';
 import type { AgentTool } from '../tools/types.js';
 import { VeniceModelClient, UNKNOWN_CONTEXT_LIMIT } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
-import type { AgentMessage, AgentState } from './types.js';
+import type { AgentMessage, AgentState, SubagentResult } from './types.js';
 import { McpManager } from '../mcp/manager.js';
 import { ModelCatalog } from './model-catalog.js';
 import { enterPlanModeTool, writePlanTool, exitPlanModeTool } from '../tools/agent-meta/plan.js';
 import type { ApprovalDecision } from './permissions.js';
 import type { ModelProfile } from './model-profile.js';
+import type { ToolDefinition } from '../types/index.js';
 
 class MockModelClient extends VeniceModelClient {
   private responses: ModelResponse[];
@@ -374,7 +376,7 @@ describe('AgentRuntime', () => {
 
   it('records a subagent report returned by spawn_agent', async () => {
     const registry = new ToolRegistry();
-    const spawnAgent: AgentTool<{ task: string }, unknown> = {
+    const spawnAgent: AgentTool<{ task: string }, SubagentResult> = {
       name: 'spawn_agent',
       description: 'Mock subagent tool',
       inputSchema: {
@@ -383,6 +385,13 @@ describe('AgentRuntime', () => {
         required: ['task'],
       },
       risk: 'execute',
+      startEffects(input) {
+        return [{ type: 'subagentStarted', kind: 'review', mode: 'read-only', task: input.task, maxTurns: 6 }];
+      },
+      effects(result) {
+        if (!result.ok || !result.data) return [];
+        return [{ type: 'recordSubagentReport', report: result.data }];
+      },
       async execute() {
         return {
           ok: true,
@@ -1862,6 +1871,7 @@ describe('AgentRuntime', () => {
               function: { name: 'custom_mutating_tool', arguments: JSON.stringify({ value: 'foo' }) },
             },
           ],
+          finishReason: 'tool_calls',
         },
       ]),
       toolRegistry: registry,
@@ -1880,7 +1890,7 @@ describe('AgentRuntime', () => {
     controller.abort();
 
     // Now resolve the approval promise (simulating a late user click or race)
-    resolveApproval({ approved: true });
+    resolveApproval({ approved: true, scope: 'once' });
 
     await turnPromise;
 
@@ -1914,6 +1924,7 @@ describe('AgentRuntime', () => {
               function: { name: 'enter_plan_mode', arguments: '{}' },
             },
           ],
+          finishReason: 'tool_calls',
         },
         {
           content: 'writing plan',
@@ -1924,13 +1935,13 @@ describe('AgentRuntime', () => {
               function: {
                 name: 'write_plan',
                 arguments: JSON.stringify({
-                  title: 'My Plan',
-                  overview: 'Plan overview',
-                  steps: [{ id: 's1', description: 'Step 1', status: 'pending' }],
+                  summary: 'Plan overview',
+                  steps: ['Step 1'],
                 }),
               },
             },
           ],
+          finishReason: 'tool_calls',
         },
         {
           content: 'exiting plan mode',
@@ -1941,6 +1952,7 @@ describe('AgentRuntime', () => {
               function: { name: 'exit_plan_mode', arguments: '{}' },
             },
           ],
+          finishReason: 'tool_calls',
         },
       ]),
       toolRegistry: registry,

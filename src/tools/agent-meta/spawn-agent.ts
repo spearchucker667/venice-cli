@@ -131,6 +131,20 @@ export function createSpawnAgentTool(deps: SpawnAgentToolDeps = {}): AgentTool<S
         affectedFiles: mode === 'write' ? report.changedFiles : undefined,
       });
     },
+    startEffects(input) {
+      if (typeof input.task !== 'string' || !input.task.trim()) return [];
+      return [{
+        type: 'subagentStarted',
+        kind: normalizeSubagentKind(input.kind),
+        mode: normalizeSubagentMode(input.mode),
+        task: input.task.trim(),
+        maxTurns: normalizeSubagentMaxTurns(input.maxTurns),
+      }];
+    },
+    effects(result) {
+      if (!result.ok || !result.data) return [];
+      return [{ type: 'recordSubagentReport', report: result.data }];
+    },
   };
 }
 

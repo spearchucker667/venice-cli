@@ -197,15 +197,16 @@ describe('session resume lifecycle', () => {
 
     // Seed state, context layers, queues, and grants
     runtime.getContextManager().setSummary({
-      created: new Date().toISOString(),
-      updated: new Date().toISOString(),
-      goals: ['prior goal'],
-      progress: ['did things'],
-      keyDecisions: [],
-      nextSteps: [],
+      objective: 'prior objective',
+      completedWork: ['did things'],
+      remainingWork: [],
+      decisions: [],
+      discoveries: [],
+      filesRead: [],
       filesChanged: [],
       commandsRun: [],
-      openIssues: [],
+      failures: [],
+      importantConstraints: [],
     });
     runtime.getContextManager().setAgentPrompt('custom system prompt');
     runtime.getPermissionManager().grant('session', 'edit_file', undefined, 'write');
@@ -221,7 +222,7 @@ describe('session resume lifecycle', () => {
 
     assert.strictEqual(runtime.getQueuedMessageCount(), 0, 'queued messages must be cleared');
     assert.strictEqual(runtime.getContextManager().getSummary(), undefined, 'summary must be cleared');
-    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), undefined, 'agent prompt must be cleared');
+    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), '', 'agent prompt must be cleared');
     assert.strictEqual(await runtime.getPermissionManager().isApproved('edit_file', {}, 'write'), false, 'grants must be cleared');
   });
 
@@ -235,15 +236,16 @@ describe('session resume lifecycle', () => {
     });
 
     runtime.getContextManager().setSummary({
-      created: new Date().toISOString(),
-      updated: new Date().toISOString(),
-      goals: ['old summary'],
-      progress: [],
-      keyDecisions: [],
-      nextSteps: [],
+      objective: 'old summary',
+      completedWork: [],
+      remainingWork: [],
+      decisions: [],
+      discoveries: [],
+      filesRead: [],
       filesChanged: [],
       commandsRun: [],
-      openIssues: [],
+      failures: [],
+      importantConstraints: [],
     });
     runtime.getContextManager().setAgentPrompt('old agent prompt');
     runtime.getPermissionManager().grant('session', 'read_file', undefined, 'read');
@@ -273,7 +275,7 @@ describe('session resume lifecycle', () => {
     assert.strictEqual(runtime.getState().sessionId, 'fresh-id');
     assert.strictEqual(runtime.getQueuedMessageCount(), 0, 'queues must not bleed across loadState');
     assert.strictEqual(runtime.getContextManager().getSummary(), undefined, 'summary must not bleed across loadState');
-    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), undefined, 'agent prompt must not bleed across loadState');
+    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), '', 'agent prompt must not bleed across loadState');
     assert.strictEqual(runtime.getState().messages.length, 1);
   });
 });

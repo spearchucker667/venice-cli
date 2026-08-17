@@ -40,7 +40,9 @@ describe('VeniceModelClient', () => {
       const encoder = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
-          for (const line of sse) controller.enqueue(encoder.encode(line + '\n'));
+          // Each SSE event is terminated by a blank line; the frame parser
+          // dispatches on blank lines and joins multi-line `data:` fields.
+          for (const line of sse) controller.enqueue(encoder.encode(line + '\n\n'));
           controller.close();
         },
       });

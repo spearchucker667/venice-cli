@@ -41,4 +41,14 @@ export const askUserTool: AgentTool<AskUserInput, AskUserResult> = {
     if (input.multiSelect) result.multiSelect = true;
     return success(result);
   },
+  effects(result) {
+    if (!result.ok || !result.data || typeof result.data !== 'object' || !('question' in result.data)) return [];
+    const question = result.data as AskUserResult;
+    return [{
+      type: 'askUser',
+      question: question.question,
+      ...(question.options ? { options: question.options } : {}),
+      ...(question.multiSelect ? { multiSelect: question.multiSelect } : {}),
+    }];
+  },
 };

@@ -30,4 +30,8 @@ export const skillLoadTool: AgentTool<{ name: string }, unknown> = {
       content: skill.content,
     });
   },
+  effects(result) {
+    if (!result.ok || !result.data || typeof result.data !== 'object' || !('name' in result.data)) return [];
+    return [{ type: 'activateSkill', name: String((result.data as { name: string }).name) }];
+  },
 };

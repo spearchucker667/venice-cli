@@ -45,4 +45,8 @@ export const todoWriteTool: AgentTool<{ todos: TodoItem[] }, TodoItem[]> = {
     }
     return success(input.todos);
   },
+  effects(result) {
+    if (!result.ok || !result.data) return [];
+    return [{ type: 'setTodos', todos: result.data }];
+  },
 };
