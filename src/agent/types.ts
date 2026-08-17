@@ -160,6 +160,7 @@ export interface AgentState {
   mode: RuntimeModeState;
   title?: string;
   parentSessionId?: string;
+  reasoningEffort?: string;
   messages: AgentMessage[];
   todos: TodoItem[];
   relevantFiles: string[];

@@ -14,9 +14,13 @@ export function mapEventToMessage(event: AgentEvent): TuiMessage | undefined {
     case 'model_request':
       return { id: event.eventId, role: 'event', content: 'thinking…' };
     case 'assistant_delta':
-      return { id: event.eventId, role: 'assistant', content: event.content || '' };
+      return { id: event.turnId, role: 'assistant', content: event.content || '', metadata: { isDelta: true } };
     case 'assistant_reasoning':
-      return { id: event.eventId, role: 'event', content: `⟳ ${event.content || ''}` };
+      return { id: event.turnId, role: 'event', content: `⟳ ${event.content || ''}` };
+    case 'assistant_complete':
+      return { id: event.turnId, role: 'assistant', content: event.content, metadata: { isDelta: false } };
+    case 'assistant_error':
+      return { id: event.turnId, role: 'event', content: `⚠ Agent failed: ${event.message}` };
     case 'tool_requested':
       return undefined;
     case 'tool_started':

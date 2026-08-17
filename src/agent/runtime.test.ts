@@ -95,7 +95,7 @@ describe('AgentRuntime', () => {
     assert.strictEqual(result.state.status, 'complete');
     assert.ok(result.finalMessage.includes('successfully'));
     assert.strictEqual(result.state.toolHistory.length, 1);
-    assert.ok(result.events.some((event) => event.type === 'assistant_delta' && event.content?.includes('successfully')));
+    assert.ok(result.events.some((event) => event.type === 'assistant_complete' && event.content?.includes('successfully')));
   });
 
   it('sends the live tool registry to agent-capable models', async () => {

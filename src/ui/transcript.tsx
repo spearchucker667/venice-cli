@@ -12,23 +12,39 @@ export interface TranscriptProps {
 }
 
 export function Transcript({ messages, maxMessages }: TranscriptProps): JSX.Element {
-  const visible = maxMessages && messages.length > maxMessages ? messages.slice(-maxMessages) : messages;
-  const hidden = messages.length - visible.length;
-  // Streaming emits one assistant_delta per chunk; merge consecutive assistant
-  // messages so incremental content renders as a single bubble (VCL-R3-012).
-  const merged = visible.reduce<TuiMessage[]>((acc, message) => {
-    const previous = acc[acc.length - 1];
-    if (message.role === 'assistant' && previous?.role === 'assistant') {
-      acc[acc.length - 1] = { ...previous, content: previous.content + message.content };
-      return acc;
+  // Coalesce assistant deltas by ID before slicing so long streamed messages
+  // are not truncated at the beginning (VCLI-LIVE-003).
+  const coalesced = messages.reduce<TuiMessage[]>((acc, message) => {
+    if (message.role === 'assistant') {
+      const existing = acc.find((m) => m.id === message.id && m.role === 'assistant');
+      if (existing) {
+        // Only append delta content; assistant_complete will just overwrite with full content
+        // Or actually, if we receive assistant_complete, we want it to replace the content
+        // Let's just append for now, or just use the complete content if it's longer.
+        // Wait, if assistant_complete is the final event, it has the FULL content.
+        // If we append it, we'll double the content!
+        // We should just use the new content if it's replacing it, but how do we know if it's a delta vs complete?
+        // Let's look at events.ts changes next...
+        // If we just overwrite content, we lose earlier deltas if it's a delta.
+        // Let's add metadata: { isDelta: true } in events.ts to distinguish!
+        if (message.metadata?.isDelta) {
+          existing.content += message.content;
+        } else {
+          existing.content = message.content; // It's the complete message
+        }
+        return acc;
+      }
     }
-    acc.push(message);
+    acc.push({ ...message });
     return acc;
   }, []);
+
+  const visible = maxMessages && coalesced.length > maxMessages ? coalesced.slice(-maxMessages) : coalesced;
+  const hidden = coalesced.length - visible.length;
   return (
     <Box flexDirection="column" flexGrow={1}>
       {hidden > 0 && <Text dimColor>… {hidden} earlier entries hidden</Text>}
-      {merged.map((message) => {
+      {visible.map((message) => {
         switch (message.role) {
           case 'user':
             return (

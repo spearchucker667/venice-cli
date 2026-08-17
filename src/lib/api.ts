@@ -10,6 +10,7 @@ import {
   requireAuth,
   applyVeniceAuth,
   DEFAULT_MODELS,
+  getConfigValue,
 } from './config.js';
 import { startSpinner, stopSpinner } from './output.js';
 import { getVersion } from './version.js';
@@ -586,15 +587,24 @@ export async function* chatCompletionStream(
       };
 
       const { done, value } = await readWithTimeout();
-      if (done) break;
+      let lines: string[] = [];
+      if (done) {
+        if (buffer.trim()) {
+          lines = [buffer];
+        }
+      } else {
+        buffer += decoder.decode(value, { stream: true });
+        lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+      }
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      for (let line of lines) {
+        line = line.trim();
+        if (!line) continue;
+        if (line.startsWith(':')) continue; // Ignore SSE comments/heartbeats
 
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6).trim();
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trim();
           if (data === '[DONE]') {
             if (totalUsage) {
               trackUsage({
@@ -645,6 +655,7 @@ export async function* chatCompletionStream(
           }
         }
       }
+      if (done) break;
     }
   } finally {
     reader.releaseLock();
@@ -688,6 +699,14 @@ export function buildImageGenerationBody(
       body[fieldName] = value;
     }
   }
+
+  if (options.safeMode === undefined) {
+    const safeMode = getConfigValue('media_safe_mode');
+    if (safeMode !== undefined) {
+      body.safe_mode = safeMode;
+    }
+  }
+
   if (options.count !== undefined && options.count > 1) {
     body.variants = options.count;
   }
@@ -748,7 +767,12 @@ export async function editImage(
   if (options.model) body.model = options.model;
   if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
   if (options.enhancePrompt) body.enhance_prompt = true;
-  if (options.safeMode === false) body.safe_mode = false;
+  if (options.safeMode === false) {
+    body.safe_mode = false;
+  } else if (options.safeMode === undefined) {
+    const safeMode = getConfigValue('media_safe_mode');
+    if (safeMode !== undefined) body.safe_mode = safeMode;
+  }
 
   const response = await apiRequest<ArrayBuffer>('/image/edit', {
     method: 'POST',
@@ -781,7 +805,12 @@ export async function multiEditImage(
   if (options.model) body.modelId = options.model;
   if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
   if (options.enhancePrompt) body.enhance_prompt = true;
-  if (options.safeMode === false) body.safe_mode = false;
+  if (options.safeMode === false) {
+    body.safe_mode = false;
+  } else if (options.safeMode === undefined) {
+    const safeMode = getConfigValue('media_safe_mode');
+    if (safeMode !== undefined) body.safe_mode = safeMode;
+  }
 
   const response = await apiRequest<ArrayBuffer>('/image/multi-edit', {
     method: 'POST',

@@ -31,6 +31,7 @@ describe('stream-json protocol (VCL-R3-011)', () => {
       type: 'assistant_delta',
       timestamp: '2026-08-16T00:00:00Z',
       eventId: '2',
+      turnId: 't1',
       content: 'hello',
     };
     const out = toStreamJson(event, ctx);
@@ -147,6 +148,7 @@ describe('stream-json protocol (VCL-R3-011)', () => {
       type: 'assistant_delta',
       timestamp: '2026-08-16T00:00:00Z',
       eventId: '2',
+      turnId: 't1',
       content: 'hello',
     };
     const line = serializeStreamJson(toStreamJson(event, ctx)!);

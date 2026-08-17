@@ -11,6 +11,8 @@ export interface VeniceConfig {
   output_format?: OutputFormat;
   no_color?: boolean;
   show_usage?: boolean;
+  media_safe_mode?: boolean;
+  theme?: string;
 }
 
 export type OutputFormat = 'pretty' | 'json' | 'markdown' | 'raw';

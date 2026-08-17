@@ -80,7 +80,8 @@ export class VeniceModelClient {
   async complete(
     messages: AgentMessage[],
     tools: ToolDefinition[] = [],
-    onDelta?: (chunk: StreamChunk) => void
+    onDelta?: (chunk: StreamChunk) => void,
+    options?: { reasoningEffort?: string }
   ): Promise<ModelResponse> {
     let content = '';
     let reasoningContent = '';
@@ -91,7 +92,7 @@ export class VeniceModelClient {
     // fragmented name/arguments strings that must be concatenated.
     const toolCalls = new Map<number, { id?: string; type?: string; name?: string; arguments?: string }>();
 
-    for await (const delta of this.stream(messages, tools)) {
+    for await (const delta of this.stream(messages, tools, options)) {
       if (delta.content) {
         content += delta.content;
         onDelta?.({ content: delta.content });
@@ -138,13 +139,14 @@ export class VeniceModelClient {
     };
   }
 
-  async *stream(messages: AgentMessage[], tools: ToolDefinition[] = []): AsyncGenerator<StreamingDelta> {
+  async *stream(messages: AgentMessage[], tools: ToolDefinition[] = [], options?: { reasoningEffort?: string }): AsyncGenerator<StreamingDelta> {
     const apiMessages = messages.map((m) => this.toApiMessage(m));
     for await (const delta of chatCompletionStream(apiMessages, {
       model: this.options.model || getDefaultModel(),
       tools,
       tool_choice: tools.length ? 'auto' : 'none',
       showSpinner: false,
+      reasoning_effort: options?.reasoningEffort as any,
     })) {
       yield {
         content: delta.content,

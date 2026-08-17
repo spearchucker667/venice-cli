@@ -91,7 +91,7 @@ export function setConfigValue(key: keyof VeniceConfig, value: string): void {
   const config = loadConfig();
   
   // Handle boolean conversions
-  if (key === 'no_color' || key === 'show_usage') {
+  if (key === 'no_color' || key === 'show_usage' || key === 'media_safe_mode') {
     (config as any)[key] = value === 'true' || value === '1';
   } else {
     (config as any)[key] = value;
@@ -287,6 +287,8 @@ export const CONFIG_KEY_METADATA = {
   output_format: { secret: false },
   no_color: { secret: false },
   show_usage: { secret: false },
+  media_safe_mode: { secret: false },
+  theme: { secret: false },
 } as const satisfies Record<keyof VeniceConfig, { secret: boolean }>;
 
 export type ConfigKey = keyof VeniceConfig;

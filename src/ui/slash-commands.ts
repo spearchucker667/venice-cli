@@ -44,9 +44,48 @@ export function isBusyStatus(status: string): boolean {
 export function findSlashCommandDefinition(command: string): SlashCommandDefinition | undefined {
   const base = getSlashCommandBase(command);
   return (
-    SLASH_COMMANDS.find((c) => c.name === command) ??
-    SLASH_COMMANDS.find((c) => getSlashCommandBase(c.name) === base)
+    SLASH_COMMANDS.find((c) => c.name === command || c.aliases?.includes(command)) ??
+    SLASH_COMMANDS.find((c) => getSlashCommandBase(c.name) === base || c.aliases?.some(a => getSlashCommandBase(a) === base))
   );
+}
+
+/**
+ * Find the closest matching slash command for typos.
+ */
+export function findNearestSlashCommand(command: string): string | undefined {
+  const base = getSlashCommandBase(command);
+  let bestMatch: string | undefined;
+  let minDistance = Infinity;
+
+  const allNames = SLASH_COMMANDS.flatMap(c => [c.name, ...(c.aliases || [])]);
+  
+  for (const name of allNames) {
+    const dist = levenshteinDistance(base, getSlashCommandBase(name));
+    if (dist < minDistance) {
+      minDistance = dist;
+      bestMatch = name;
+    }
+  }
+
+  return minDistance <= 2 ? bestMatch : undefined;
+}
+
+function levenshteinDistance(a: string, b: string): number {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  const matrix = Array.from({ length: b.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= a.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      const cost = a[j - 1] === b[i - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return matrix[b.length][a.length];
 }
 
 /**
@@ -77,8 +116,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: 'clear', description: 'Clear conversation and start a fresh session', availability: 'always' },
   { name: 'clear-ui', description: 'Clear the transcript only (agent context is kept)', availability: 'always' },
   { name: 'status', description: 'Show current model, workspace, and status', availability: 'always' },
-  { name: 'model', description: 'Show model picker or set a model', availability: 'always' },
-  { name: 'models', description: 'Show model picker', availability: 'always' },
+  { name: 'model', aliases: ['models'], description: 'Show model picker or set a model', availability: 'always' },
   { name: 'resume', description: 'Resume a session', availability: 'always' },
   { name: 'sessions', description: 'List saved sessions', availability: 'always' },
   { name: 'diff', description: 'Show git diff or changed files', availability: 'always' },
@@ -88,6 +126,13 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: 'plan off', aliases: [], description: 'Disable plan mode', availability: 'always' },
   { name: 'plan view', aliases: [], description: 'Show the current plan artifact', availability: 'always' },
   { name: 'plan clear', aliases: [], description: 'Clear the current plan artifact', availability: 'always' },
+  { name: 'auto', description: 'Set approval mode to auto (execute safe tools automatically)', availability: 'always' },
+  { name: 'yolo', description: 'Set approval mode to yolo (execute all tools automatically)', availability: 'always' },
+  { name: 'config', aliases: ['settings'], description: 'Open the interactive configuration hub', availability: 'always' },
+  { name: 'effort', description: 'Configure the agent effort level', availability: 'always' },
+  { name: 'reload', description: 'Reload configuration and skills', availability: 'always' },
+  { name: 'plugins', description: 'Manage plugins', availability: 'always' },
+  { name: 'theme', description: 'Change the UI theme', availability: 'always' },
   { name: 'compact', description: 'Compact conversation context', availability: 'idle' },
   { name: 'tools', description: 'List registered tools', availability: 'always' },
   { name: 'mcp', description: 'List MCP servers', availability: 'always' },
@@ -102,7 +147,6 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: 'title', description: 'Set or show session title', availability: 'always' },
   { name: 'rename', description: 'Set session title', availability: 'always' },
   { name: 'export', description: 'Export session as Markdown', availability: 'always' },
-  { name: 'export-debug-zip', description: 'Export debug archive', availability: 'always' },
   { name: 'import', description: 'Import a session file', availability: 'always' },
 ];
 

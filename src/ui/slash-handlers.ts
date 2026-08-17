@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import type { AgentState, AgentStatus } from '../agent/types.js';
 import { formatFileRef } from '../agent/workspace.js';
 import { defaultMode } from '../agent/mode.js';
-import { SLASH_COMMANDS, findSlashCommandDefinition, getSlashCommandBase, isSlashCommandAvailable } from './slash-commands.js';
+import { SLASH_COMMANDS, findSlashCommandDefinition, getSlashCommandBase, isSlashCommandAvailable, findNearestSlashCommand } from './slash-commands.js';
 import type { TuiMessage } from './types.js';
 import { SessionManager, type StoredSession } from '../agent/sessions.js';
 import { SessionImportService } from '../agent/session-import.js';
@@ -138,13 +138,7 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
     }
   },
 
-  async models(_args, { addEvent, showModelPicker }) {
-    if (showModelPicker) {
-      showModelPicker();
-    } else {
-      addEvent('Model picker is not available.');
-    }
-  },
+
 
   async resume(args, { addEvent, showSessionPicker, resumeSession }) {
     const sessionId = args.trim();
@@ -267,20 +261,56 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
     addEvent(lines.join('\n'));
   },
 
-  async mcp(_args, { addEvent, mcpManager }) {
+  async mcp(args, { addEvent, mcpManager }) {
     if (!mcpManager) {
       addEvent('MCP Manager is not active.');
       return;
     }
+    
+    const parts = args.trim().split(/\s+/);
+    const subcmd = parts[0]?.toLowerCase() || 'list';
+    const target = parts[1];
+    
     const states = mcpManager.getServerStates();
-    if (states.length === 0) {
-      addEvent('No MCP servers configured or running.');
-    } else {
-      const lines = ['MCP Servers:'];
-      for (const s of states) {
-        lines.push(`  • ${s.name}: ${s.tools.length} tools ${s.error ? `(error: ${s.error})` : '(running)'}`);
+
+    switch (subcmd) {
+      case 'list':
+      case 'status': {
+        if (states.length === 0) {
+          addEvent('No MCP servers configured or running.');
+          return;
+        }
+        const lines = ['MCP Servers:'];
+        for (const s of states) {
+          lines.push(`  • ${s.name}: ${s.tools.length} tools ${s.error ? `(error: ${s.error})` : '(running)'}`);
+        }
+        addEvent(lines.join('\n'));
+        break;
       }
-      addEvent(lines.join('\n'));
+      
+      case 'inspect':
+      case 'tools': {
+        if (!target) {
+          addEvent(`Usage: /mcp ${subcmd} <server>`);
+          return;
+        }
+        const server = states.find(s => s.name === target);
+        if (!server) {
+          addEvent(`MCP Server '${target}' not found.`);
+          return;
+        }
+        const lines = [`Server: ${server.name} ${server.error ? `(Error: ${server.error})` : '(Running)'}`];
+        lines.push(`Tools (${server.tools.length}):`);
+        for (const t of server.tools) {
+          lines.push(`  • ${t.name}: ${t.description?.split('\n')[0] || 'No description'}`);
+        }
+        addEvent(lines.join('\n'));
+        break;
+      }
+      
+      default:
+        addEvent(`Unknown /mcp subcommand: ${subcmd}\nAvailable: list, status, inspect <server>, tools <server>`);
+        break;
     }
   },
 
@@ -325,6 +355,109 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
     } else {
       addEvent(`Unknown skill: ${name}. Use /skills to list available skills.`);
     }
+  },
+
+  async auto(_args, context) {
+    await SLASH_HANDLERS.permissions('auto', context);
+  },
+
+  async yolo(_args, context) {
+    await SLASH_HANDLERS.permissions('yolo', context);
+  },
+
+  async config(_args, { addEvent, workspaceRoot }) {
+    await import('../lib/config.js').then((m) => {
+      const config = m.loadConfig();
+      addEvent(
+        `Configuration Hub:\n` +
+        `  • Global CLI config: ~/.venice/config.json\n` +
+        `  • Workspace config: ${workspaceRoot}/.venice/config.json\n` +
+        `  • MCP servers: ~/.venice/mcp.json and ${workspaceRoot}/.venice/mcp.json\n` +
+        `  • Skills: ~/.venice/skills/ and ${workspaceRoot}/.venice/skills/\n\n` +
+        `Current Configuration:\n` +
+        `  Model: ${config.default_model || 'not set'}\n` +
+        `  Image Model: ${config.default_image_model || 'not set'}\n` +
+        `  Output Format: ${config.output_format || 'pretty'}\n` +
+        `  Theme: ${config.theme || 'default'}\n` +
+        `  Media Safe Mode: ${config.media_safe_mode === false ? 'disabled' : 'enabled'}\n` +
+        `Use 'venice config' command to manage base CLI settings.`
+      );
+    });
+  },
+
+  async effort(args, { addEvent, getRuntime }) {
+    const runtime = getRuntime?.();
+    if (!runtime) {
+      addEvent('No active runtime to configure.');
+      return;
+    }
+    const level = args.trim().toLowerCase();
+    const validLevels = ['low', 'medium', 'high'];
+    if (!level) {
+      const current = runtime.getState().reasoningEffort || 'not set';
+      addEvent(`Current reasoning effort is: ${current}. Available levels: low, medium, high.`);
+      return;
+    }
+    if (!validLevels.includes(level)) {
+      addEvent(`Invalid reasoning effort: ${level}. Available levels: low, medium, high.`);
+      return;
+    }
+    (runtime as any).setReasoningEffort(level);
+    addEvent(`Reasoning effort set to: ${level}.`);
+  },
+
+  async reload(_args, { addEvent, getRuntime }) {
+    const runtime = getRuntime?.();
+    if (runtime) {
+      // Reload skills
+      const count = runtime.discoverSkills();
+      addEvent(`Reloaded configuration. Discovered ${count} skills.`);
+    }
+  },
+
+  async plugins(_args, { addEvent, getRuntime }) {
+    const runtime = getRuntime?.();
+    if (!runtime) {
+      addEvent('No active runtime to view plugins.');
+      return;
+    }
+    
+    // Skills
+    const skillRegistry = runtime.getSkillRegistry?.();
+    const skills = skillRegistry ? skillRegistry.list() : [];
+    const skillsList = skills.length > 0 
+      ? skills.map(s => `  • ${s.name}: ${s.description}`).join('\n')
+      : '  No skills discovered.';
+      
+    // MCP
+    const mcpServers = runtime.getMcpManager?.()?.getServerStates() || [];
+    const mcpList = mcpServers.length > 0
+      ? mcpServers.map(s => `  • ${s.name} (${s.error ? `Error: ${s.error}` : 'Running'})`).join('\n')
+      : '  No connected MCP servers.';
+      
+    addEvent(
+      `Plugins Dashboard\n\n` +
+      `Active Skills:\n${skillsList}\n\n` +
+      `Connected MCP Servers:\n${mcpList}\n\n` +
+      `Use ~/.venice/skills/ and ~/.venice/mcp.json to manage plugins.`
+    );
+  },
+
+  async theme(args, { addEvent }) {
+    await import('./theme.js').then((m) => {
+      const requested = args.trim().toLowerCase();
+      const validThemes = m.getAvailableThemes();
+      if (!requested) {
+        addEvent(`Current theme: ${m.getActiveThemeName()}. Available themes: ${validThemes.join(', ')}`);
+        return;
+      }
+      if (!validThemes.includes(requested as any)) {
+        addEvent(`Invalid theme: ${requested}. Available themes: ${validThemes.join(', ')}`);
+        return;
+      }
+      m.setActiveThemeName(requested as any);
+      addEvent(`Theme set to: ${requested}`);
+    });
   },
 
   async permissions(args, { addEvent, getRuntime, setApprovalMode, approvalMode }) {
@@ -461,15 +594,6 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
     }
   },
 
-  async ['export-debug-zip'](_args, { addEvent, getRuntime }) {
-    const runtime = getRuntime?.();
-    if (!runtime) {
-      addEvent('No active runtime.');
-      return;
-    }
-    addEvent('Debug zip export is not yet implemented.');
-  },
-
   async import(args, { addEvent, resumeSession }) {
     const filePath = args.trim();
     if (!filePath) {
@@ -499,8 +623,26 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
  * normal user message (VC-KIMI-047).
  */
 export async function handleSlashCommand(command: string, args: string, context: SlashHandlerContext): Promise<boolean> {
-  const definition = findSlashCommandDefinition(command);
-  if (!definition) return false;
+  let definition = findSlashCommandDefinition(command);
+  
+  if (!definition) {
+    const { setMessages } = context;
+    const nearest = findNearestSlashCommand(command);
+    if (nearest) {
+      setMessages((prev) => [...prev, {
+        id: `cmd-${prev.length + 1}`,
+        role: 'event',
+        content: `Unknown command "/${command}". Did you mean "/${nearest}"?`,
+      }]);
+    } else {
+      setMessages((prev) => [...prev, {
+        id: `cmd-${prev.length + 1}`,
+        role: 'event',
+        content: `Unknown command "/${command}". Type /help all to see available commands.`,
+      }]);
+    }
+    return true; // We intercepted it as a bad command, do not send to API
+  }
 
   if (!isSlashCommandAvailable(definition, context.status)) {
     const { setMessages } = context;
@@ -512,7 +654,7 @@ export async function handleSlashCommand(command: string, args: string, context:
     return true;
   }
 
-  const handler = SLASH_HANDLERS[getSlashCommandBase(command)];
+  const handler = SLASH_HANDLERS[getSlashCommandBase(definition.name)];
   if (!handler) return false;
 
   const { setMessages, status, model, approvalMode, setApprovalMode, workspaceRoot, setModel, showModelPicker, showSessionPicker, resumeSession, listSessions, mcpManager, getRuntime } = context;

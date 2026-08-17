@@ -216,6 +216,13 @@ export class AgentRuntime {
     return this.skills.getErrors();
   }
 
+  /** Reload configuration and skills (used by /reload). */
+  discoverSkills(): number {
+    this.skills.discover();
+    this.state.skillSummaries = this.skills.list();
+    return this.state.skillSummaries.length;
+  }
+
   /**
    * Activate a skill by name (used by the `/skill` slash command, VCL-R3-032).
    * Mirrors the `skill_load` tool's activation side effect. Returns false when
@@ -449,6 +456,19 @@ export class AgentRuntime {
       this.context.setModelContextLimit(UNKNOWN_CONTEXT_LIMIT);
     }
     return profile;
+  }
+
+  setReasoningEffort(level?: string): void {
+    this.state.reasoningEffort = level;
+    this.persist();
+  }
+
+  getMcpManager(): import('../mcp/manager.js').McpManager | undefined {
+    return this.mcpManager;
+  }
+
+  getSkillRegistry(): import('../skills/registry.js').SkillRegistry {
+    return this.skills;
   }
 
   updateSignal(signal: AbortSignal): void {
@@ -724,6 +744,7 @@ export class AgentRuntime {
     this.turnInProgress = true;
     let turns = 0;
     let finalMessage = '';
+    let currentTurnId = randomUUID();
 
     try {
       while (turns < this.maxTurns) {
@@ -751,7 +772,8 @@ export class AgentRuntime {
         }
 
         this.state.status = 'thinking';
-        const response = await this.callModel();
+        currentTurnId = randomUUID();
+        const response = await this.callModel(currentTurnId);
         finalMessage = response.content || '';
 
         const assistantMessage: AgentMessage = {
@@ -761,10 +783,16 @@ export class AgentRuntime {
         if (response.toolCalls?.length) {
           assistantMessage.tool_calls = response.toolCalls;
         }
-        // When the response was streamed, incremental assistant_delta events
-        // were already emitted; persist the canonical message without a
-        // duplicate final delta (VCL-R3-012).
-        this.addAssistantMessage(assistantMessage, { emitDelta: !response.streamed });
+        // Persist the canonical message without a duplicate final delta (VCL-R3-012).
+        this.addAssistantMessage(assistantMessage);
+
+        this.emit({
+          type: 'assistant_complete',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          turnId: currentTurnId,
+          content: finalMessage,
+        });
 
         if (!response.toolCalls?.length) {
           this.state.status = 'complete';
@@ -795,6 +823,13 @@ export class AgentRuntime {
     } catch (error) {
       this.state.status = 'failed';
       finalMessage = `Agent failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.emit({
+        type: 'assistant_error',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        turnId: currentTurnId,
+        message: finalMessage,
+      });
     } finally {
       this.turnInProgress = false;
       // Preserve injections that arrived after the turn limit was reached by
@@ -898,7 +933,7 @@ export class AgentRuntime {
     });
   }
 
-  private async callModel(): Promise<ModelResponse> {
+  private async callModel(turnId: string): Promise<ModelResponse> {
     const messages = this.context.buildMessages();
     this.emit({
       type: 'model_request',
@@ -912,24 +947,31 @@ export class AgentRuntime {
     // The model client streams; surface incremental content and reasoning as
     // events so consumers can render progressively (VCL-R3-012). The canonical
     // assistant message is still persisted once after the stream finishes.
-    return await this.modelClient.complete(messages, tools, (chunk) => {
-      if (chunk.content) {
-        this.emit({
-          type: 'assistant_delta',
-          timestamp: new Date().toISOString(),
-          eventId: randomUUID(),
-          content: chunk.content,
-        });
-      }
-      if (chunk.reasoningContent) {
-        this.emit({
-          type: 'assistant_reasoning',
-          timestamp: new Date().toISOString(),
-          eventId: randomUUID(),
-          content: chunk.reasoningContent,
-        });
-      }
-    });
+    return await this.modelClient.complete(
+      messages,
+      tools,
+      (chunk) => {
+        if (chunk.content) {
+          this.emit({
+            type: 'assistant_delta',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            turnId,
+            content: chunk.content,
+          });
+        }
+        if (chunk.reasoningContent) {
+          this.emit({
+            type: 'assistant_reasoning',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            turnId,
+            content: chunk.reasoningContent,
+          });
+        }
+      },
+      { reasoningEffort: this.state.reasoningEffort }
+    );
   }
 
   /**
@@ -1598,17 +1640,9 @@ export class AgentRuntime {
     });
   }
 
-  private addAssistantMessage(message: AgentMessage, options: { emitDelta?: boolean } = {}): void {
+  private addAssistantMessage(message: AgentMessage): void {
     this.state.messages.push(message);
     this.context.addConversationMessage(message);
-    if (options.emitDelta !== false && typeof message.content === 'string' && message.content) {
-      this.emit({
-        type: 'assistant_delta',
-        timestamp: new Date().toISOString(),
-        eventId: randomUUID(),
-        content: message.content,
-      });
-    }
   }
 
   private addToolResult(toolCallId: string, result: ToolResult<unknown>): void {

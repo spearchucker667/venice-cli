@@ -204,11 +204,11 @@ describe('handleSlashCommand', () => {
     assert.ok(messages.some((m) => m.content.includes('Unknown skill: nope')));
   });
 
-  it('returns false for unknown commands so they can be sent to the model (VC-KIMI-047)', async () => {
+  it('intercepts unknown commands to prevent typos from executing API calls (VC-KIMI-047)', async () => {
     const { context, messages } = makeContext();
     const handled = await handleSlashCommand('frobnicate', '', context);
-    assert.strictEqual(handled, false);
-    assert.strictEqual(messages().length, 0, 'no event emitted for unknown command');
+    assert.strictEqual(handled, true);
+    assert.ok(messages().some(m => m.content.includes('Unknown command')));
   });
 
   it('rejects idle-only commands while the agent is running (VC-KIMI-046)', async () => {
