@@ -321,7 +321,7 @@ _venice_completion() {
             return 0
             ;;
         models)
-            COMPREPLY=( \$(compgen -W "-t --type -s --search --privacy -f --format" -- "\${cur}") )
+            COMPREPLY=( \$(compgen -W "-t --type -s --search --privacy --tee --e2ee -f --format" -- "\${cur}") )
             return 0
             ;;
         characters)
@@ -610,6 +610,8 @@ ${program.commands
                         '-t[Filter by type]:type:(all text image tts asr music embedding video upscale inpaint)' \\
                         '-s[Search query]:query:' \\
                         '--privacy[Privacy models only]' \\
+                        '--tee[TEE-attestable models only]' \\
+                        '--e2ee[E2EE-capable models only]' \\
                         '-f[Output format]:format:((pretty json))'
                     ;;
                 characters)
@@ -687,12 +689,29 @@ ${program.commands
 _venice`;
 }
 
-function generateFishCompletion(program: Command): string {
+export function generateFishCompletion(program: Command): string {
   const topLevelCommands = program.commands.map(cmd => cmd.name()).join(' ');
 
   return `# Venice CLI fish completion
 
 set -l commands ${topLevelCommands}
+
+# Test whether the first non-option token is the requested top-level command.
+function __venice_using_command
+    set -l tokens (commandline -xpc)
+    set -a tokens (commandline -ct)
+
+    for token in $tokens[2..-1]
+        if string match -q -- '-*' "$token"
+            continue
+        end
+
+        test "$token" = "$argv[1]"
+        return
+    end
+
+    return 1
+end
 
 # Disable file completions by default
 complete -c venice -f
@@ -702,6 +721,11 @@ ${program.commands
   .filter(cmd => cmd.name() !== '__complete' && cmd.name() !== 'completions')
   .map(cmd => `complete -c venice -n "not __fish_seen_subcommand_from $commands" -a ${cmd.name().split('|')[0]} -d "${cmd.description()}"`)
   .join('\n')}
+
+# Models options
+complete -c venice -n "__venice_using_command models" -l privacy -d "Privacy-preserving models only"
+complete -c venice -n "__venice_using_command models" -l tee -d "TEE-attestable models only"
+complete -c venice -n "__venice_using_command models" -l e2ee -d "E2EE-capable models only"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a completions -d "Shell completions"
 complete -c venice -n "not __fish_seen_subcommand_from $commands" -a __complete -d "Internal completion helper"
 

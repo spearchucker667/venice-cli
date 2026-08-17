@@ -11,7 +11,7 @@ Please be respectful and constructive in all interactions. We want Venice CLI to
 ### Prerequisites
 
 - Node.js 20.19.0 or higher (required by the ESLint 10 development toolchain)
-- npm or yarn
+- npm, yarn, or Bun 1.3.0+
 - A Venice AI API key for testing
 
 ### Development Setup
@@ -27,9 +27,19 @@ Please be respectful and constructive in all interactions. We want Venice CLI to
    npm install
    ```
 
+   Or:
+   ```bash
+   bun install
+   ```
+
 3. Build the project:
    ```bash
    npm run build
+   ```
+
+   Or:
+   ```bash
+   bun run build
    ```
 
 4. Validate your changes:
@@ -37,6 +47,11 @@ Please be respectful and constructive in all interactions. We want Venice CLI to
    npm run lint
    npm test
    npm run dev -- chat "Test message"
+   ```
+
+   Or:
+   ```bash
+   bun run dev:bun -- chat "Test message"
    ```
 
 ## Project Structure

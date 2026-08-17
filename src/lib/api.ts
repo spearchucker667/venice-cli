@@ -166,6 +166,30 @@ export function buildChatCompletionBody(
   return body;
 }
 
+async function readChatErrorBody(response: Response, signal?: AbortSignal): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const onAbort = () => {
+    reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener('abort', onAbort);
+  const decoder = new TextDecoder();
+  let result = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      result += decoder.decode(value, { stream: true });
+      if (result.length > 1024 * 1024) break;
+    }
+    result += decoder.decode();
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    reader.releaseLock();
+  }
+  return result;
+}
+
 // Chat completion (non-streaming)
 export async function chatCompletion(
   messages: Message[],
@@ -270,7 +294,14 @@ export async function* chatCompletionStream(
 
   const contentType = response.headers.get('content-type');
   if (contentType && contentType.includes('application/json')) {
-    const errorBytes = await response.text();
+    const errorBytes = await readChatErrorBody(response, options.abortSignal);
+    if (options.abortSignal?.aborted) {
+      // An intentional abort while reading the error envelope must surface as
+      // an AbortError (VCL-002 semantics), not as a fabricated API error.
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      throw abortError;
+    }
     throw VeniceApiError.fromResponse(response, errorBytes);
   }
 
@@ -1017,7 +1048,10 @@ export function clearModelsCache(): void {
 function mergeModel(merged: Map<string, Model>, model: Model, requestedType?: string): void {
   const normalized: Model = { ...model };
 
-  if (requestedType && (!normalized.type || normalized.type.toLowerCase() === 'text')) {
+  // Only backfill missing types from typed endpoints. Never overwrite explicit
+  // payload types (including "text"), because mixed endpoint responses would
+  // otherwise be silently misclassified.
+  if (requestedType && !normalized.type) {
     normalized.type = requestedType;
   }
 
@@ -1052,9 +1086,7 @@ export async function listModels(
       }
     );
     return (response.data || []).map((model) =>
-      !model.type || model.type.toLowerCase() === 'text'
-        ? { ...model, type }
-        : model
+      !model.type ? { ...model, type } : model
     );
   }
 

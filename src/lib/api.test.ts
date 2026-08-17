@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
-import {
+import test from 'node:test';  import {
+  apiRequest,
   chatCompletion,
+  chatCompletionStream,
   completeVideo,
   cryptoRpc,
   dedicatedWebSearch,
@@ -23,6 +24,289 @@ import {
   VeniceApiError,
 } from './api.js';
 import type { Character, CharacterReviewsPage } from '../types/index.js';
+
+function trackAbortListeners(signal: AbortSignal): {
+  active: () => number;
+  restore: () => void;
+} {
+  const listeners = new Set<Parameters<AbortSignal['addEventListener']>[1]>();
+  const originalAdd = signal.addEventListener.bind(signal);
+  const originalRemove = signal.removeEventListener.bind(signal);
+
+  signal.addEventListener = ((...args: Parameters<AbortSignal['addEventListener']>) => {
+    const [type, listener] = args;
+    if (type === 'abort') listeners.add(listener);
+    originalAdd(...args);
+  }) as typeof signal.addEventListener;
+  signal.removeEventListener = ((...args: Parameters<AbortSignal['removeEventListener']>) => {
+    const [type, listener] = args;
+    if (type === 'abort') listeners.delete(listener);
+    originalRemove(...args);
+  }) as typeof signal.removeEventListener;
+
+  return {
+    active: () => listeners.size,
+    restore: () => {
+      signal.addEventListener = originalAdd;
+      signal.removeEventListener = originalRemove;
+    },
+  };
+}
+
+function stalledResponse(signal?: AbortSignal): Response {
+  return new Response(new ReadableStream({
+    start(controller) {
+      signal?.addEventListener('abort', () => {
+        controller.error(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    },
+  }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+test('chat cancellation aborts non-streaming response body consumption', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) =>
+    stalledResponse(init?.signal ?? undefined)) as typeof fetch;
+
+  try {
+    const completion = chatCompletion(
+      [{ role: 'user', content: 'wait' }],
+      { abortSignal: controller.signal }
+    );
+    setTimeout(() => controller.abort(), 10);
+    await assert.rejects(completion, (error: unknown) =>
+      error instanceof Error && error.name === 'AbortError'
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('chat cancellation remains active while a streaming body is consumed', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  const listenerTracker = trackAbortListeners(controller.signal);
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) =>
+    stalledResponse(init?.signal ?? undefined)) as typeof fetch;
+
+  try {
+    const stream = chatCompletionStream(
+      [{ role: 'user', content: 'wait' }],
+      { abortSignal: controller.signal }
+    );
+    const nextChunk = stream.next();
+    setTimeout(() => controller.abort(), 10);
+    await assert.rejects(nextChunk, (error: unknown) =>
+      error instanceof Error && error.name === 'AbortError'
+    );
+    assert.equal(listenerTracker.active(), 0);
+  } finally {
+    listenerTracker.restore();
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('returning a streaming response releases the external abort listener while the body stays readable', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  const listenerTracker = trackAbortListeners(controller.signal);
+  process.env.VENICE_API_KEY = 'test-key';
+
+  globalThis.fetch = (async (_input, init) => {
+    const requestSignal = init?.signal ?? undefined;
+    return new Response(new ReadableStream({
+      start(streamController) {
+        const delayedChunk = setTimeout(() => {
+          streamController.enqueue(new TextEncoder().encode('data: healthy\n\n'));
+          streamController.close();
+        }, 40);
+        requestSignal?.addEventListener('abort', () => {
+          clearTimeout(delayedChunk);
+          streamController.error(new DOMException('Aborted', 'AbortError'));
+        }, { once: true });
+      },
+    }));
+  }) as typeof fetch;
+
+  try {
+    const response = await apiRequest<Response>('/stream-timeout-test', {
+      stream: true,
+      showSpinner: false,
+      retries: 0,
+      timeoutMs: 10,
+      signal: controller.signal,
+    });
+    assert.equal(listenerTracker.active(), 0);
+    assert.equal(await response.text(), 'data: healthy\n\n');
+    assert.equal(listenerTracker.active(), 0);
+  } finally {
+    listenerTracker.restore();
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('JSON request timeout bounds body consumption', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) => delayedResponse(
+    JSON.stringify({ status: 'healthy' }),
+    40,
+    init?.signal ?? undefined
+  )) as typeof fetch;
+
+  try {
+    // A body slower than the request timeout must not be allowed to run past
+    // it: the fork's apiRequest bounds non-stream body consumption by the
+    // per-attempt timeout.
+    const startedAt = Date.now();
+    await assert.rejects(
+      apiRequest<{ status: string }>('/delayed-json-test', {
+        showSpinner: false,
+        retries: 0,
+        timeoutMs: 10,
+      }),
+      (error: unknown) =>
+        error instanceof Error && /Request timed out/.test(error.message)
+    );
+    assert.ok(Date.now() - startedAt < 2_000);
+
+    // A body faster than the timeout completes normally.
+    const fast = await apiRequest<{ status: string }>('/delayed-json-fast-test', {
+      showSpinner: false,
+      retries: 0,
+      timeoutMs: 1000,
+    });
+    assert.deepEqual(fast, { status: 'healthy' });
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv('VENICE_API_KEY', originalApiKey);
+  }
+});
+
+test('JSON error body is read and surfaced as VeniceApiError within the request timeout', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) => delayedResponse(
+    JSON.stringify({ error: { message: 'Delayed rejection', code: 'delayed_error' } }),
+    40,
+    init?.signal ?? undefined,
+    400
+  )) as typeof fetch;
+
+  try {
+    const startedAt = Date.now();
+    await assert.rejects(
+      apiRequest('/delayed-error-test', {
+        showSpinner: false,
+        retries: 0,
+        timeoutMs: 1000,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof VeniceApiError);
+        assert.equal(error.message, 'Delayed rejection');
+        assert.equal(error.statusCode, 400);
+        assert.equal(error.code, 'delayed_error');
+        return true;
+      }
+    );
+    assert.ok(Date.now() - startedAt >= 30);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv('VENICE_API_KEY', originalApiKey);
+  }
+});
+
+test('external abort remains active during JSON body consumption and cleans up', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  const listenerTracker = trackAbortListeners(controller.signal);
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async (_input, init) => delayedResponse(
+    JSON.stringify({ status: 'too late' }),
+    100,
+    init?.signal ?? undefined
+  )) as typeof fetch;
+
+  try {
+    const request = apiRequest('/cancel-delayed-json-test', {
+      showSpinner: false,
+      retries: 0,
+      timeoutMs: 1000,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 20);
+    await assert.rejects(request, (error: unknown) =>
+      error instanceof Error && error.name === 'AbortError'
+    );
+    assert.equal(listenerTracker.active(), 0);
+  } finally {
+    listenerTracker.restore();
+    globalThis.fetch = originalFetch;
+    restoreEnv('VENICE_API_KEY', originalApiKey);
+  }
+});
+
+test('returning a streaming response removes its external abort listener and cancel propagates', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const controller = new AbortController();
+  const listenerTracker = trackAbortListeners(controller.signal);
+  let sourceCancelled = false;
+  process.env.VENICE_API_KEY = 'test-key';
+  globalThis.fetch = (async () => new Response(new ReadableStream({
+    cancel() {
+      sourceCancelled = true;
+    },
+  }))) as typeof fetch;
+
+  try {
+    const response = await apiRequest<Response>('/stream-cancel-test', {
+      stream: true,
+      showSpinner: false,
+      retries: 0,
+      timeoutMs: 10,
+      signal: controller.signal,
+    });
+    assert.equal(listenerTracker.active(), 0);
+    await response.body?.cancel();
+    assert.equal(sourceCancelled, true);
+    assert.equal(listenerTracker.active(), 0);
+  } finally {
+    listenerTracker.restore();
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
 
 test('augment API helpers send the documented requests', async () => {
   const originalFetch = globalThis.fetch;
@@ -362,6 +646,28 @@ test('VeniceApiError carries a cause/fix/debug contract for known statuses (P2)'
   assert.strictEqual(other.cause, undefined);
   assert.strictEqual(other.describe(), 'teapot');
 });
+function delayedResponse(
+  body: string,
+  delayMs: number,
+  signal?: AbortSignal,
+  status = 200
+): Response {
+  return new Response(new ReadableStream({
+    start(controller) {
+      const delayedChunk = setTimeout(() => {
+        controller.enqueue(new TextEncoder().encode(body));
+        controller.close();
+      }, delayMs);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(delayedChunk);
+        controller.error(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    },
+  }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 test('listCryptoNetworks is a public GET without Authorization', async () => {
   const originalFetch = globalThis.fetch;
