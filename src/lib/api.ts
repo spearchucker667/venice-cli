@@ -1017,7 +1017,10 @@ export function clearModelsCache(): void {
 function mergeModel(merged: Map<string, Model>, model: Model, requestedType?: string): void {
   const normalized: Model = { ...model };
 
-  if (requestedType && (!normalized.type || normalized.type.toLowerCase() === 'text')) {
+  // Only backfill missing types from typed endpoints. Never overwrite explicit
+  // payload types (including "text"), because mixed endpoint responses would
+  // otherwise be silently misclassified.
+  if (requestedType && !normalized.type) {
     normalized.type = requestedType;
   }
 
@@ -1052,9 +1055,7 @@ export async function listModels(
       }
     );
     return (response.data || []).map((model) =>
-      !model.type || model.type.toLowerCase() === 'text'
-        ? { ...model, type }
-        : model
+      !model.type ? { ...model, type } : model
     );
   }
 
