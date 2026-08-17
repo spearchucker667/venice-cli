@@ -129,7 +129,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: 'plan clear', aliases: [], description: 'Clear the current plan artifact', availability: 'idle' },
   { name: 'auto', description: 'Set approval mode to auto (execute safe tools automatically)', availability: 'idle' },
   { name: 'yolo', description: 'Set approval mode to yolo (execute all tools automatically)', availability: 'idle' },
-  { name: 'config', aliases: ['settings'], description: 'Configuration hub; set API keys (e.g. /config api-key <key>)', availability: 'always' },
+  { name: 'config', aliases: ['settings'], description: 'Configuration hub; set/rotate API keys (e.g. /config api-key <key>, /config rotate-api-key <key>)', availability: 'always' },
   { name: 'effort', description: 'Configure the agent effort level', availability: 'idle' },
   { name: 'reload', description: 'Reload configuration and skills', availability: 'idle' },
   { name: 'plugins', description: 'Manage plugins', availability: 'always' },

@@ -63,6 +63,7 @@ export function collectKnownSecrets(): string[] {
   const secrets: string[] = [];
   if (process.env.VENICE_API_KEY) secrets.push(process.env.VENICE_API_KEY);
   if (process.env.VENICE_API_KEY_FALLBACK) secrets.push(process.env.VENICE_API_KEY_FALLBACK);
+  if (process.env.X_SIGN_IN_WITH_X) secrets.push(process.env.X_SIGN_IN_WITH_X);
   if (process.env.GITHUB_TOKEN) secrets.push(process.env.GITHUB_TOKEN);
   if (process.env.NPM_TOKEN) secrets.push(process.env.NPM_TOKEN);
   
@@ -70,6 +71,7 @@ export function collectKnownSecrets(): string[] {
     const config = loadConfig();
     if (config.api_key) secrets.push(config.api_key);
     if (config.fallback_api_key) secrets.push(config.fallback_api_key);
+    if (config.signInWithX) secrets.push(config.signInWithX);
   } catch {
     // Ignore config loading errors to prevent breaking redactor
   }

@@ -216,19 +216,47 @@ export function getVeniceAuth(): VeniceAuth | undefined {
 }
 
 /**
- * The fallback credential usable after the active credential is rejected.
- * Returns `undefined` when no fallback key is configured, or when the fallback
- * key is already the active credential (nothing left to fall back to).
+ * Pure decision logic for the fallback credential — the next-best credential
+ * to try when the active one is rejected. Kept pure so tests can exercise
+ * every cross-kind combination without touching the real config file.
+ *
+ * - Active API key → the configured fallback key when it differs, else the
+ *   wallet token when one is configured (the X-SIGN-IN-WITH-X auth path gets
+ *   the same retry treatment as the key path).
+ * - Active wallet token → the API key (primary, else fallback) when one is
+ *   configured, so a rejected wallet request can still be served by a key.
  */
-export function getFallbackVeniceAuth(): VeniceAuth | undefined {
-  const key = getFallbackApiKey();
-  if (!key) return undefined;
+export function pickFallbackAuth(
+  active: VeniceAuth | undefined,
+  primaryKey: string | undefined,
+  fallbackKey: string | undefined,
+  walletToken: string | undefined
+): VeniceAuth | undefined {
+  if (!active) return undefined;
 
-  const active = getVeniceAuth();
-  if (active?.kind === 'api-key' && active.value === key) {
+  if (active.kind === 'api-key') {
+    if (fallbackKey && fallbackKey !== active.value) {
+      return { kind: 'api-key', value: fallbackKey };
+    }
+    if (walletToken) {
+      return { kind: 'sign-in-with-x', value: walletToken };
+    }
     return undefined;
   }
-  return { kind: 'api-key', value: key };
+
+  // Active credential is the wallet token.
+  if (primaryKey) return { kind: 'api-key', value: primaryKey };
+  if (fallbackKey) return { kind: 'api-key', value: fallbackKey };
+  return undefined;
+}
+
+/**
+ * The fallback credential usable after the active credential is rejected.
+ * Returns `undefined` when nothing else is configured, or when the only other
+ * credential is identical to the active one (nothing left to fall back to).
+ */
+export function getFallbackVeniceAuth(): VeniceAuth | undefined {
+  return pickFallbackAuth(getVeniceAuth(), getApiKey(), getFallbackApiKey(), getSignInWithX());
 }
 
 export function applyVeniceAuth(

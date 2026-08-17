@@ -9,6 +9,8 @@ import {
   getApiKey,
   getFallbackApiKey,
   getFallbackVeniceAuth,
+  pickFallbackAuth,
+  type VeniceAuth,
 } from './config.js';
 
 describe('validateConfigShape (P2 config schema)', () => {
@@ -161,10 +163,55 @@ describe('fallback API key resolution (env-only, no config writes)', () => {
     process.env.VENICE_API_KEY_FALLBACK = 'fallback';
     assert.deepStrictEqual(getFallbackVeniceAuth(), { kind: 'api-key', value: 'fallback' });
   });
+});
 
-  it('getFallbackVeniceAuth returns undefined when the fallback equals the active key', () => {
-    process.env.VENICE_API_KEY = 'same-key';
-    process.env.VENICE_API_KEY_FALLBACK = 'same-key';
-    assert.strictEqual(getFallbackVeniceAuth(), undefined);
+describe('pickFallbackAuth cross-kind fallback (pure, no config/env reads)', () => {
+  const active = (kind: VeniceAuth['kind'], value = 'active-cred'): VeniceAuth => ({ kind, value });
+
+  it('falls back to the wallet token when no distinct fallback key exists', () => {
+    assert.deepStrictEqual(
+      pickFallbackAuth(active('api-key'), 'primary', undefined, 'wallet-token'),
+      { kind: 'sign-in-with-x', value: 'wallet-token' }
+    );
+  });
+
+  it('prefers the distinct fallback key over the wallet token', () => {
+    assert.deepStrictEqual(
+      pickFallbackAuth(active('api-key'), 'primary', 'fallback', 'wallet-token'),
+      { kind: 'api-key', value: 'fallback' }
+    );
+  });
+
+  it('skips the fallback key when it equals the active key and uses the wallet token', () => {
+    assert.deepStrictEqual(
+      pickFallbackAuth(active('api-key', 'same'), 'same', 'same', 'wallet-token'),
+      { kind: 'sign-in-with-x', value: 'wallet-token' }
+    );
+  });
+
+  it('returns undefined for an api-key credential with no other credential configured', () => {
+    assert.strictEqual(pickFallbackAuth(active('api-key'), 'primary', undefined, undefined), undefined);
+  });
+
+  it('falls back from a wallet token to the primary API key', () => {
+    assert.deepStrictEqual(
+      pickFallbackAuth(active('sign-in-with-x'), 'primary', undefined, 'wallet-token'),
+      { kind: 'api-key', value: 'primary' }
+    );
+  });
+
+  it('falls back from a wallet token to the fallback key when no primary key is set', () => {
+    assert.deepStrictEqual(
+      pickFallbackAuth(active('sign-in-with-x'), undefined, 'fallback', 'wallet-token'),
+      { kind: 'api-key', value: 'fallback' }
+    );
+  });
+
+  it('returns undefined for a wallet token with no key configured', () => {
+    assert.strictEqual(pickFallbackAuth(active('sign-in-with-x'), undefined, undefined, 'wallet-token'), undefined);
+  });
+
+  it('returns undefined when no active credential exists', () => {
+    assert.strictEqual(pickFallbackAuth(undefined, 'primary', 'fallback', 'wallet-token'), undefined);
   });
 });

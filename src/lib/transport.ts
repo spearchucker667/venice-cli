@@ -144,10 +144,94 @@ export function getHeaders(
 }
 
 /**
+ * Which credential actually served a completed request, recorded by the
+ * transport so `/status` and the agent UI can report it (P2). In-memory only:
+ * the credential is never persisted or logged in plaintext.
+ */
+export interface RequestAuthInfo {
+  /** The credential that ultimately served the request. */
+  credential: 'primary' | 'fallback';
+  /** Which auth kind the serving credential used. */
+  kind: 'api-key' | 'sign-in-with-x';
+  /** Unix milliseconds when the request completed. */
+  at: number;
+}
+
+let lastRequestAuth: RequestAuthInfo | undefined;
+
+/** Record the credential that served the most recent successful request. */
+export function recordRequestAuth(info: RequestAuthInfo): void {
+  lastRequestAuth = info;
+}
+
+/** The credential that served the most recent successful request, if any. */
+export function getLastRequestAuth(): RequestAuthInfo | undefined {
+  return lastRequestAuth;
+}
+
+/** Reset the recorded credential (test hygiene; the TUI never needs it). */
+export function clearLastRequestAuth(): void {
+  lastRequestAuth = undefined;
+}
+
+/**
+ * Probe the Venice API with exactly one credential and report whether it is
+ * accepted. Accepts a bare bearer key or a full `VeniceAuth` (so wallet
+ * tokens are tested with the `X-Sign-In-With-X` header). Used by
+ * `/config rotate-api-key` to validate a new key before persisting it and by
+ * `/config test` to check the active credential, so the probe never falls
+ * back to other credentials — the goal is to test precisely the given one.
+ * Uses the cheap, auth-required `/billing/balance` endpoint (no spend is
+ * consumed).
+ */
+export async function validateApiKey(
+  credential: string | VeniceAuth,
+  timeoutMs = 15000
+): Promise<{ ok: boolean; status?: number; message?: string }> {
+  const headers: Record<string, string> = {};
+  if (typeof credential === 'string') {
+    headers.Authorization = `Bearer ${credential}`;
+  } else {
+    applyVeniceAuth(headers, credential);
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${VENICE_API}/billing/balance`, {
+      headers,
+      signal: controller.signal,
+    });
+    if (response.ok) return { ok: true };
+    let message = `HTTP ${response.status}`;
+    try {
+      const body = await response.text();
+      const parsed = JSON.parse(body) as { error?: { message?: string } };
+      if (parsed.error?.message) message = parsed.error.message;
+    } catch {
+      // Fall back to the HTTP status message.
+    }
+    return { ok: false, status: response.status, message };
+  } catch (error) {
+    const aborted = error instanceof Error && error.name === 'AbortError';
+    return {
+      ok: false,
+      message: aborted
+        ? 'Timed out validating the key against the Venice API'
+        : error instanceof Error
+          ? error.message
+          : String(error),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
  * Fetch a Venice API endpoint with standard auth headers, retrying once with
- * the configured fallback key when the primary credential is rejected
- * (401/403). Mirrors the auth-fallback in `apiRequest` for endpoints that
- * fetch directly (media upload/download, video retrieve, augment).
+ * the configured fallback credential (fallback key or wallet token) when the
+ * primary credential is rejected (401/403). Mirrors the auth-fallback in
+ * `apiRequest` for endpoints that fetch directly (media upload/download,
+ * video retrieve, augment).
  *
  * `init.headers` (if any) are merged over the generated auth headers so
  * multipart callers can set `Content-Type`/`Content-Length` without losing
@@ -176,6 +260,7 @@ export async function fetchWithAuthFallback(
     return { ...init, headers };
   };
 
+  const activeKind = getVeniceAuth()?.kind ?? 'api-key';
   const response = await fetch(url, makeInit());
   if (response.status === 401 || response.status === 403) {
     const fallback = getFallbackVeniceAuth();
@@ -183,8 +268,15 @@ export async function fetchWithAuthFallback(
       // The rejected response body is never used for reporting; release it and
       // re-issue the same request with the fallback credential once.
       await response.body?.cancel().catch(() => undefined);
-      return fetch(url, makeInit(fallback));
+      const retried = await fetch(url, makeInit(fallback));
+      if (retried.ok) {
+        recordRequestAuth({ credential: 'fallback', kind: fallback.kind, at: Date.now() });
+      }
+      return retried;
     }
+  }
+  if (response.ok) {
+    recordRequestAuth({ credential: 'primary', kind: activeKind, at: Date.now() });
   }
   return response;
 }
@@ -460,11 +552,22 @@ export async function apiRequest<T>(
   let lastError: VeniceApiError | null = null;
 
   // A rejected primary credential (401/403) is retried once with the secondary
-  // Venice API key before the auth error is surfaced. The retry re-runs the
-  // same attempt index so it never consumes the retry/backoff budget.
+  // credential (fallback key, or wallet token when no distinct fallback key is
+  // configured) before the auth error is surfaced. The retry re-runs the same
+  // attempt index so it never consumes the retry/backoff budget.
+  const activeAuth = getVeniceAuth();
   const fallbackAuth = getFallbackVeniceAuth();
   let authOverride: VeniceAuth | undefined;
   let usedFallbackAuth = false;
+
+  // Record which credential served the request for /status and the agent UI.
+  const noteSuccess = () => {
+    recordRequestAuth({
+      credential: usedFallbackAuth ? 'fallback' : 'primary',
+      kind: (authOverride ?? activeAuth)?.kind ?? 'api-key',
+      at: Date.now(),
+    });
+  };
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
@@ -515,6 +618,7 @@ export async function apiRequest<T>(
           stopSpinner(true);
           spinner = null;
         }
+        noteSuccess();
         return response as unknown as T;
       }
 
@@ -548,6 +652,7 @@ export async function apiRequest<T>(
           stopSpinner(true);
           spinner = null;
         }
+        noteSuccess();
         return Uint8Array.from(bytes).buffer as T;
       }
 
@@ -562,6 +667,7 @@ export async function apiRequest<T>(
         stopSpinner(true);
         spinner = null;
       }
+      noteSuccess();
       return JSON.parse(jsonBytes.toString('utf-8')) as T;
     } catch (error) {
       clearTimeout(timeoutId);

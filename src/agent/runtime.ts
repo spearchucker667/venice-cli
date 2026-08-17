@@ -24,6 +24,7 @@ import { loadInstructions, instructionsForPaths, type ResolvedInstructions } fro
 import { WorkspaceManager, detectGitRoot } from './workspace.js';
 import { ChangeLedger } from './change-ledger.js';
 import { getDefaultModel, loadProjectConfig, type ProjectAgentConfig } from '../lib/config.js';
+import { getLastRequestAuth } from '../lib/transport.js';
 import type { AgentDefinition } from './agents.js';
 import type { RuntimeModeState } from './mode.js';
 import { defaultMode } from './mode.js';
@@ -1181,6 +1182,18 @@ export class AgentRuntime {
     if (response.usage?.prompt_tokens) {
       const bytes = Buffer.byteLength(JSON.stringify(messages), 'utf-8');
       this.context.calibrate(bytes, response.usage.prompt_tokens);
+    }
+    // When the model call was served by the fallback credential, surface it:
+    // the user should know their primary key was rejected (P2).
+    const servedBy = getLastRequestAuth();
+    if (servedBy?.credential === 'fallback') {
+      this.emit({
+        type: 'auth_fallback_used',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        turnId,
+        kind: servedBy.kind,
+      });
     }
     // x402 wallet users see their remaining credits after each model call
     // (X-Balance-Remaining header, present for SIGN-IN-WITH-X auth).

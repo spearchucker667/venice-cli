@@ -21,6 +21,12 @@ export function mapEventToMessage(event: AgentEvent): TuiMessage | undefined {
       return { id: event.turnId, role: 'assistant', content: event.content, metadata: { isDelta: false } };
     case 'assistant_error':
       return { id: event.turnId, role: 'event', content: `⚠ Agent failed: ${event.message}` };
+    case 'auth_fallback_used':
+      return {
+        id: event.eventId,
+        role: 'event',
+        content: `⚠ Primary credential rejected — response served by ${event.kind === 'api-key' ? 'fallback API key' : 'wallet token'}`,
+      };
     case 'tool_requested':
       return undefined;
     case 'tool_started':

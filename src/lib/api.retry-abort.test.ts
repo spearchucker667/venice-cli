@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apiRequest } from './api.js';
-import { fetchWithAuthFallback } from './transport.js';
+import {
+  fetchWithAuthFallback,
+  validateApiKey,
+  getLastRequestAuth,
+  clearLastRequestAuth,
+} from './transport.js';
 
 function jsonError(status: number, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify({ error: { message: 'boom' } }), {
@@ -70,6 +75,195 @@ test('auth rejection is retried once with the fallback API key', async () => {
     assert.equal(authorizations[1], 'Bearer fallback-key');
   } finally {
     globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+    if (originalFallback === undefined) delete process.env.VENICE_API_KEY_FALLBACK;
+    else process.env.VENICE_API_KEY_FALLBACK = originalFallback;
+  }
+});
+
+test('auth rejection falls back to the wallet token when no distinct fallback key exists', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const originalFallback = process.env.VENICE_API_KEY_FALLBACK;
+  const originalWallet = process.env.X_SIGN_IN_WITH_X;
+  // Fallback key equals the active key, so the wallet token is the next
+  // credential to try — the X-SIGN-IN-WITH_X path gets the same retry.
+  process.env.VENICE_API_KEY = 'primary-key';
+  process.env.VENICE_API_KEY_FALLBACK = 'primary-key';
+  process.env.X_SIGN_IN_WITH_X = 'wallet-token';
+
+  const seen: Array<{ authorization: string | null; xSignInWithX: string | null }> = [];
+  let fetchCalls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    fetchCalls++;
+    const headers = new Headers((init?.headers ?? {}) as Record<string, string>);
+    seen.push({
+      authorization: headers.get('authorization'),
+      xSignInWithX: headers.get('x-sign-in-with-x'),
+    });
+    return fetchCalls === 1 ? jsonError(401) : jsonOk({ ok: true });
+  }) as typeof fetch;
+
+  try {
+    clearLastRequestAuth();
+    const result = await apiRequest<{ ok: boolean }>('/models', { method: 'GET', retries: 0 });
+    assert.deepEqual(result, { ok: true });
+    assert.equal(fetchCalls, 2, 'exactly one retry with the wallet credential');
+    assert.deepStrictEqual(seen, [
+      { authorization: 'Bearer primary-key', xSignInWithX: null },
+      { authorization: null, xSignInWithX: 'wallet-token' },
+    ]);
+    const auth = getLastRequestAuth();
+    assert.equal(auth?.credential, 'fallback');
+    assert.equal(auth?.kind, 'sign-in-with-x');
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearLastRequestAuth();
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+    if (originalFallback === undefined) delete process.env.VENICE_API_KEY_FALLBACK;
+    else process.env.VENICE_API_KEY_FALLBACK = originalFallback;
+    if (originalWallet === undefined) delete process.env.X_SIGN_IN_WITH_X;
+    else process.env.X_SIGN_IN_WITH_X = originalWallet;
+  }
+});
+
+test('fetchWithAuthFallback retries with the wallet token when the key is rejected', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const originalFallback = process.env.VENICE_API_KEY_FALLBACK;
+  const originalWallet = process.env.X_SIGN_IN_WITH_X;
+  process.env.VENICE_API_KEY = 'primary-key';
+  process.env.VENICE_API_KEY_FALLBACK = 'primary-key';
+  process.env.X_SIGN_IN_WITH_X = 'wallet-token';
+
+  const seen: Array<{ authorization: string | null; xSignInWithX: string | null }> = [];
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    const headers = new Headers((init?.headers ?? {}) as Record<string, string>);
+    seen.push({
+      authorization: headers.get('authorization'),
+      xSignInWithX: headers.get('x-sign-in-with-x'),
+    });
+    return calls === 1 ? jsonError(401) : jsonOk({ ok: true });
+  }) as typeof fetch;
+
+  try {
+    clearLastRequestAuth();
+    const response = await fetchWithAuthFallback('https://api.venice.ai/api/v1/audio/speech', {
+      method: 'POST',
+    });
+    assert.equal(response.status, 200);
+    assert.equal(calls, 2);
+    assert.deepStrictEqual(seen, [
+      { authorization: 'Bearer primary-key', xSignInWithX: null },
+      { authorization: null, xSignInWithX: 'wallet-token' },
+    ]);
+    const auth = getLastRequestAuth();
+    assert.equal(auth?.credential, 'fallback');
+    assert.equal(auth?.kind, 'sign-in-with-x');
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearLastRequestAuth();
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+    if (originalFallback === undefined) delete process.env.VENICE_API_KEY_FALLBACK;
+    else process.env.VENICE_API_KEY_FALLBACK = originalFallback;
+    if (originalWallet === undefined) delete process.env.X_SIGN_IN_WITH_X;
+    else process.env.X_SIGN_IN_WITH_X = originalWallet;
+  }
+});
+
+test('validateApiKey probes the API with exactly the given key and reports rejection', async () => {
+  const originalFetch = globalThis.fetch;
+  let seenAuthorization: string | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    const headers = new Headers((init?.headers ?? {}) as Record<string, string>);
+    seenAuthorization = headers.get('authorization');
+    return jsonError(401, {});
+  }) as typeof fetch;
+  try {
+    const result = await validateApiKey('new-key');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 401);
+    assert.equal(seenAuthorization, 'Bearer new-key', 'the probe must send exactly the key under test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('validateApiKey tests wallet tokens with the X-Sign-In-With-X header', async () => {
+  const originalFetch = globalThis.fetch;
+  let seenHeader: string | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    const headers = new Headers((init?.headers ?? {}) as Record<string, string>);
+    seenHeader = headers.get('x-sign-in-with-x');
+    return jsonOk({ canConsume: true });
+  }) as typeof fetch;
+  try {
+    const result = await validateApiKey({ kind: 'sign-in-with-x', value: 'wallet-token' });
+    assert.equal(result.ok, true);
+    assert.equal(seenHeader, 'wallet-token');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('validateApiKey accepts a valid key and surfaces network failures', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () => jsonOk({ canConsume: true })) as typeof fetch;
+    const ok = await validateApiKey('good-key');
+    assert.equal(ok.ok, true);
+
+    globalThis.fetch = (async () => {
+      throw new Error('network down');
+    }) as typeof fetch;
+    const failed = await validateApiKey('good-key');
+    assert.equal(failed.ok, false);
+    assert.match(failed.message ?? '', /network down/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('apiRequest records which credential served a successful request', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const originalFallback = process.env.VENICE_API_KEY_FALLBACK;
+  process.env.VENICE_API_KEY = 'primary-key';
+  process.env.VENICE_API_KEY_FALLBACK = 'fallback-key';
+
+  let fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls++;
+    return fetchCalls === 1 ? jsonError(401) : jsonOk({ ok: true });
+  }) as typeof fetch;
+
+  try {
+    clearLastRequestAuth();
+    // Primary serves the request.
+    globalThis.fetch = (async () => jsonOk({ ok: true })) as typeof fetch;
+    await apiRequest<{ ok: boolean }>('/models', { method: 'GET', retries: 0 });
+    const primaryAuth = getLastRequestAuth();
+    assert.equal(primaryAuth?.credential, 'primary');
+    assert.equal(primaryAuth?.kind, 'api-key');
+
+    // Rejected primary -> fallback key serves it.
+    fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return fetchCalls === 1 ? jsonError(401) : jsonOk({ ok: true });
+    }) as typeof fetch;
+    await apiRequest<{ ok: boolean }>('/models', { method: 'GET', retries: 0 });
+    const fallbackAuth = getLastRequestAuth();
+    assert.equal(fallbackAuth?.credential, 'fallback');
+    assert.equal(fallbackAuth?.kind, 'api-key');
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearLastRequestAuth();
     if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
     else process.env.VENICE_API_KEY = originalApiKey;
     if (originalFallback === undefined) delete process.env.VENICE_API_KEY_FALLBACK;

@@ -128,6 +128,8 @@ export function toStreamJson(
         type: 'assistant.error',
         data: { message: event.message, ...(event.code ? { code: event.code } : {}) },
       };
+    case 'auth_fallback_used':
+      return { ...base, type: 'auth.fallback_used', data: { kind: event.kind } };
     case 'tool_requested':
       return {
         ...base,

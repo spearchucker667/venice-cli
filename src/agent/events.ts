@@ -18,6 +18,7 @@ export type AgentEvent =
   | { type: 'assistant_reasoning'; timestamp: string; eventId: string; turnId: string; content?: string }
   | { type: 'assistant_complete'; timestamp: string; eventId: string; turnId: string; content: string }
   | { type: 'assistant_error'; timestamp: string; eventId: string; turnId: string; message: string; code?: string }
+  | { type: 'auth_fallback_used'; timestamp: string; eventId: string; turnId: string; kind: 'api-key' | 'sign-in-with-x' }
   | { type: 'tool_requested'; timestamp: string; eventId: string; toolCallId?: string; toolName: string; input: unknown }
   | { type: 'approval_requested'; timestamp: string; eventId: string; toolName: string; risk: string }
   | { type: 'approval_granted'; timestamp: string; eventId: string; toolName: string; scope: string }

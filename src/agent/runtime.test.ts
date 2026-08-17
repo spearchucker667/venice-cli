@@ -18,6 +18,7 @@ import type { ModelResponse } from './model-client.js';
 import type { AgentMessage, AgentState, SubagentResult } from './types.js';
 import { McpManager } from '../mcp/manager.js';
 import { ModelCatalog } from './model-catalog.js';
+import { recordRequestAuth, clearLastRequestAuth } from '../lib/transport.js';
 import { enterPlanModeTool, writePlanTool, exitPlanModeTool } from '../tools/agent-meta/plan.js';
 import type { ApprovalDecision } from './permissions.js';
 import type { ModelProfile } from './model-profile.js';
@@ -1502,6 +1503,57 @@ describe('AgentRuntime', () => {
     await runtime.run();
 
     assert.strictEqual(eventBus.events.filter((e) => e.type === 'balance_remaining').length, 0);
+  });
+
+  it('emits auth_fallback_used when the model call was served by the fallback credential', async () => {
+    class FallbackServedClient extends MockModelClient {
+      async complete(messages: AgentMessage[], tools: ToolDefinition[] = []): Promise<ModelResponse> {
+        recordRequestAuth({ credential: 'fallback', kind: 'api-key', at: Date.now() });
+        return super.complete(messages, tools);
+      }
+    }
+    const eventBus = new EventBus();
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'x',
+      approvalMode: 'auto',
+      maxTurns: 5,
+      autoValidate: false,
+      modelClient: new FallbackServedClient([{ content: 'done', finishReason: 'stop' }]),
+      eventBus,
+      toolRegistry: new ToolRegistry(),
+    });
+
+    try {
+      await runtime.run();
+      const fallbackEvents = eventBus.events.filter((e) => e.type === 'auth_fallback_used');
+      assert.strictEqual(fallbackEvents.length, 1, 'one auth_fallback_used per fallback-served model call');
+      assert.strictEqual((fallbackEvents[0] as { kind?: string }).kind, 'api-key');
+    } finally {
+      clearLastRequestAuth();
+    }
+  });
+
+  it('does not emit auth_fallback_used when the primary credential served the call', async () => {
+    const eventBus = new EventBus();
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'x',
+      approvalMode: 'auto',
+      maxTurns: 5,
+      autoValidate: false,
+      modelClient: new MockModelClient([{ content: 'done', finishReason: 'stop' }]),
+      eventBus,
+      toolRegistry: new ToolRegistry(),
+    });
+
+    try {
+      recordRequestAuth({ credential: 'primary', kind: 'api-key', at: Date.now() });
+      await runtime.run();
+      assert.strictEqual(eventBus.events.filter((e) => e.type === 'auth_fallback_used').length, 0);
+    } finally {
+      clearLastRequestAuth();
+    }
   });
 
   it('surfaces model-discovery failures via model_catalog_failed instead of silently (P2)', async () => {

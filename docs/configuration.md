@@ -75,22 +75,42 @@ The bare `venice` agent can set credentials without leaving the session:
   to the transcript); Escape cancels.
 - `/config fallback-api-key <key>` — set the secondary key (same masked prompt
   when the value is omitted).
+- `/config rotate-api-key <key>` — **replace** the primary key only after it
+  passes a live validation probe against `api.venice.ai` (a cheap,
+  auth-required request that never falls back to another credential). If the
+  new key is rejected, nothing is persisted and the current key stays active.
+  With no value, the new key is collected via the masked prompt.
+- `/config test` — probe the **active** credential (API key or wallet token)
+  against `api.venice.ai` and report whether it is accepted.
 - `/config clear-api-key` / `/config clear-fallback-api-key` — remove a key.
 - `/config` — hub showing masked auth status and the source of the active key.
 - `/status` — shows the masked active credential and its source
-  (`environment` vs `config` vs `config (fallback)`).
+  (`environment` vs `config` vs `config (fallback)`), plus which credential
+  (primary vs fallback) actually served the most recent request.
+
+When the agent's own model call is served by the fallback credential, the TUI
+prints a notice — `⚠ Primary credential rejected — response served by fallback
+API key` — so a failing primary key is never silent.
 
 ### Fallback behavior
 
 1. **Resolution**: when no primary key is configured, the fallback key is used
    as the active credential.
 2. **Retry**: when a request is rejected with 401/403, it is re-issued once
-   with the fallback key before the auth error surfaces. This covers the
+   with a fallback credential before the auth error surfaces. This covers the
    main `apiRequest` path (chat, models, search) and the direct-fetch media
    endpoints (image upscale, TTS, voice cloning, transcription, video
    retrieve, document parsing).
-3. **Guard**: the retry never fires when the fallback key equals the active
-   credential.
+3. **Credential order**: an API-key request falls back to the configured
+   fallback key when one differs from the active key, otherwise to the wallet
+   token (`signInWithX` / `X_SIGN_IN_WITH_X`) when one is set — so the
+   X-SIGN-IN-WITH-X auth path gets the same retry treatment as the key path.
+   A rejected wallet-token request falls back to the API key when one is
+   configured. The reverse is never automatic: an API key is never replaced
+   by a wallet credential at resolution time, because x402 wallet auth
+   spends wallet credits.
+4. **Guard**: the retry never fires when the only other credential equals the
+   active credential.
 
 ### Environment variables
 

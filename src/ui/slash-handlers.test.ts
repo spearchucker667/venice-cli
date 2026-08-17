@@ -2,8 +2,23 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { handleSlashCommand, SLASH_HANDLERS, type SlashHandlerContext } from './slash-handlers.js';
 import { SLASH_COMMANDS, getSlashCommandBase } from './slash-commands.js';
+import { recordRequestAuth, clearLastRequestAuth } from '../lib/transport.js';
 import type { TuiMessage } from './types.js';
 import type { AgentRuntime } from '../agent/runtime.js';
+
+function jsonOk(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function jsonError(status: number): Response {
+  return new Response(JSON.stringify({ error: { message: 'rejected' } }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 describe('handleSlashCommand', () => {
   const makeContext = () => {
@@ -404,5 +419,120 @@ describe('handleSlashCommand', () => {
     const content = messages().map((m) => m.content).join('\n');
     assert.ok(content.includes('Auth:'), 'reports the active credential');
     assert.ok(content.includes('Approval Mode:'), 'keeps the existing status fields');
+    assert.ok(content.includes('Last request credential:'), 'reports the last serving credential');
+  });
+
+  it('reports the fallback credential in /status when a request was retried', async () => {
+    const { context, messages } = makeContext();
+    recordRequestAuth({ credential: 'fallback', kind: 'api-key', at: Date.now() });
+    try {
+      await handleSlashCommand('status', '', context);
+      const content = messages().map((m) => m.content).join('\n');
+      assert.ok(content.includes('fallback credential'), 'names the fallback credential');
+      assert.ok(content.includes('API key'), 'names the credential kind');
+    } finally {
+      clearLastRequestAuth();
+    }
+  });
+
+  it('rotates the primary key only after live validation succeeds', async () => {
+    const originalFetch = globalThis.fetch;
+    const writes: Array<[string, string]> = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).setConfigKey = (key, value) => { writes.push([key, value]); };
+
+    globalThis.fetch = (async () => jsonOk({ canConsume: true })) as typeof fetch;
+    try {
+      await handleSlashCommand('config', 'rotate-api-key sk-new-key-1234567890', context);
+      assert.deepStrictEqual(writes, [['api_key', 'sk-new-key-1234567890']]);
+      const content = messages().map((m) => m.content).join('\n');
+      assert.ok(content.includes('validated against the API'), 'mentions the validation');
+      assert.ok(!content.includes('sk-new-key-1234567890'), 'the raw key must never be echoed');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not persist a new key when live validation rejects it', async () => {
+    const originalFetch = globalThis.fetch;
+    const writes: Array<[string, string]> = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).setConfigKey = (key, value) => { writes.push([key, value]); };
+
+    globalThis.fetch = (async () => jsonError(401)) as typeof fetch;
+    try {
+      await handleSlashCommand('config', 'rotate-api-key sk-bad-key-1234567890', context);
+      assert.deepStrictEqual(writes, [], 'a rejected key must not be persisted');
+      const content = messages().map((m) => m.content).join('\n');
+      assert.ok(content.includes('Rotation cancelled'), 'explains the rejection');
+      assert.ok(content.includes('HTTP 401'), 'reports the rejection status');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('collects the new key via the hidden prompt when rotating without a value', async () => {
+    const originalFetch = globalThis.fetch;
+    const writes: Array<[string, string]> = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).setConfigKey = (key, value) => { writes.push([key, value]); };
+    (context as SlashHandlerContext).requestSecret = async ({ title }) => {
+      assert.ok(/rotate/i.test(title), 'labels the rotation prompt');
+      return 'sk-prompted-new-key-1234567890';
+    };
+
+    globalThis.fetch = (async () => jsonOk({ canConsume: true })) as typeof fetch;
+    try {
+      await handleSlashCommand('config', 'rotate-api-key', context);
+      assert.deepStrictEqual(writes, [['api_key', 'sk-prompted-new-key-1234567890']]);
+      const content = messages().map((m) => m.content).join('\n');
+      assert.ok(!content.includes('sk-prompted-new-key-1234567890'), 'the raw key must never be echoed');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('cancelling the rotation prompt leaves the key unchanged', async () => {
+    const originalFetch = globalThis.fetch;
+    const writes: Array<[string, string]> = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).setConfigKey = (key, value) => { writes.push([key, value]); };
+    (context as SlashHandlerContext).requestSecret = async () => undefined;
+
+    globalThis.fetch = (async () => jsonOk({ canConsume: true })) as typeof fetch;
+    try {
+      await handleSlashCommand('config', 'rotate-api-key', context);
+      assert.deepStrictEqual(writes, []);
+      assert.ok(messages().some((m) => m.content.includes('Cancelled — primary API key unchanged')));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('reports an accepted active credential via /config test', async () => {
+    const originalFetch = globalThis.fetch;
+    const { context, messages } = makeContext();
+    globalThis.fetch = (async () => jsonOk({ canConsume: true })) as typeof fetch;
+    try {
+      await handleSlashCommand('config', 'test', context);
+      const content = messages().map((m) => m.content).join('\n');
+      assert.ok(content.includes('Active credential OK'), 'confirms the credential is accepted');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('reports a rejected active credential via /config test with the HTTP status', async () => {
+    const originalFetch = globalThis.fetch;
+    const { context, messages } = makeContext();
+    globalThis.fetch = (async () => jsonError(401)) as typeof fetch;
+    try {
+      await handleSlashCommand('config', 'test', context);
+      const content = messages().map((m) => m.content).join('\n');
+      assert.ok(content.includes('Active credential rejected'), 'surfaces the rejection');
+      assert.ok(content.includes('HTTP 401'), 'reports the rejection status');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

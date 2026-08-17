@@ -16,6 +16,7 @@ import type { ToolContext } from '../tools/types.js';
 import type { ApprovalMode } from '../agent/permissions.js';
 import type { ModelProfile } from '../agent/model-profile.js';
 import type { ConfigKey } from '../lib/config.js';
+import { validateApiKey, getLastRequestAuth } from '../lib/transport.js';
 
 function formatSessionAsMarkdown(state: AgentState): string {
   const lines: string[] = [];
@@ -137,6 +138,14 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
     ];
     if (config.fallback_api_key && config.fallback_api_key !== activeKey) {
       lines.push(`Fallback Key: ${m.maskSecretValue(config.fallback_api_key)} (config)`);
+    }
+    const lastAuth = getLastRequestAuth();
+    if (lastAuth) {
+      const credential = lastAuth.credential === 'fallback' ? 'fallback credential (retried after rejection)' : 'primary credential';
+      const kind = lastAuth.kind === 'api-key' ? 'API key' : 'wallet token (X-Sign-In-With-X)';
+      lines.push(`Last request credential: ${kind} (${credential})`);
+    } else {
+      lines.push('Last request credential: none recorded yet');
     }
     if (state) {
       lines.push(`Session ID: ${state.sessionId}`);
@@ -472,6 +481,65 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
         return;
       }
 
+      case 'rotate-api-key':
+      case 'rotate': {
+        let key = value;
+        if (!key) {
+          if (!requestSecret) {
+            addEvent(
+              'Usage: /config rotate-api-key <key> — replace the primary Venice API key after validating it\n' +
+              'The new key is verified with a live request to api.venice.ai before it is saved; your current key stays active if validation fails.'
+            );
+            return;
+          }
+          key = (await requestSecret({
+            title: 'Rotate primary Venice API key',
+            prompt: 'Paste the NEW API key (get one at https://venice.ai/settings/api). It will be validated against the API before being saved.',
+          }))?.trim() ?? '';
+          if (!key) {
+            addEvent('Cancelled — primary API key unchanged.');
+            return;
+          }
+        }
+        addEvent('Validating the new API key against api.venice.ai…');
+        const validation = await validateApiKey(key);
+        if (!validation.ok) {
+          const detail = validation.status ? `HTTP ${validation.status}` : validation.message;
+          addEvent(
+            `Rotation cancelled — the new key was rejected by the Venice API (${detail}).\n` +
+            'Your current API key is unchanged.'
+          );
+          return;
+        }
+        writeKey('api_key', key);
+        addEvent(`Primary API key rotated (${m.maskSecretValue(key)}) — validated against the API and used from the next request.`);
+        return;
+      }
+
+      case 'test':
+      case 'check': {
+        const auth = m.getVeniceAuth();
+        if (!auth) {
+          addEvent(
+            'No credential configured. Set one with /config api-key <key>, /config fallback-api-key <key>, or /config rotate-api-key <key>.'
+          );
+          return;
+        }
+        addEvent('Checking the active credential against api.venice.ai…');
+        const result = await validateApiKey(auth);
+        if (result.ok) {
+          addEvent(
+            `Active credential OK — ${auth.kind === 'api-key' ? 'API key' : 'wallet token'} (${m.maskSecretValue(auth.value)}) accepted by the Venice API.`
+          );
+        } else {
+          addEvent(
+            `Active credential rejected — ${result.status ? `HTTP ${result.status}` : result.message}.\n` +
+            'Consider rotating it with /config rotate-api-key <key>.'
+          );
+        }
+        return;
+      }
+
       case 'clear-api-key':
         removeKey('api_key');
         addEvent('Primary API key removed from config. Set one with /config api-key <key>.');
@@ -508,7 +576,8 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
           `  Output Format: ${config.output_format || 'pretty'}\n` +
           `  Theme: ${config.theme || 'default'}\n` +
           `  Media Safe Mode: ${config.media_safe_mode === false ? 'disabled' : 'enabled'}\n\n` +
-          `Set your keys here: /config api-key <key>  ·  /config fallback-api-key <key>\n` +
+          `Set your keys here: /config api-key <key>  ·  /config fallback-api-key <key>  ·  /config rotate-api-key <key>\n` +
+          `Verify the active credential: /config test\n` +
           `(or use 'venice config' for non-secret base CLI settings.)`
         );
         return;
@@ -518,7 +587,7 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
         addEvent(
           `Unknown /config subcommand: ${sub}\n` +
           `Available: /config (overview), /config api-key <key>, /config fallback-api-key <key>,\n` +
-          `/config clear-api-key, /config clear-fallback-api-key`
+          `/config rotate-api-key <key>, /config test, /config clear-api-key, /config clear-fallback-api-key`
         );
     }
   },

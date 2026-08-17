@@ -119,6 +119,9 @@ export class AgentRenderer {
       case 'balance_remaining':
         out(c.dim(`🔋 x402 credits remaining: $${event.balanceUsd.toFixed(4)}`));
         break;
+      case 'auth_fallback_used':
+        out(c.yellow(`⚠ Primary credential rejected — response served by ${event.kind === 'api-key' ? 'fallback API key' : 'wallet token'}`));
+        break;
     }
   }
 }
