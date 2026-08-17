@@ -39,6 +39,13 @@ Or run without installing globally:
 npx @spearchucker667/venice-cli
 ```
 
+Or with Bun:
+
+```bash
+bun add -g @spearchucker667/venice-cli
+bunx @spearchucker667/venice-cli
+```
+
 To install directly from the GitHub source (builds the CLI from TypeScript via the `prepare` lifecycle):
 
 ```bash
@@ -47,7 +54,7 @@ npm install -g github:spearchucker667/venice-cli
 
 Requirements:
 
-- Node.js 18 or newer for the published CLI
+- Node.js 18 or newer for the published CLI (or Bun 1.3.0+)
 - a Venice API key for authenticated operations
 
 ## Quick start
@@ -547,6 +554,15 @@ Run the development entry point:
 ```bash
 npm run dev -- agent
 npm run dev -- chat "Hello"
+```
+
+Using Bun:
+
+```bash
+bun install
+bun run build
+bun run dev:bun -- chat "Hello"
+bun run start:bun -- --help
 ```
 
 The published package declares Node.js 18+ support. The repository's current ESLint 10 development toolchain requires a newer Node 20 release, so contributors should use a current supported Node 20+ environment for development and CI parity.
