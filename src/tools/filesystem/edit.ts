@@ -37,7 +37,6 @@ export const editFileTool: AgentTool<{ path: string; oldString: string; newStrin
         newContent,
       });
       fs.writeFileSync(absolute, newContent, 'utf-8');
-      workspace.markChangedResolved({ absolute, relative, root });
       return success(
         { replacements: content.split(input.oldString).length - 1 },
         { affectedFiles: [toFileRef(root, relative)] }

@@ -40,7 +40,7 @@ export const generateImageTool: AgentTool<
         height: input.height,
         count: input.count,
         format: input.format ?? outputFormat,
-      });
+      }, context.signal);
 
       const bytes = Buffer.from(images[0], 'base64');
       const artifact = inspectImageArtifact(input.output, bytes);
@@ -86,7 +86,7 @@ export const editImageTool: AgentTool<
         aspectRatio: input.aspectRatio,
         enhancePrompt: input.enhancePrompt,
         safeMode: input.safeMode,
-      });
+      }, context.signal);
       inspectImageArtifact(input.output, bytes);
       const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, bytes, context.workspace?.additionalRoots);
       return success(relative, { affectedFiles: [relative] });
@@ -120,7 +120,7 @@ export const upscaleImageTool: AgentTool<
         return failure('INVALID_SCALE', 'Scale must be either 2 or 4');
       }
       const source = resolveWorkspaceFile(context.workspaceRoot, input.image, context.workspace?.additionalRoots);
-      const result = await upscaleImage(source.absolute, { model: input.model, scale });
+      const result = await upscaleImage(source.absolute, { model: input.model, scale }, context.signal);
       inspectImageArtifact(input.output, result.bytes);
       const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, result.bytes, context.workspace?.additionalRoots);
       return success(relative, { affectedFiles: [relative] });
@@ -148,7 +148,7 @@ export const removeBackgroundTool: AgentTool<
   async execute(input, context) {
     try {
       const source = resolveWorkspaceFile(context.workspaceRoot, input.image, context.workspace?.additionalRoots);
-      const bytes = await removeImageBackground(source.absolute);
+      const bytes = await removeImageBackground(source.absolute, context.signal);
       inspectImageArtifact(input.output, bytes);
       const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, bytes, context.workspace?.additionalRoots);
       return success(relative, { affectedFiles: [relative] });

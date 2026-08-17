@@ -6,15 +6,38 @@
 
 import {
   trackUsage,
-  getVeniceAuth,
-  requireAuth,
-  applyVeniceAuth,
   DEFAULT_MODELS,
   getConfigValue,
 } from './config.js';
 import { startSpinner, stopSpinner } from './output.js';
-import { getVersion } from './version.js';
 import { Readable } from 'stream';
+import {
+  apiRequest,
+  DEFAULT_TIMEOUT_MS,
+  getHeaders,
+  MAX_RETRIES,
+  parseUsageHeaders,
+  readResponseBodyWithLimit,
+  readSseFrames,
+  RETRY_DELAY_MS,
+  sleep,
+  VENICE_API,
+  VeniceApiError,
+  isImageContentType,
+  looksLikeImageBytes,
+} from './transport.js';
+import type { UsageHeaders } from './transport.js';
+
+// Re-export the transport surface so existing callers keep importing from api.js.
+export {
+  apiRequest,
+  getHeaders,
+  parseUsageHeaders,
+  VeniceApiError,
+  isImageContentType,
+  looksLikeImageBytes,
+} from './transport.js';
+export type { UsageHeaders, VeniceErrorContract } from './transport.js';
 import type {
   Message,
   ToolDefinition,
@@ -38,493 +61,14 @@ import {
   MAX_VOICE_SAMPLE_BYTES,
   MAX_VIDEO_DOWNLOAD_BYTES,
   assertFileSizeWithinLimit,
-  formatBytes,
   mimeTypeFromPath,
   streamResponseToFile,
 } from './media.js';
 
-// Never allow production environment variables to redirect bearer credentials.
-const VENICE_API =
-  process.env.NODE_ENV === 'test' && process.env.VENICE_API_BASE_URL
-    ? process.env.VENICE_API_BASE_URL
-    : 'https://api.venice.ai/api/v1';
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 1000;
-const MAX_RETRY_AFTER_SECONDS = 300;
-const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes default timeout
+// Endpoint-specific limits; shared transport constants live in transport.ts.
 const DOCUMENT_PARSE_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_DOCUMENT_PARSE_RESPONSE_BYTES = 50 * 1024 * 1024;
 const MAX_VIDEO_STATUS_BYTES = 1024 * 1024;
-
-/**
- * Structured error contract (P2): every API error carries an actionable
- * `cause`/`fix`/`debug` triple so callers and the UI can show recovery steps
- * instead of a bare message. `describe()` renders it as plain text.
- */
-export interface VeniceErrorContract {
-  cause?: string;
-  fix?: string;
-  debug?: string;
-}
-
-export class VeniceApiError extends Error implements VeniceErrorContract {
-  public retryAfter?: number;
-  public cause?: string;
-  public fix?: string;
-  public debug?: string;
-  
-  constructor(
-    message: string,
-    public statusCode?: number,
-    public code?: string,
-    retryAfter?: number
-  ) {
-    super(message);
-    this.name = 'VeniceApiError';
-    this.retryAfter = retryAfter;
-  }
-
-  static fromResponse(response: Response, body: string): VeniceApiError {
-    const status = response.status;
-    const retryAfter = parseRetryAfterHeader(response.headers.get('retry-after'));
-    
-    let error: VeniceApiError;
-    try {
-      const json = JSON.parse(body);
-      const message = json.error?.message || json.message || body;
-      const code = json.error?.code;
-      error = new VeniceApiError(message, status, code, retryAfter);
-    } catch {
-      error = new VeniceApiError(body || `HTTP ${status}`, status, undefined, retryAfter);
-    }
-    applyStatusContract(error, status, retryAfter);
-    return error;
-  }
-
-  isRetryable(): boolean {
-    // Retry on network errors and 5xx
-    if (!this.statusCode) return true;
-    return this.statusCode >= 500 && this.statusCode < 600;
-  }
-
-  isAuthError(): boolean {
-    return this.statusCode === 401 || this.statusCode === 403;
-  }
-
-  isRateLimited(): boolean {
-    return this.statusCode === 429;
-  }
-
-  /** Render the cause/fix/debug contract as a single human-readable string. */
-  describe(): string {
-    const parts = [
-      this.cause ? `Cause: ${this.cause}` : undefined,
-      this.fix ? `Fix: ${this.fix}` : undefined,
-      this.debug ? `Debug: ${this.debug}` : undefined,
-    ].filter((part): part is string => Boolean(part));
-    return parts.length ? parts.join('\n') : this.message;
-  }
-}
-
-/** Attach the cause/fix/debug contract for well-known HTTP statuses. */
-function applyStatusContract(error: VeniceApiError, status: number, retryAfter?: number): void {
-  if (status === 401 || status === 403) {
-    error.cause = 'Authentication was rejected by the Venice API';
-    error.fix =
-      'Check VENICE_API_KEY / X_SIGN_IN_WITH_X, or run `venice config set api_key`; the credential may be invalid or expired.';
-    error.debug = `HTTP ${status}`;
-  } else if (status === 429) {
-    error.cause = 'The Venice API rate limit was exceeded';
-    error.fix = 'Wait for the retry-after window (or slow the request rate) and retry.';
-    error.debug = retryAfter ? `Retry-After: ${retryAfter}s` : 'No Retry-After header';
-  } else if (status >= 500 && status < 600) {
-    error.cause = 'The Venice API reported a server error';
-    error.fix = 'Retry after a short delay; if it persists, check https://status.venice.ai.';
-    error.debug = `HTTP ${status}`;
-  }
-}
-
-/**
- * Shared auth header builder. Every direct API path must route through this so
- * api-key and x402 authentication behave identically (VC-KIMI-016).
- */
-export function getHeaders(
-  authenticated = true,
-  contentType = 'application/json'
-): Record<string, string> {
-  const headers: Record<string, string> = {
-    'User-Agent': `venice-cli/${getVersion()}`,
-  };
-  if (contentType) {
-    headers['Content-Type'] = contentType;
-  }
-  if (authenticated) {
-    const auth = getVeniceAuth();
-    if (!auth) {
-      // Trigger the throw for missing auth
-      requireAuth();
-    } else {
-      applyVeniceAuth(headers, auth);
-    }
-  }
-  return headers;
-}
-
-/**
- * Usage/billing headers reported by the API on inference responses.
- *
- * `X-Balance-Remaining` is only present for x402 wallet auth and carries the
- * USDC credit balance left after the request. `X-RateLimit-*` headers are set
- * when a rate-limit response is returned; parsing them defensively means any
- * future success-path rate info also surfaces (VC-AUD-037 parity).
- */
-export interface UsageHeaders {
-  /** Remaining x402 credit balance in USD after this request (x402 auth only). */
-  balanceRemainingUsd?: number;
-  /** Per-minute request cap information when the API includes it. */
-  rateLimit?: {
-    /** Per-minute request cap for the caller's tier. */
-    limit?: number;
-    /** Requests remaining in the current 60-second window. */
-    remaining?: number;
-    /** Unix timestamp (seconds) when the current window resets. */
-    reset?: number;
-  };
-}
-
-/** Parse X-Balance-Remaining / X-RateLimit-* into a typed UsageHeaders object. */
-export function parseUsageHeaders(headers: Headers): UsageHeaders {
-  const parsed: UsageHeaders = {};
-
-  const balance = headers.get('x-balance-remaining');
-  if (balance) {
-    const value = Number(balance);
-    if (Number.isFinite(value)) parsed.balanceRemainingUsd = value;
-  }
-
-  const limit = headers.get('x-ratelimit-limit');
-  const remaining = headers.get('x-ratelimit-remaining');
-  const reset = headers.get('x-ratelimit-reset');
-  if (limit !== null || remaining !== null || reset !== null) {
-    const rateLimit: NonNullable<UsageHeaders['rateLimit']> = {};
-    if (limit !== null) {
-      const value = Number(limit);
-      if (Number.isFinite(value)) rateLimit.limit = value;
-    }
-    if (remaining !== null) {
-      const value = Number(remaining);
-      if (Number.isFinite(value)) rateLimit.remaining = value;
-    }
-    if (reset !== null) {
-      const value = Number(reset);
-      if (Number.isFinite(value)) rateLimit.reset = value;
-    }
-    parsed.rateLimit = rateLimit;
-  }
-
-  return parsed;
-}
-
-function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  if (trimmed === '') return undefined;
-
-  // delta-seconds (integer or decimal)
-  if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
-    const seconds = parseFloat(trimmed);
-    if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-    return Math.min(Math.ceil(seconds), MAX_RETRY_AFTER_SECONDS);
-  }
-
-  // HTTP-date form
-  const date = Date.parse(trimmed);
-  if (!Number.isNaN(date)) {
-    const deltaSeconds = Math.ceil((date - Date.now()) / 1000);
-    return Math.max(0, Math.min(deltaSeconds, MAX_RETRY_AFTER_SECONDS));
-  }
-
-  return undefined;
-}
-
-async function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function checkOnline(): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    
-    await fetch('https://api.venice.ai/api/v1/models', {
-      method: 'HEAD',
-      signal: controller.signal,
-    });
-    
-    clearTimeout(timeout);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-type ApiRequestOptions = {
-  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-  body?: unknown;
-  retries?: number;
-  showSpinner?: boolean;
-  spinnerText?: string;
-  timeoutMs?: number;
-  additionalHeaders?: Record<string, string>;
-  authenticated?: boolean;
-  onHeaders?: (headers: Headers) => void;
-  /**
-   * External cancellation signal (e.g. a foreground turn abort). Composed with
-   * the per-attempt idle/timeout controller so an abort also terminates the
-   * in-flight fetch, not just the response reader (VCL-002). An external abort
-   * propagates as an AbortError and is never retried or misreported as a
-   * timeout.
-   */
-  signal?: AbortSignal;
-  /**
-   * HTTP statuses that are parsed as a normal JSON body instead of throwing
-   * (e.g. the x402 top-up probe expects a 402 with payment requirements).
-   * Only meaningful for JSON responses; binary paths always throw.
-   */
-  allowedStatuses?: number[];
-} & (
-  | {
-      responseType?: 'json';
-      stream?: boolean;
-      maxResponseBytes?: never;
-      responseLabel?: never;
-      expectedContentType?: never;
-    }
-  | {
-      responseType: 'arrayBuffer';
-      stream?: false;
-      maxResponseBytes: number;
-      responseLabel: string;
-      expectedContentType: 'image';
-    }
-);
-
-class BinaryResponseValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'BinaryResponseValidationError';
-  }
-}
-
-export async function apiRequest<T>(
-  endpoint: string,
-  options: ApiRequestOptions = {}
-): Promise<T> {
-  const {
-    method = 'GET',
-    body,
-    stream = false,
-    retries = MAX_RETRIES,
-    showSpinner = true,
-    spinnerText = 'Processing...',
-    timeoutMs = DEFAULT_TIMEOUT_MS,
-    additionalHeaders = {},
-    onHeaders,
-    authenticated = true,
-    signal,
-  } = options;
-
-  const binaryOptions = options.responseType === 'arrayBuffer' ? options : undefined;
-  if (binaryOptions && stream) {
-    throw new BinaryResponseValidationError(
-      'Binary responses cannot be returned as an unvalidated stream.'
-    );
-  }
-  if (
-    binaryOptions &&
-    (!Number.isSafeInteger(binaryOptions.maxResponseBytes) || binaryOptions.maxResponseBytes <= 0)
-  ) {
-    throw new BinaryResponseValidationError(
-      'Binary responses require a positive, finite byte limit.'
-    );
-  }
-
-  let spinner = showSpinner && !stream ? startSpinner(spinnerText) : null;
-  let lastError: VeniceApiError | null = null;
-
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    // Compose the external cancellation signal with the per-attempt timeout
-    // controller so an aborted turn also terminates the in-flight request
-    // during the header phase (VCL-002).
-    const onExternalAbort = () => controller.abort();
-    signal?.addEventListener('abort', onExternalAbort);
-
-    try {
-      const response = await fetch(`${VENICE_API}${endpoint}`, {
-        method,
-        headers: { ...getHeaders(authenticated), ...additionalHeaders },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-
-      if (!response.ok && !(options.allowedStatuses?.includes(response.status))) {
-        let errorBody: string;
-        if (binaryOptions) {
-          const errorBytes = await readResponseBodyWithLimit(
-            response,
-            binaryOptions.maxResponseBytes,
-            `${binaryOptions.responseLabel} API error response`
-          );
-          errorBody = errorBytes.toString('utf-8');
-        } else {
-          // VC-AUD-037: Bounded error reader
-          const errorBytes = await readResponseBodyWithLimit(
-            response,
-            1024 * 1024, // 1MB max for error bodies
-            'API error response'
-          );
-          clearTimeout(timeoutId);
-          errorBody = errorBytes.toString('utf-8');
-        }
-        throw VeniceApiError.fromResponse(response, errorBody);
-      }
-
-      onHeaders?.(response.headers);
-
-      if (stream) {
-        clearTimeout(timeoutId);
-        if (spinner) {
-          stopSpinner(true);
-          spinner = null;
-        }
-        return response as unknown as T;
-      }
-
-      if (binaryOptions) {
-        const bytes = await readResponseBodyWithLimit(
-          response,
-          binaryOptions.maxResponseBytes,
-          binaryOptions.responseLabel
-        );
-        if (bytes.length === 0) {
-          throw new BinaryResponseValidationError(
-            `${binaryOptions.responseLabel} response was empty.`
-          );
-        }
-
-        const contentType = response.headers.get('content-type');
-        if (binaryOptions.expectedContentType === 'image' && !isImageContentType(contentType)) {
-          throw new BinaryResponseValidationError(
-            `${binaryOptions.responseLabel} did not return an image Content-Type ` +
-            `(received: ${contentType || 'missing'}).`
-          );
-        }
-        if (binaryOptions.expectedContentType === 'image' && !looksLikeImageBytes(bytes)) {
-          throw new BinaryResponseValidationError(
-            `${binaryOptions.responseLabel} did not contain a supported PNG, JPEG, or WebP image.`
-          );
-        }
-
-        clearTimeout(timeoutId);
-        if (spinner) {
-          stopSpinner(true);
-          spinner = null;
-        }
-        return Uint8Array.from(bytes).buffer as T;
-      }
-
-      // VC-AUD-037: Bounded JSON reader
-      const jsonBytes = await readResponseBodyWithLimit(
-        response,
-        50 * 1024 * 1024, // 50MB max for JSON
-        'API JSON response'
-      );
-      clearTimeout(timeoutId);
-      if (spinner) {
-        stopSpinner(true);
-        spinner = null;
-      }
-      return JSON.parse(jsonBytes.toString('utf-8')) as T;
-    } catch (error) {
-      clearTimeout(timeoutId);
-
-      if (error instanceof Error && error.name === 'AbortError') {
-        // A foreground turn abort must propagate immediately and never be
-        // retried or misreported as an idle timeout (VCL-002).
-        if (signal?.aborted) {
-          throw error;
-        }
-        if (spinner) stopSpinner(false, 'Request timed out');
-        throw new Error(
-          `Request timed out after ${timeoutMs / 1000} seconds.\n` +
-          'The server may be overloaded. Please try again later.'
-        );
-      }
-
-      if (error instanceof BinaryResponseValidationError) {
-        if (spinner) stopSpinner(false);
-        throw error;
-      }
-
-      if (error instanceof VeniceApiError) {
-        lastError = error;
-
-        if (error.isAuthError()) {
-          if (spinner) stopSpinner(false, 'Authentication failed');
-          throw new Error(
-            'Authentication failed. Please check your API key.\n' +
-            'Update with: venice config set api_key'
-          );
-        }
-
-        // VC-AUD-038: Network Jitter + Retry-After backoff logic
-        const jitter = Math.random() * 200; // up to 200ms jitter
-        const backoff = (RETRY_DELAY_MS * Math.pow(2, attempt)) + jitter;
-
-        // VC-KIMI-032: the final attempt must not sleep before failing.
-        if (error.isRateLimited() && attempt < retries) {
-          const waitTime = error.retryAfter ? (error.retryAfter * 1000) + jitter : backoff;
-          if (spinner) spinner.text = `Rate limited, waiting... (attempt ${attempt + 1}/${retries + 1})`;
-          await sleep(waitTime);
-          continue;
-        }
-
-        if (error.isRetryable() && attempt < retries) {
-          if (spinner) spinner.text = `Retrying... (attempt ${attempt + 2}/${retries + 1})`;
-          await sleep(backoff);
-          continue;
-        }
-      } else if (error instanceof Error) {
-        if (attempt < retries) {
-          const online = await checkOnline();
-          if (!online) {
-            if (spinner) stopSpinner(false, 'Network error');
-            throw new Error(
-              'Unable to connect to Venice API.\n' +
-              'Please check your internet connection.'
-            );
-          }
-          if (spinner) spinner.text = `Connection error, retrying... (attempt ${attempt + 2}/${retries + 1})`;
-          const jitter = Math.random() * 200;
-          const backoff = (RETRY_DELAY_MS * Math.pow(2, attempt)) + jitter;
-          await sleep(backoff);
-          continue;
-        }
-        lastError = new VeniceApiError(error.message);
-      }
-
-      if (spinner) stopSpinner(false);
-      throw lastError || error;
-    } finally {
-      signal?.removeEventListener('abort', onExternalAbort);
-    }
-  }
-
-  if (spinner) stopSpinner(false);
-  throw lastError || new Error('Request failed after retries');
-}
 
 /** Reasoning configuration for supported models (Venice `reasoning` field). */
 export interface ReasoningConfig {
@@ -732,23 +276,12 @@ export async function* chatCompletionStream(
 
   const usageHeaders = parseUsageHeaders(response.headers);
 
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('No response body');
-
-  const onAbort = () => {
-    reader.cancel().catch(() => {});
-  };
-  options.abortSignal?.addEventListener('abort', onAbort);
-
-  const decoder = new TextDecoder();
-  let buffer = '';
   let totalUsage: any = null;
   let completionId: string | undefined;
   // R2-010: SSE events are assembled as complete frames (blank-line delimited,
   // CRLF-tolerant, multi-line `data:` lines joined with `\n`), and a clean
   // protocol terminal ([DONE] or a finish_reason) is tracked explicitly so
   // unexpected EOF is reported as truncation instead of fake success.
-  let frameData: string[] = [];
   let sawTerminalMarker = false;
 
   // Decode one complete SSE data payload. Returns the deltas to yield; throws
@@ -816,85 +349,29 @@ export async function* chatCompletionStream(
     return out;
   };
 
-  try {
-    while (true) {
-      let timeoutId: NodeJS.Timeout | undefined;
-      const readWithTimeout = () => {
-        return new Promise<any>((resolve, reject) => {
-          timeoutId = setTimeout(() => reject(new Error('Stream idle timeout: server stopped sending data')), 30000);
-          reader.read().then(resolve).catch(reject);
-        }).finally(() => clearTimeout(timeoutId));
-      };
-
-      const { done, value } = await readWithTimeout();
-      if (done) {
-        // Flush the tail: servers may omit the trailing blank line / newline.
-        // Process any remaining complete lines as a final unterminated frame.
-        buffer += decoder.decode();
-        if (buffer.trim()) {
-          for (const rawLine of buffer.split('\n')) {
-            let line = rawLine;
-            if (line.endsWith('\r')) line = line.slice(0, -1);
-            if (line.startsWith('data:')) frameData.push(line.slice(5).replace(/^ /, ''));
-          }
-          buffer = '';
-        }
-        if (frameData.length > 0) {
-          const data = frameData.join('\n');
-          frameData = [];
-          for (const item of decodeFrame(data)) {
-            yield { ...item, done: false, completionId };
-          }
-        }
-        // R2-010: EOF without a clean terminal marker is truncation, never
-        // success. An intentional abort cancels the reader instead.
-        if (!sawTerminalMarker && !options.abortSignal?.aborted) {
-          throw new VeniceApiError(
-            'Stream ended before a completion marker (connection truncated)',
-            502,
-            'STREAM_TRUNCATED'
-          );
-        }
-        if (totalUsage) {
-          trackUsage({
-            command: 'chat',
-            model: options.model || DEFAULT_MODELS.chat,
-            ...totalUsage,
-          });
-        }
-        yield { done: true, usage: totalUsage, completionId, usageHeaders };
-        return;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      let newlineIndex: number;
-      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-        let line = buffer.slice(0, newlineIndex);
-        buffer = buffer.slice(newlineIndex + 1);
-        if (line.endsWith('\r')) line = line.slice(0, -1); // CRLF framing
-
-        if (line === '') {
-          // Blank line terminates the current SSE event frame.
-          if (frameData.length > 0) {
-            const data = frameData.join('\n');
-            frameData = [];
-            for (const item of decodeFrame(data)) {
-              yield { ...item, done: false, completionId };
-            }
-          }
-          continue;
-        }
-        if (line.startsWith(':')) continue; // SSE comments/heartbeats
-        if (line.startsWith('data:')) {
-          frameData.push(line.slice(5).replace(/^ /, ''));
-        }
-        // Other SSE fields (event:, id:, retry:) are ignored.
-      }
+  for await (const frame of readSseFrames(response, options.abortSignal)) {
+    for (const item of decodeFrame(frame)) {
+      yield { ...item, done: false, completionId };
     }
-  } finally {
-    options.abortSignal?.removeEventListener('abort', onAbort);
-    reader.cancel().catch(() => {});
   }
+
+  // R2-010: EOF without a clean terminal marker is truncation, never success.
+  // An intentional abort cancels the reader (inside readSseFrames) instead.
+  if (!sawTerminalMarker && !options.abortSignal?.aborted) {
+    throw new VeniceApiError(
+      'Stream ended before a completion marker (connection truncated)',
+      502,
+      'STREAM_TRUNCATED'
+    );
+  }
+  if (totalUsage) {
+    trackUsage({
+      command: 'chat',
+      model: options.model || DEFAULT_MODELS.chat,
+      ...totalUsage,
+    });
+  }
+  yield { done: true, usage: totalUsage, completionId, usageHeaders };
 }
 
 // Image generation (Venice-native endpoint)
@@ -949,7 +426,8 @@ export function buildImageGenerationBody(
 
 export async function generateImage(
   prompt: string,
-  options: Omit<ImageGenerationOptions, 'output'> = {}
+  options: Omit<ImageGenerationOptions, 'output'> = {},
+  signal?: AbortSignal
 ): Promise<string[]> {
   const body = buildImageGenerationBody(prompt, options);
 
@@ -960,6 +438,7 @@ export async function generateImage(
     method: 'POST',
     body,
     spinnerText: 'Generating image...',
+    signal,
   });
 
   trackUsage({
@@ -991,7 +470,8 @@ async function readImageAsBase64(imagePath: string): Promise<string> {
 export async function editImage(
   imagePath: string,
   prompt: string,
-  options: ImageEditOptions = {}
+  options: ImageEditOptions = {},
+  signal?: AbortSignal
 ): Promise<ArrayBuffer> {
   const body: Record<string, unknown> = {
     image: await readImageAsBase64(imagePath),
@@ -1015,6 +495,7 @@ export async function editImage(
     responseLabel: 'Edited image',
     expectedContentType: 'image',
     spinnerText: 'Editing image...',
+    signal,
   });
 
   trackUsage({ command: 'image edit', model: options.model || 'default' });
@@ -1060,7 +541,7 @@ export async function multiEditImage(
 }
 
 // Remove the background from a local image
-export async function removeImageBackground(imagePath: string): Promise<ArrayBuffer> {
+export async function removeImageBackground(imagePath: string, signal?: AbortSignal): Promise<ArrayBuffer> {
   const response = await apiRequest<ArrayBuffer>('/image/background-remove', {
     method: 'POST',
     body: { image: await readImageAsBase64(imagePath) },
@@ -1069,6 +550,7 @@ export async function removeImageBackground(imagePath: string): Promise<ArrayBuf
     responseLabel: 'Background removal image',
     expectedContentType: 'image',
     spinnerText: 'Removing background...',
+    signal,
   });
 
   trackUsage({ command: 'image bg-remove', model: 'background-remove' });
@@ -1089,75 +571,14 @@ export type UpscaleImageResult = {
   contentType: string;
 };
 
-export function isImageContentType(contentType: string | null | undefined): boolean {
-  const type = (contentType || '').split(';')[0].trim().toLowerCase();
-  return type.startsWith('image/');
-}
-
-export function looksLikeImageBytes(bytes: Buffer): boolean {
-  if (bytes.length < 12) return false;
-  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true;
-  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true;
-  if (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') {
-    return true;
-  }
-  return false;
-}
-
-async function readResponseBodyWithLimit(
-  response: Response,
-  maxBytes: number,
-  label: string
-): Promise<Buffer> {
-  const contentLengthHeader = response.headers.get('content-length');
-  if (contentLengthHeader) {
-    const contentLength = Number(contentLengthHeader);
-    if (Number.isFinite(contentLength) && contentLength >= 0 && contentLength > maxBytes) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new BinaryResponseValidationError(
-        `${label} is too large (${formatBytes(contentLength)}). ` +
-        `Maximum allowed size is ${formatBytes(maxBytes)}.`
-      );
-    }
-  }
-
-  if (!response.body) {
-    return Buffer.alloc(0);
-  }
-
-  const reader = response.body.getReader();
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      totalBytes += value.byteLength;
-      if (totalBytes > maxBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new BinaryResponseValidationError(
-          `${label} exceeded the limit of ${formatBytes(maxBytes)}.`
-        );
-      }
-
-      chunks.push(Buffer.from(value));
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  return Buffer.concat(chunks, totalBytes);
-}
-
 // Image upscale
 export async function upscaleImage(
   imagePath: string,
   options: {
     model?: string;
     scale?: number;
-  } = {}
+  } = {},
+  signal?: AbortSignal
 ): Promise<UpscaleImageResult> {
   const fs = await import('fs');
 
@@ -1177,6 +598,8 @@ export async function upscaleImage(
   const spinner = startSpinner('Upscaling image...');
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
   try {
     const response = await fetch(`${VENICE_API}/image/upscale`, {
@@ -1221,6 +644,7 @@ export async function upscaleImage(
   } catch (error) {
     if (spinner) stopSpinner(false);
     if (error instanceof Error && error.name === 'AbortError') {
+      if (signal?.aborted) throw error;
       throw new Error('Image upscale request timed out. Please try again later.');
     }
     throw error;
@@ -1239,7 +663,8 @@ export async function textToSpeech(
     speed?: number;
     temperature?: number;
     streaming?: boolean;
-  } = {}
+  } = {},
+  signal?: AbortSignal
 ): Promise<{ audio: ArrayBuffer; contentType?: string }> {
   const body: Record<string, unknown> = {
     model: options.model || DEFAULT_MODELS.tts,
@@ -1261,6 +686,8 @@ export async function textToSpeech(
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
   try {
     const response = await fetch(`${VENICE_API}/audio/speech`, {
@@ -1310,6 +737,7 @@ export async function textToSpeech(
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
+      if (signal?.aborted) throw error;
       throw new Error('Text-to-speech request timed out. Please try with shorter text.');
     }
     throw error;
@@ -1390,7 +818,8 @@ export async function transcribe(
     model?: string;
     language?: string;
     timestamps?: boolean;
-  } = {}
+  } = {},
+  signal?: AbortSignal
 ): Promise<{
   text: string;
   duration?: number;
@@ -1459,6 +888,8 @@ export async function transcribe(
   const spinner = startSpinner('Transcribing...');
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
   try {
     const requestInit: RequestInit & { duplex: 'half' } = {
@@ -1505,6 +936,7 @@ export async function transcribe(
     clearTimeout(timeoutId);
     if (spinner) stopSpinner(false);
     if (error instanceof Error && error.name === 'AbortError') {
+      if (signal?.aborted) throw error;
       throw new Error('Transcription request timed out. Try a shorter audio file.');
     }
     throw error;
@@ -1789,6 +1221,7 @@ async function retrieveVideoResponse(
     statusOnly?: boolean;
     outputPath?: string;
     maxBytes?: number;
+    signal?: AbortSignal;
   } = {}
 ): Promise<VideoRetrieveResult> {
   const spinner = startSpinner(options.spinnerText || 'Checking video status...');
@@ -1803,6 +1236,8 @@ async function retrieveVideoResponse(
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    if (options.signal?.aborted) controller.abort();
+    else options.signal?.addEventListener('abort', () => controller.abort(), { once: true });
     let fileWriteStarted = false;
     let requestTimeoutActive = true;
     const clearRequestTimeout = () => {
@@ -1877,12 +1312,14 @@ async function retrieveVideoResponse(
       if (retryable) {
         await sleep(RETRY_DELAY_MS * (attempt + 1) * (
           error instanceof VeniceApiError && error.isRateLimited() ? 2 : 1
-        ));
+        ), options.signal);
+        if (options.signal?.aborted) throw new Error('The operation was aborted');
         continue;
       }
 
       if (spinner) stopSpinner(false);
       if (error instanceof Error && error.name === 'AbortError') {
+        if (options.signal?.aborted) throw error;
         throw new Error('Video retrieve request timed out. Please try again later.');
       }
       throw error;
@@ -1984,7 +1421,8 @@ export async function queueVideoGeneration(
     duration?: string;
     aspectRatio?: string;
     imageUrl?: string;
-  } = {}
+  } = {},
+  signal?: AbortSignal
 ): Promise<{ queue_id: string; model: string }> {
   const body: Record<string, unknown> = {
     model: options.model || DEFAULT_MODELS.textToVideo,
@@ -2005,6 +1443,7 @@ export async function queueVideoGeneration(
     method: 'POST',
     body,
     spinnerText: 'Queueing video generation...',
+    signal,
   });
 
   trackUsage({
@@ -2065,12 +1504,14 @@ export async function quoteVideoGeneration(options: {
 
 export async function completeVideo(
   queueId: string,
-  model: string
+  model: string,
+  signal?: AbortSignal
 ): Promise<{ success: boolean }> {
   return apiRequest('/video/complete', {
     method: 'POST',
     body: { queue_id: queueId, model },
     spinnerText: 'Cleaning up video...',
+    signal,
   });
 }
 
@@ -2087,11 +1528,13 @@ export async function transcribeVideo(
 // Video generation - check status / retrieve result
 export async function getVideoStatus(
   queueId: string,
-  model: string
+  model: string,
+  signal?: AbortSignal
 ): Promise<VideoStatusResult> {
   const result = await retrieveVideoResponse(queueId, model, {
     spinnerText: 'Checking video status...',
     statusOnly: true,
+    signal,
   });
 
   if (result.kind === 'video') {
@@ -2108,12 +1551,14 @@ export async function retrieveVideo(
   options: {
     outputPath?: string;
     maxBytes?: number;
-  } = {}
+  } = {},
+  signal?: AbortSignal
 ): Promise<VideoRetrieveResult> {
   return retrieveVideoResponse(queueId, model, {
     spinnerText: 'Retrieving video...',
     outputPath: options.outputPath,
     maxBytes: options.maxBytes,
+    signal,
   });
 }
 
@@ -2180,7 +1625,8 @@ export async function quoteAudioGeneration(
 // Music and sound effects - queue a generation job
 export async function queueAudioGeneration(
   prompt: string,
-  options: AudioGenerationOptions
+  options: AudioGenerationOptions,
+  signal?: AbortSignal
 ): Promise<{ model: string; queue_id: string; status: string }> {
   const response = await apiRequest<{
     model: string;
@@ -2190,6 +1636,7 @@ export async function queueAudioGeneration(
     method: 'POST',
     body: audioGenerationBody(prompt, options),
     spinnerText: 'Queueing audio generation...',
+    signal,
   });
 
   trackUsage({ command: 'music', model: options.model });
@@ -2199,13 +1646,15 @@ export async function queueAudioGeneration(
 // Music and sound effects - retrieve processing status or completed binary audio
 export async function retrieveGeneratedAudio(
   queueId: string,
-  model: string
+  model: string,
+  signal?: AbortSignal
 ): Promise<AudioRetrieveResult> {
   const response = await apiRequest<Response>('/audio/retrieve', {
     method: 'POST',
     body: { queue_id: queueId, model, delete_media_on_completion: false },
     stream: true,
     showSpinner: false,
+    signal,
   });
   const contentType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() || '';
 
@@ -2238,12 +1687,14 @@ export async function retrieveGeneratedAudio(
 // Music and sound effects - clean up stored media after a successful download
 export async function completeAudioGeneration(
   queueId: string,
-  model: string
+  model: string,
+  signal?: AbortSignal
 ): Promise<{ success: boolean }> {
   return apiRequest('/audio/complete', {
     method: 'POST',
     body: { queue_id: queueId, model },
     spinnerText: 'Cleaning up generated audio...',
+    signal,
   });
 }
 
@@ -2307,7 +1758,8 @@ export async function dedicatedWebSearch(
   options: {
     limit?: number;
     provider?: 'brave' | 'google';
-  } = {}
+  } = {},
+  signal?: AbortSignal
 ): Promise<DedicatedWebSearchResponse> {
   return apiRequest<DedicatedWebSearchResponse>('/augment/search', {
     method: 'POST',
@@ -2317,6 +1769,7 @@ export async function dedicatedWebSearch(
       search_provider: options.provider ?? 'brave',
     },
     spinnerText: 'Searching the web...',
+    signal,
   });
 }
 
@@ -2327,11 +1780,12 @@ export type WebScrapeResponse = {
 };
 
 // Scrape a public page to Markdown without model inference
-export async function scrapeWebPage(url: string): Promise<WebScrapeResponse> {
+export async function scrapeWebPage(url: string, signal?: AbortSignal): Promise<WebScrapeResponse> {
   return apiRequest<WebScrapeResponse>('/augment/scrape', {
     method: 'POST',
     body: { url },
     spinnerText: 'Scraping page...',
+    signal,
   });
 }
 

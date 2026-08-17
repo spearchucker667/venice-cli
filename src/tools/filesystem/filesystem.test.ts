@@ -68,6 +68,18 @@ describe('filesystem tools', () => {
     assert.ok((result.data as string[]).includes('src/app.ts'));
   });
 
+  it('write_file leaves disk unmutated when checkpoint persistence fails (R2-013)', async () => {
+    const failingManager = {
+      record() {
+        throw new Error('checkpoint disk full');
+      },
+    } as unknown as CheckpointManager;
+    const ctx = { ...context(true), checkpointManager: failingManager };
+    const result = await writeFileTool.execute({ path: 'unwritten.ts', content: 'should not land\n' }, ctx);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(fs.existsSync(path.join(tmp, 'unwritten.ts')), false);
+  });
+
   it('write_file creates a file', async () => {
     const result = await writeFileTool.execute({ path: 'new.ts', content: 'const x = 1;\n' }, context(true));
     assert.strictEqual(result.ok, true);

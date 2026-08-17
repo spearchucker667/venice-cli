@@ -166,6 +166,24 @@ describe('spawn_agent tool', () => {
     }
   });
 
+  it('forwards the parent turn signal to the subagent runner (R2-005)', async () => {
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const tool = createSpawnAgentTool({
+      runSubagent: async (options) => {
+        receivedSignal = options.signal;
+        return {
+          finalMessage: 'Done',
+          state: { status: 'complete', changedFiles: [], toolHistory: [] },
+        };
+      },
+    });
+
+    const result = await tool.execute({ task: 'inspect' }, { ...context, signal: controller.signal });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(receivedSignal, controller.signal);
+  });
+
   it('allows write mode and reports affected files', async () => {
     let receivedMode = '';
     const tool = createSpawnAgentTool({

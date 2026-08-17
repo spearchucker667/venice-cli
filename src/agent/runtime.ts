@@ -22,6 +22,7 @@ import type { ModelResponse } from './model-client.js';
 import { ModelCatalog } from './model-catalog.js';
 import { loadInstructions, instructionsForPaths, type ResolvedInstructions } from './instructions.js';
 import { WorkspaceManager, detectGitRoot } from './workspace.js';
+import { ChangeLedger } from './change-ledger.js';
 import { getDefaultModel, loadProjectConfig, type ProjectAgentConfig } from '../lib/config.js';
 import type { AgentDefinition } from './agents.js';
 import type { RuntimeModeState } from './mode.js';
@@ -132,6 +133,7 @@ export class AgentRuntime {
   private readonly mcpManager?: McpManager;
   private checkpointsField: CheckpointManager;
   private workspace: WorkspaceManager;
+  private ledger: ChangeLedger;
   private readonly skills: SkillRegistry;
   private readonly redactor = new SecretRedactor(collectKnownSecrets());
   /** Loaded project instructions; scoped nested rules are injected per-path. */
@@ -226,6 +228,7 @@ export class AgentRuntime {
     this.signal = options.signal;
     this.mcpManager = options.mcpManager;
     this.workspace = new WorkspaceManager(this.state.workspaceRoot, this.state.workspace.additionalRoots);
+    this.ledger = new ChangeLedger(this.workspace.primaryRoot);
     this.checkpointsField = options.checkpointManager || new CheckpointManager(
       this.state.sessionId,
       this.state.workspaceRoot,
@@ -574,7 +577,7 @@ export class AgentRuntime {
       subagentReports: [],
     };
     this.context.resetSession();
-    this.workspace.replaceChangedFiles([]);
+    this.ledger.replace([]);
     this.permissions.clearGrants();
     this.permissions.setMode(permissionMode);
     this.checkpointsField = new CheckpointManager(
@@ -715,8 +718,8 @@ export class AgentRuntime {
       this.state.workspaceRoot,
       this.state.workspace.additionalRoots
     );
-    this.workspace.replaceChangedFiles(this.state.changedFiles);
-    this.state.changedFiles = this.workspace.changedFiles;
+    this.ledger.replace(this.state.changedFiles);
+    this.state.changedFiles = this.ledger.refs;
 
     this.checkpointsField = new CheckpointManager(
       this.state.sessionId,
@@ -941,10 +944,12 @@ export class AgentRuntime {
         // before the next model request (VC-KIMI-053).
         if (this.injectedMessages.length > 0) {
           const injected = this.injectedMessages.shift()!;
-          // The injected message owns its attachment (or clears the prior one)
-          // so a mid-turn injection never loses or leaks @file context
-          // (VCL-005/006).
-          this.setTurnFileContext(injected.attachment);
+          // An injected message owns its attachment; an attachment-less
+          // injection must NOT erase the owning turn's @file context (R2-006).
+          // Only a message that actually carries an attachment changes it.
+          if (injected.attachment !== undefined) {
+            this.setTurnFileContext(injected.attachment);
+          }
           this.addUserMessage(injected.text);
         }
 
@@ -1480,7 +1485,7 @@ export class AgentRuntime {
     let changedFilesThisCall = false;
     if (result.metadata?.affectedFiles) {
       for (const file of result.metadata.affectedFiles) {
-        this.workspace.markChanged(file);
+        this.ledger.mark(file);
         changedFilesThisCall = true;
         this.emit({
           type: 'file_changed',
@@ -1493,7 +1498,7 @@ export class AgentRuntime {
       }
     }
 
-    this.state.changedFiles = this.workspace.changedFiles;
+    this.state.changedFiles = this.ledger.refs;
 
     // Tool lifecycle effects (plan, skills, todos, subagent reports, user
     // questions) are declared by the tool and applied by one interpreter, so

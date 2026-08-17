@@ -44,6 +44,8 @@ export interface RunSubagentOptions {
   maxTurns: number;
   mode: SubagentMode;
   checkpointManager?: CheckpointManager;
+  /** Parent turn's cancellation signal; aborts the subagent's run (R2-005). */
+  signal?: AbortSignal;
 }
 
 export interface RunSubagentResult {
@@ -96,6 +98,7 @@ export function createSpawnAgentTool(deps: SpawnAgentToolDeps = {}): AgentTool<S
           maxTurns,
           mode,
           checkpointManager: context.checkpointManager,
+          signal: context.signal,
         });
       } catch (error) {
         return failure('SUBAGENT_RUN_ERROR', error instanceof Error ? error.message : String(error));
@@ -183,6 +186,7 @@ async function runSubagentRuntime(options: RunSubagentOptions): Promise<RunSubag
     autoValidate: false,
     toolRegistry,
     checkpointManager: options.checkpointManager,
+    signal: options.signal,
   });
 
   const result = await runtime.run();

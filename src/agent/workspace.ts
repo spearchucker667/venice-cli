@@ -40,7 +40,6 @@ export function normalizeFileRef(ref: WorkspaceFileRef | string, primaryRoot: st
 export class WorkspaceManager {
   private readonly root: string;
   private readonly extraRoots: string[];
-  private readonly changed = new Set<string>();
 
   constructor(root: string, additionalRoots: string[] = []) {
     this.root = fs.realpathSync(root);
@@ -73,15 +72,6 @@ export class WorkspaceManager {
     return [this.root, ...this.extraRoots];
   }
 
-  get changedFiles(): WorkspaceFileRef[] {
-    return Array.from(this.changed)
-      .map((key) => {
-        const sep = key.indexOf('\u0000');
-        return { rootId: key.slice(0, sep), relativePath: key.slice(sep + 1) };
-      })
-      .sort((a, b) => (a.rootId === b.rootId ? a.relativePath.localeCompare(b.relativePath) : a.rootId.localeCompare(b.rootId)));
-  }
-
   resolve(inputPath: string): { absolute: string; relative: string; root: string } {
     if (path.isAbsolute(inputPath)) {
       const root = this.matchingRoot(inputPath);
@@ -109,28 +99,6 @@ export class WorkspaceManager {
     if (!this.isInsideWorkspace(absolutePath)) {
       throw new Error(`Path outside workspace: ${absolutePath}`);
     }
-  }
-
-  /**
-   * Record a file as changed. Accepts a bare relative path (interpreted as
-   * primary-root-relative, e.g. legacy persisted state) or a root-aware ref.
-   */
-  markChanged(ref: WorkspaceFileRef | string): void {
-    const normalized = normalizeFileRef(ref, this.root);
-    this.changed.add(`${normalized.rootId}\u0000${normalized.relativePath}`);
-  }
-
-  /**
-   * Record a resolved path as changed, preserving its owning root so the
-   * persisted list stays unambiguous across additional roots (VCL-R3-004).
-   */
-  markChangedResolved(resolved: { absolute: string; relative: string; root: string }): void {
-    this.markChanged(toFileRef(resolved.root, resolved.relative));
-  }
-
-  replaceChangedFiles(refs: (WorkspaceFileRef | string)[]): void {
-    this.changed.clear();
-    for (const ref of refs) this.markChanged(ref);
   }
 
   private matchingRoot(absolutePath: string): string | undefined {

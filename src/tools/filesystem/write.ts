@@ -25,8 +25,9 @@ export const writeFileTool: AgentTool<{ path: string; content: string }, { bytes
     try {
       const { absolute, relative, root } = workspace.resolve(input.path);
       const originalContent = fs.existsSync(absolute) ? fs.readFileSync(absolute, 'utf-8') : null;
-      fs.mkdirSync(path.dirname(absolute), { recursive: true });
-      fs.writeFileSync(absolute, input.content, 'utf-8');
+      // Canonical order (R2-013): record the checkpoint before mutating so a
+      // checkpoint persistence failure never leaves the disk changed without a
+      // recoverable snapshot. Matches edit_file and apply_patch.
       context.checkpointManager?.record({
         operation: 'write_file',
         relativePath: relative,
@@ -34,7 +35,8 @@ export const writeFileTool: AgentTool<{ path: string; content: string }, { bytes
         originalContent,
         newContent: input.content,
       });
-      workspace.markChangedResolved({ absolute, relative, root });
+      fs.mkdirSync(path.dirname(absolute), { recursive: true });
+      fs.writeFileSync(absolute, input.content, 'utf-8');
       return success(
         { bytesWritten: Buffer.byteLength(input.content, 'utf-8') },
         { affectedFiles: [toFileRef(root, relative)] }

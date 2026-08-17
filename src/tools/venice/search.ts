@@ -19,12 +19,12 @@ export const webSearchTool: AgentTool<{ query: string; limit?: number; provider?
     required: ['query'],
   },
   risk: 'network',
-  async execute(input, _context) {
+  async execute(input, context) {
     try {
       const result = await dedicatedWebSearch(input.query, {
         limit: input.limit,
         provider: input.provider,
-      });
+      }, context.signal);
       return success(result);
     } catch (error) {
       return failure('WEB_SEARCH_ERROR', error instanceof Error ? error.message : String(error));
@@ -43,9 +43,9 @@ export const webScrapeTool: AgentTool<{ url: string }, { url: string; content: s
     required: ['url'],
   },
   risk: 'network',
-  async execute(input, _context) {
+  async execute(input, context) {
     try {
-      const result = await scrapeWebPage(input.url);
+      const result = await scrapeWebPage(input.url, context.signal);
       return success(result, { truncated: result.content.length > 50000 });
     } catch (error) {
       return failure('WEB_SCRAPE_ERROR', error instanceof Error ? error.message : String(error));

@@ -26,6 +26,7 @@ import {
   MAX_VIDEO_REFERENCE_IMAGE_BYTES,
   MAX_VIDEO_UPSCALE_BYTES,
 } from '../lib/media.js';
+import { sleep } from '../lib/transport.js';
 import {
   formatSuccess,
   formatError,
@@ -99,7 +100,8 @@ export async function waitForVideoStatus(
   fetchStatus: () => Promise<VideoStatusResult>,
   timeoutMs: number,
   pollIntervalMs = VIDEO_STATUS_POLL_INTERVAL_MS,
-  onPoll?: (status: VideoStatusResult) => void
+  onPoll?: (status: VideoStatusResult) => void,
+  signal?: AbortSignal
 ): Promise<VideoStatusResult> {
   const deadline = Date.now() + timeoutMs;
   const timeoutError = () =>
@@ -134,7 +136,7 @@ export async function waitForVideoStatus(
     if (remainingMs <= 0) {
       throw timeoutError();
     }
-    await new Promise(resolve => setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)));
+    await sleep(Math.min(pollIntervalMs, remainingMs), signal);
     status = await fetchBeforeDeadline();
   }
 

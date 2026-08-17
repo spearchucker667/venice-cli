@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { WorkspaceManager, detectGitRoot } from './workspace.js';
+import { ChangeLedger } from './change-ledger.js';
 
 describe('WorkspaceManager', () => {
   let tmp: string;
@@ -50,15 +51,16 @@ describe('WorkspaceManager', () => {
   });
 
   it('tracks changed files as root-aware refs', () => {
-    workspace.markChanged('src/app.ts');
-    assert.ok(workspace.changedFiles.some((f) => f.relativePath === 'src/app.ts' && f.rootId === workspace.workspaceRoot));
+    const ledger = new ChangeLedger(workspace.workspaceRoot);
+    ledger.mark('src/app.ts');
+    assert.ok(ledger.refs.some((f) => f.relativePath === 'src/app.ts' && f.rootId === workspace.workspaceRoot));
   });
 
   it('replaces changed files when session state is loaded', () => {
-    const workspace = new WorkspaceManager(tmp);
-    workspace.markChanged('old.ts');
-    workspace.replaceChangedFiles(['new.ts']);
-    assert.deepStrictEqual(workspace.changedFiles, [
+    const ledger = new ChangeLedger(workspace.workspaceRoot);
+    ledger.mark('old.ts');
+    ledger.replace(['new.ts']);
+    assert.deepStrictEqual(ledger.refs, [
       { rootId: workspace.workspaceRoot, relativePath: 'new.ts' },
     ]);
   });
@@ -91,15 +93,16 @@ describe('WorkspaceManager additional roots (VC-KIMI-044)', () => {
     const extra = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-extra-')));
     fs.writeFileSync(path.join(extra, 'extra.txt'), 'extra');
     const workspace = new WorkspaceManager(primary, [extra]);
+    const ledger = new ChangeLedger(primary);
 
     const resolved = workspace.resolve(path.join(extra, 'extra.txt'));
-    workspace.markChangedResolved(resolved);
-    assert.ok(workspace.changedFiles.some((f) => f.rootId === extra && f.relativePath === 'extra.txt'));
+    ledger.mark({ rootId: resolved.root, relativePath: resolved.relative });
+    assert.ok(ledger.refs.some((f) => f.rootId === extra && f.relativePath === 'extra.txt'));
 
     const primaryResolved = workspace.resolve('src/app.ts');
-    workspace.markChangedResolved(primaryResolved);
+    ledger.mark({ rootId: primaryResolved.root, relativePath: primaryResolved.relative });
     assert.ok(
-      workspace.changedFiles.some((f) => f.rootId === primary && f.relativePath === 'src/app.ts')
+      ledger.refs.some((f) => f.rootId === primary && f.relativePath === 'src/app.ts')
     );
   });
 });

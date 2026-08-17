@@ -40,11 +40,16 @@ terms rather than invent new ones.
   `.venice/skills/` or `~/.config/venice/skills/`; activating a skill layers
   its body into context.
 - **Changed files** — the root-aware mutation ledger of workspace edits.
+- **Change ledger** — the single source of truth for mutated files
+  (`src/agent/change-ledger.ts`), separate from workspace path safety.
+  `AgentState.changedFiles` is a derived snapshot of the ledger, not a second
+  store kept in lockstep.
 
 ## Safety
 
 - **Workspace boundary** — the realpath + symlink-revalidation authority that
-  confines filesystem mutations to approved roots.
+  confines filesystem mutations to approved roots. It answers *may this path
+  be touched?*; the change ledger answers *what has been touched?*
 - **Permission mode** — `suggest | auto-edit | auto | yolo`, the trust policy
   that gates tool execution.
 - **Approval** — an explicit user grant for a tool or plan exit, distinct
@@ -54,5 +59,8 @@ terms rather than invent new ones.
 
 - **Venice platform** — the upstream inference/media/search surface the CLI
   calls over HTTPS.
+- **Transport** — the shared HTTP mechanics in `src/lib/transport.ts`: auth
+  headers, bounded body reading, retry/backoff/abort, idle timeouts, and SSE
+  frame assembly. Endpoint functions in `api.ts` are thin adapters over it.
 - **MCP server** — a Model Context Protocol stdio server whose tools are
   namespaced `mcp:<server>:<tool>`.

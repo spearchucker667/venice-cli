@@ -116,6 +116,24 @@ describe('CheckpointManager', () => {
     fs.rmSync(shared, { recursive: true, force: true });
   });
 
+  it('rolls back in-memory state when persistence fails (R2-013)', () => {
+    // A storage root that is a regular file makes save() throw on mkdirSync.
+    const fileRoot = path.join(tmp, 'storage-is-a-file');
+    fs.writeFileSync(fileRoot, 'not a directory');
+    const failing = new CheckpointManager('session-fail', workspace, fileRoot);
+    assert.throws(() =>
+      failing.record({
+        operation: 'write_file',
+        relativePath: 'x.txt',
+        originalContent: null,
+        newContent: 'x',
+      })
+    );
+    // The surfaced failure must not leave a half-recorded checkpoint in memory.
+    assert.strictEqual(failing.state().count, 0);
+    assert.strictEqual(failing.state().canUndo, false);
+  });
+
   it('revalidates the target root on undo and refuses stale roots (VCL-R3-003)', async () => {
     const primary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-reval-primary-')));
     const removed = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-reval-removed-')));

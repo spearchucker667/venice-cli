@@ -56,13 +56,25 @@ export class CheckpointManager {
       id: randomUUID(),
       timestamp: new Date().toISOString(),
     };
+    // Snapshot the prior state so a persistence failure can roll back the
+    // in-memory mutation (R2-013): a surfaced failure must leave the manager
+    // consistent with what is actually on disk, not half-recorded.
+    const previousHistory = this.history.slice();
+    const previousIndex = this.index;
     // Discard any redo entries after the current pointer.
     if (this.index < this.history.length - 1) {
       this.history.splice(this.index + 1);
     }
     this.history.push(entry);
     this.index = this.history.length - 1;
-    this.save();
+    try {
+      this.save();
+    } catch (error) {
+      this.history.length = 0;
+      this.history.push(...previousHistory);
+      this.index = previousIndex;
+      throw error;
+    }
   }
 
   async undo(): Promise<CheckpointResult> {

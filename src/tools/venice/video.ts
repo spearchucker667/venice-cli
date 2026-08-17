@@ -59,11 +59,11 @@ export const generateVideoTool: AgentTool<
         model: input.model,
         duration: input.duration,
         aspectRatio: input.aspectRatio,
-      });
+      }, context.signal);
       if (!input.wait) {
         return success({ queueId: queued.queue_id, model: queued.model, status: 'queued' });
       }
-      return await waitAndSaveVideo(context.workspaceRoot, queued.queue_id, queued.model, input.output, input.timeoutMs);
+      return await waitAndSaveVideo(context.workspaceRoot, queued.queue_id, queued.model, input.output, input.timeoutMs, undefined, context.signal);
     } catch (error) {
       return failure('VIDEO_GENERATION_ERROR', error instanceof Error ? error.message : String(error));
     }
@@ -121,11 +121,11 @@ export const imageToVideoTool: AgentTool<
         duration: input.duration,
         aspectRatio: input.aspectRatio,
         imageUrl,
-      });
+      }, context.signal);
       if (!input.wait) {
         return success({ queueId: queued.queue_id, model: queued.model, status: 'queued' });
       }
-      return await waitAndSaveVideo(context.workspaceRoot, queued.queue_id, queued.model, input.output, input.timeoutMs, context.workspace?.additionalRoots);
+      return await waitAndSaveVideo(context.workspaceRoot, queued.queue_id, queued.model, input.output, input.timeoutMs, context.workspace?.additionalRoots, context.signal);
     } catch (error) {
       return failure('IMAGE_TO_VIDEO_ERROR', error instanceof Error ? error.message : String(error));
     }
@@ -138,7 +138,8 @@ async function waitAndSaveVideo(
   model: string,
   outputPath: string | undefined,
   timeoutMs: number | undefined,
-  additionalRoots?: string[]
+  additionalRoots?: string[],
+  signal?: AbortSignal
 ): Promise<ToolResult<VideoToolOutput>> {
   if (!outputPath?.trim()) {
     return failure('MISSING_OUTPUT', 'output is required when wait is true');
@@ -146,8 +147,11 @@ async function waitAndSaveVideo(
 
   const dest = resolveWorkspaceFile(workspaceRoot, outputPath, additionalRoots);
   const status = await waitForVideoStatus(
-    () => getVideoStatus(queueId, model),
-    timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_VIDEO_TIMEOUT_MS
+    () => getVideoStatus(queueId, model, signal),
+    timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_VIDEO_TIMEOUT_MS,
+    undefined,
+    undefined,
+    signal
   );
 
   if (classifyVideoStatus(status.status) === 'failed') {
@@ -157,7 +161,7 @@ async function waitAndSaveVideo(
   const result = await retrieveVideo(queueId, model, {
     outputPath: dest.absolute,
     maxBytes: MAX_VIDEO_DOWNLOAD_BYTES,
-  });
+  }, signal);
 
   if (result.kind === 'status') {
     const downloadUrl = videoUrlFromStatus(result.status);
@@ -171,7 +175,7 @@ async function waitAndSaveVideo(
   }
 
   try {
-    await completeVideo(queueId, model);
+    await completeVideo(queueId, model, signal);
   } catch {
     // Cleanup is best-effort after a successful download.
   }

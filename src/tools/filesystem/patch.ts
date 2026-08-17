@@ -73,7 +73,6 @@ export const applyPatchTool: AgentTool<{ path: string; patch: string }, { applie
         newContent,
       });
       fs.writeFileSync(absolute, newContent, 'utf-8');
-      workspace.markChangedResolved({ absolute, relative, root });
       return success({ applied: true }, { affectedFiles: [toFileRef(root, relative)] });
     } catch (error) {
       return failure('PATCH_ERROR', error instanceof Error ? error.message : String(error));

@@ -1109,6 +1109,59 @@ describe('AgentRuntime', () => {
     assert.deepStrictEqual(secondRequestUsers, ['start', 'injected note']);
   });
 
+  it('does not clear the owning turn attachment on an attachment-less injection (R2-006)', async () => {
+    const registry = new ToolRegistry();
+    registry.register(readFileTool);
+
+    const client = new RecordingModelClient([
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'read_file', arguments: JSON.stringify({ path: 'package.json' }) },
+          },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'after injection', finishReason: 'stop' },
+    ]);
+
+    let runtime: AgentRuntime | undefined;
+    let injected = false;
+    const originalComplete = client.complete.bind(client);
+    client.complete = async (messages: AgentMessage[], tools: ToolDefinition[] = []) => {
+      const result = await originalComplete(messages, tools);
+      if (!injected) {
+        injected = true;
+        runtime?.injectUserMessage('injected note'); // attachment-less
+      }
+      return result;
+    };
+
+    runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Injection preserves attachment',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: client,
+      toolRegistry: registry,
+    });
+    runtime.getContextManager().setModelContextLimit(128000);
+
+    await runtime.sendUserMessage('start', 'MARKER_FROM_TURN_ATTACHMENT');
+
+    // The owning turn's attachment must survive the attachment-less injection
+    // in both model requests, and the injected message must still appear.
+    for (const seen of client.seenMessages) {
+      const text = seen.map((m) => String(m.content)).join('\n');
+      assert.ok(text.includes('MARKER_FROM_TURN_ATTACHMENT'), 'attachment must survive an attachment-less injection');
+    }
+    const secondRequestUsers = client.seenMessages[1]?.filter((m) => m.role === 'user').map((m) => m.content);
+    assert.ok(secondRequestUsers?.some((c) => String(c).includes('injected note')), 'injected note must appear in the second request');
+  });
+
   it('queues an injection that arrives with no active turn (VC-KIMI-053)', () => {
     const runtime = new AgentRuntime({
       workspaceRoot: tmp,

@@ -8,6 +8,7 @@ import { textToSpeech, transcribe, queueAudioGeneration, retrieveGeneratedAudio,
 import { DEFAULT_MODELS } from '../../lib/config.js';
 import { resolveWorkspaceFile, writeWorkspaceBytes } from './io.js';
 import { writeResponseToFile, MAX_AUDIO_DOWNLOAD_BYTES } from '../../lib/media.js';
+import { sleep } from '../../lib/transport.js';
 
 const POLL_INTERVAL_MS = 5000;
 const DEFAULT_AUDIO_TIMEOUT_MS = 10 * 60 * 1000;
@@ -51,7 +52,7 @@ export const textToSpeechTool: AgentTool<
         format: input.format,
         speed: input.speed,
         temperature: input.temperature,
-      });
+      }, context.signal);
       const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, result.audio, context.workspace?.additionalRoots);
       return success(relative, { affectedFiles: [relative] });
     } catch (error) {
@@ -84,7 +85,7 @@ export const transcribeAudioTool: AgentTool<
         model: input.model,
         language: input.language,
         timestamps: input.timestamps,
-      });
+      }, context.signal);
       return success({ text: result.text, duration: result.duration });
     } catch (error) {
       return failure('TRANSCRIBE_ERROR', error instanceof Error ? error.message : String(error));
@@ -142,7 +143,7 @@ export const generateMusicTool: AgentTool<
         durationSeconds: input.duration,
         lyricsPrompt: input.lyricsPrompt,
         forceInstrumental: input.forceInstrumental,
-      });
+      }, context.signal);
 
       if (!input.wait) {
         return success({ queueId: queued.queue_id, model: queued.model, status: 'queued' });
@@ -160,7 +161,7 @@ export const generateMusicTool: AgentTool<
           return failure('TIMEOUT', `Audio generation timed out after ${timeoutMs}ms`);
         }
 
-        const result = await retrieveGeneratedAudio(queued.queue_id, queued.model);
+        const result = await retrieveGeneratedAudio(queued.queue_id, queued.model, context.signal);
         if (result.kind === 'audio') {
           const extension = extensionForContentType(result.contentType);
           let finalOutput = input.output;
@@ -175,7 +176,7 @@ export const generateMusicTool: AgentTool<
           });
 
           try {
-            await completeAudioGeneration(queued.queue_id, queued.model);
+            await completeAudioGeneration(queued.queue_id, queued.model, context.signal);
           } catch {}
 
           return success(
@@ -189,7 +190,7 @@ export const generateMusicTool: AgentTool<
           return failure('GENERATION_FAILED', result.status.error || 'Audio generation failed');
         }
 
-        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+        await sleep(POLL_INTERVAL_MS, context.signal);
       }
     } catch (error) {
       return failure('AUDIO_GENERATION_ERROR', error instanceof Error ? error.message : String(error));
