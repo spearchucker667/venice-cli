@@ -1,3 +1,5 @@
+import { loadConfig } from './config.js';
+
 export class SecretRedactor {
   private patterns: RegExp[] = [
     // Standard basic redaction patterns for API keys, tokens, and secrets
@@ -62,5 +64,13 @@ export function collectKnownSecrets(): string[] {
   if (process.env.VENICE_API_KEY) secrets.push(process.env.VENICE_API_KEY);
   if (process.env.GITHUB_TOKEN) secrets.push(process.env.GITHUB_TOKEN);
   if (process.env.NPM_TOKEN) secrets.push(process.env.NPM_TOKEN);
+  
+  try {
+    const config = loadConfig();
+    if (config.api_key) secrets.push(config.api_key);
+  } catch {
+    // Ignore config loading errors to prevent breaking redactor
+  }
+  
   return secrets.filter(Boolean);
 }
