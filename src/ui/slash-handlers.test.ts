@@ -12,7 +12,7 @@ describe('handleSlashCommand', () => {
     let pickerShown: 'model' | 'session' | undefined = undefined;
     let resumedSessionId: string | undefined = undefined;
     let themeRefreshed = false;
-    const deleted: string[] = [];
+    const deleted: Array<{ id: string; workspace?: string }> = [];
     const messages: TuiMessage[] = [];
     return {
       exited: () => exited,
@@ -39,7 +39,7 @@ describe('handleSlashCommand', () => {
         showSessionPicker: () => { pickerShown = 'session'; },
         resumeSession: async (id: string) => { resumedSessionId = id; },
         listSessions: () => [],
-        deleteSession: (id: string) => { deleted.push(id); return true; },
+        deleteSession: (id: string, workspace?: string) => { deleted.push({ id, workspace }); return true; },
         getRuntime: (): AgentRuntime | undefined => undefined,
       },
     };
@@ -127,7 +127,7 @@ describe('handleSlashCommand', () => {
   it('handles /delete by deleting a saved session (P2)', async () => {
     const { context, messages, deleted } = makeContext();
     await handleSlashCommand('delete', 'session-abc', context);
-    assert.deepStrictEqual(deleted(), ['session-abc']);
+    assert.deepStrictEqual(deleted(), [{ id: 'session-abc', workspace: '/tmp' }]);
     assert.ok(messages().some((m) => m.content.includes('Deleted session session-abc')));
   });
 

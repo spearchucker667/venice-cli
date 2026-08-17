@@ -58,7 +58,7 @@ export interface SlashHandlerContext {
   resumeSession?: (sessionId: string) => void | Promise<void>;
   listSessions?: () => StoredSession[];
   /** Delete a saved session (defaults to SessionManager.delete). */
-  deleteSession?: (sessionId: string) => boolean;
+  deleteSession?: (sessionId: string, expectedWorkspace?: string) => boolean;
   mcpManager?: McpManager;
   getRuntime?: () => AgentRuntime | undefined;
 }
@@ -173,7 +173,7 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
     }
   },
 
-  async delete(args, { addEvent, getRuntime, deleteSession }) {
+  async delete(args, { addEvent, getRuntime, workspaceRoot, deleteSession }) {
     const sessionId = args.trim();
     if (!sessionId) {
       addEvent('Usage: /delete <session-id>. See /sessions for ids.');
@@ -184,7 +184,11 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
       addEvent(`Refusing to delete the active session (${sessionId}). Finish or fork it first.`);
       return;
     }
-    const deleted = deleteSession ? deleteSession(sessionId) : new SessionManager().delete(sessionId);
+    // Deletion is scoped to the current workspace: a session id from another
+    // workspace must never be removable from here (VCL-037).
+    const deleted = deleteSession
+      ? deleteSession(sessionId, workspaceRoot)
+      : new SessionManager().delete(sessionId, workspaceRoot);
     addEvent(deleted ? `Deleted session ${sessionId}.` : `No session found with id ${sessionId}.`);
   },
 

@@ -884,6 +884,47 @@ describe('AgentRuntime', () => {
     assert.ok(result.finalMessage.includes('Reached maximum turn limit'));
   });
 
+  it('injects scoped nested rules only into matching tool results (VCL-017)', async () => {
+    const scope = 'vcl017scope';
+    fs.mkdirSync(path.join(tmp, '.venice', 'rules'), { recursive: true });
+    fs.mkdirSync(path.join(tmp, scope), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.venice', 'rules', `${scope}.md`), 'VCL017_SCOPED_MARKER\n');
+    fs.writeFileSync(path.join(tmp, scope, 'a.txt'), 'A\n');
+    fs.writeFileSync(path.join(tmp, 'outside.txt'), 'B\n');
+
+    const registry = new ToolRegistry();
+    registry.register(readFileTool);
+
+    const client = new RecordingModelClient([
+      {
+        content: '',
+        toolCalls: [{ id: 'call_in', type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: `${scope}/a.txt` }) } }],
+        finishReason: 'tool_calls',
+      },
+      {
+        content: '',
+        toolCalls: [{ id: 'call_out', type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: 'outside.txt' }) } }],
+        finishReason: 'tool_calls',
+      },
+      { content: 'done', finishReason: 'stop' },
+    ]);
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Scoped rules',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: client,
+      toolRegistry: registry,
+    });
+    await runtime.run();
+
+    const toolResults = runtime.getState().messages.filter((m) => m.role === 'tool').map((m) => String(m.content));
+    assert.strictEqual(toolResults.length, 2);
+    assert.ok(toolResults[0].includes('VCL017_SCOPED_MARKER'), 'scoped rule must be injected for the matching path');
+    assert.ok(!toolResults[1].includes('VCL017_SCOPED_MARKER'), 'scoped rule must not leak into a non-matching path');
+  });
+
   it('emits session_completed only once even if complete is called after run', async () => {
     const runtime = new AgentRuntime({
       workspaceRoot: tmp,

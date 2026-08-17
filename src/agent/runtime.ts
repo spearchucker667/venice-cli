@@ -18,7 +18,7 @@ import { SessionManager } from './sessions.js';
 import { VeniceModelClient, UNKNOWN_CONTEXT_LIMIT } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
 import { ModelCatalog } from './model-catalog.js';
-import { loadInstructions } from './instructions.js';
+import { loadInstructions, instructionsForPaths, type ResolvedInstructions } from './instructions.js';
 import { WorkspaceManager, detectGitRoot } from './workspace.js';
 import { getDefaultModel, loadProjectConfig, type ProjectAgentConfig } from '../lib/config.js';
 import type { AgentDefinition } from './agents.js';
@@ -137,6 +137,8 @@ export class AgentRuntime {
   private workspace: WorkspaceManager;
   private readonly skills: SkillRegistry;
   private readonly redactor = new SecretRedactor(collectKnownSecrets());
+  /** Loaded project instructions; scoped nested rules are injected per-path. */
+  private instructions?: ResolvedInstructions;
   private sessionCompletedEmitted = false;
   private started = false;
   private persistDirty = false;
@@ -711,6 +713,7 @@ export class AgentRuntime {
 
     try {
       const instructions = await loadInstructions(this.state.workspaceRoot);
+      this.instructions = instructions;
       this.context.setProjectInstructions(instructions.text);
     } catch (e) {
       this.state.messages.push({
@@ -1598,7 +1601,7 @@ export class AgentRuntime {
       timestamp: new Date().toISOString(),
       ...(source ? { source } : {}),
     });
-    this.addToolResult(id, safeResult);
+    this.addToolResult(id, safeResult, this.scopedRulesForTool(input, result));
   }
 
   private syncCheckpointState(): void {
@@ -1825,10 +1828,16 @@ export class AgentRuntime {
     this.context.addConversationMessage(message);
   }
 
-  private addToolResult(toolCallId: string, result: ToolResult<unknown>): void {
-    const text = result.ok
+  private addToolResult(toolCallId: string, result: ToolResult<unknown>, scopedRules?: string): void {
+    const body = result.ok
       ? JSON.stringify(result.data)
       : `Error: ${result.error?.code} - ${result.error?.message}`;
+    // Scoped nested rules are injected only into the tool result for the paths
+    // this operation touched, so one subtree's rules never leak into another
+    // (VCL-017).
+    const text = scopedRules
+      ? `Scoped project rules for this path:\n${scopedRules}\n\n${body}`
+      : body;
     const message: AgentMessage = {
       role: 'tool',
       content: text,
@@ -1836,6 +1845,36 @@ export class AgentRuntime {
     };
     this.state.messages.push(message);
     this.context.addToolResult(toolCallId, text);
+  }
+
+  /** Extract path-like values from a tool input for scoped-rule resolution. */
+  private extractToolPaths(input: unknown): string[] {
+    if (!input || typeof input !== 'object') return [];
+    const record = input as Record<string, unknown>;
+    const paths: string[] = [];
+    for (const key of ['path', 'filePath', 'directory', 'dir']) {
+      const value = record[key];
+      if (typeof value === 'string' && value) paths.push(value);
+    }
+    const list = record['paths'];
+    if (Array.isArray(list)) {
+      for (const p of list) if (typeof p === 'string' && p) paths.push(p);
+    }
+    return paths;
+  }
+
+  /** Scoped rules for the paths a tool operation touched (VCL-017). */
+  private scopedRulesForTool(input: unknown, result: ToolResult<unknown>): string | undefined {
+    if (!this.instructions) return undefined;
+    const paths = this.extractToolPaths(input);
+    if (Array.isArray(result.metadata?.affectedFiles)) {
+      for (const file of result.metadata.affectedFiles) {
+        paths.push(typeof file === 'string' ? file : file.relativePath);
+      }
+    }
+    if (paths.length === 0) return undefined;
+    const rules = instructionsForPaths(this.instructions, paths);
+    return rules || undefined;
   }
 
   private emit(event: AgentEvent): void {

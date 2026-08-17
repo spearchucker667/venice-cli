@@ -66,6 +66,22 @@ describe('SessionManager', () => {
     assert.strictEqual(manager.load('s3'), undefined);
   });
 
+  it('refuses to delete a session from a different workspace (VCL-037)', () => {
+    const otherRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-other-ws-')));
+    const foreign = state('cross-workspace-delete');
+    foreign.workspaceRoot = otherRoot;
+    foreign.workspace = { primaryRoot: otherRoot, additionalRoots: [] };
+    manager.save(foreign, []);
+
+    // A caller scoped to the current workspace must not delete it.
+    assert.strictEqual(manager.delete('cross-workspace-delete', tmp), false);
+    assert.ok(manager.load('cross-workspace-delete'), 'session must survive the cross-workspace denial');
+
+    // Scoped to its own workspace, deletion succeeds.
+    assert.strictEqual(manager.delete('cross-workspace-delete', otherRoot), true);
+    fs.rmSync(otherRoot, { recursive: true, force: true });
+  });
+
   it('returns undefined for missing session', () => {
     assert.strictEqual(manager.load('missing'), undefined);
   });

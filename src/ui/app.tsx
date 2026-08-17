@@ -532,7 +532,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
         showSessionPicker: () => setPickerMode('session-picker'),
         resumeSession: handleResumeSession,
         listSessions: () => new SessionManager().list(workspaceRoot),
-        deleteSession: (id) => new SessionManager().delete(id),
+        deleteSession: (id, workspace) => new SessionManager().delete(id, workspace),
         mcpManager,
         getRuntime: () => runtimeRef.current ?? undefined,
       });

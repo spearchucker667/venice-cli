@@ -136,10 +136,22 @@ export class SessionManager {
     return sessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   }
 
-  delete(sessionId: string): boolean {
+  /**
+   * Delete a session directory. When `expectedWorkspace` is provided, the
+   * stored session's canonical workspace root must match before removal, so a
+   * workspace-scoped caller cannot delete another workspace's session
+   * (VCL-037).
+   */
+  delete(sessionId: string, expectedWorkspace?: string): boolean {
     let dir: string;
     try { dir = this.sessionDir(sessionId); } catch { return false; }
     if (!fs.existsSync(dir)) return false;
+    if (expectedWorkspace) {
+      const stored = this.readStored(path.join(dir, 'session.json'));
+      if (!stored || canonicalPath(stored.state.workspaceRoot) !== canonicalPath(expectedWorkspace)) {
+        return false;
+      }
+    }
     fs.rmSync(dir, { recursive: true, force: true });
     return true;
   }

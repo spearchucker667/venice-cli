@@ -40,8 +40,19 @@ export interface InstructionSource {
 }
 
 export interface ResolvedInstructions {
+  /** Global instructions only — scoped nested rules are resolved per-path. */
   text: string;
   sources: InstructionSource[];
+}
+
+const RESERVED_SCOPES = new Set(['built-in', 'global', 'repository']);
+
+/**
+ * A scoped nested rule applies only to its declared subtree and must never be
+ * promoted into the global instruction text (VCL-017).
+ */
+export function isScopedRule(source: InstructionSource): boolean {
+  return source.scope !== undefined && !RESERVED_SCOPES.has(source.scope);
 }
 
 function readFileIfExists(filePath: string): string | undefined {
@@ -111,6 +122,10 @@ export async function loadInstructions(workspaceRoot: string): Promise<ResolvedI
 
   const parts: string[] = [];
   for (const source of sources) {
+    // Scoped nested rules are excluded from the global text and resolved
+    // per-path at tool time so one subtree's rules never leak into another
+    // (VCL-017).
+    if (isScopedRule(source)) continue;
     parts.push(`<!-- source: ${source.source}${source.scope ? ` (${source.scope})` : ''} -->`);
     parts.push(source.content.trim());
   }
@@ -118,18 +133,39 @@ export async function loadInstructions(workspaceRoot: string): Promise<ResolvedI
   return { text: parts.join('\n\n'), sources };
 }
 
+function scopeMatches(scope: string, targetPath: string): boolean {
+  const normalized = path.normalize(targetPath);
+  const scopeNorm = path.normalize(scope);
+  return normalized === scopeNorm || normalized.startsWith(scopeNorm + path.sep);
+}
+
 export function instructionsForPath(instructions: ResolvedInstructions, targetPath: string): string {
   // Filter nested rules to only those whose scope matches the target path prefix.
   const relevant = instructions.sources.filter((s) => {
-    if (!s.scope || s.scope === 'global' || s.scope === 'repository' || s.scope === 'built-in') {
-      return true;
-    }
-    const normalized = path.normalize(targetPath);
-    return normalized === s.scope || normalized.startsWith(s.scope + path.sep);
+    if (!isScopedRule(s)) return true;
+    return scopeMatches(s.scope as string, targetPath);
   });
 
   const parts: string[] = [];
   for (const source of relevant) {
+    parts.push(`<!-- source: ${source.source}${source.scope ? ` (${source.scope})` : ''} -->`);
+    parts.push(source.content.trim());
+  }
+  return parts.join('\n\n');
+}
+
+/**
+ * Union of scoped rules applicable to any of the given paths (VCL-017).
+ * Global/unscoped instructions are intentionally omitted — those already live
+ * in the system prompt.
+ */
+export function instructionsForPaths(instructions: ResolvedInstructions, targetPaths: string[]): string {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const source of instructions.sources) {
+    if (!isScopedRule(source) || seen.has(source.source)) continue;
+    if (!targetPaths.some((p) => scopeMatches(source.scope as string, p))) continue;
+    seen.add(source.source);
     parts.push(`<!-- source: ${source.source}${source.scope ? ` (${source.scope})` : ''} -->`);
     parts.push(source.content.trim());
   }
