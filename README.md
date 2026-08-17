@@ -171,6 +171,8 @@ Approval behavior is explicit:
 
 Non-interactive (`--prompt`/stdin) runs exit with a stable status code so automation can distinguish outcomes without parsing prose. Machine output formats (`--output-format json`/`stream-json`) are always headless — even with `--interactive` — so stdout stays parseable and never contains TUI control sequences.
 
+Plain-text non-interactive runs print the same crossed-keys brand header as the interactive greeting (Venetian Blue on truecolor terminals, plain when piped or on 256-color terminals). Pass `--no-brand` to omit it; `json`/`stream-json` output never carries the header.
+
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Completed successfully |

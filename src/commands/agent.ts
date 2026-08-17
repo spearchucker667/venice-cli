@@ -7,8 +7,10 @@ import { AgentRuntime, detectWorkspaceRoot, type ResumeOverrides } from '../agen
 import { resolveAgent, resolveAgentFile, resolvePersistedAgent, type AgentDefinition } from '../agent/agents.js';
 import { getDefaultModel, loadProjectConfig } from '../lib/config.js';
 import { formatError, getChalk } from '../lib/output.js';
+import { isColorEnabled } from '../lib/config.js';
 import { EventBus } from '../agent/events.js';
 import { AgentRenderer } from '../ui/renderer.js';
+import { getHeadlessBrandHeader, resolveGreetingPolicy } from '../ui/brand.js';
 import { buildAgentMcpConfig } from '../mcp/config.js';
 import { McpManager } from '../mcp/manager.js';
 import { defaultMode } from '../agent/mode.js';
@@ -33,6 +35,7 @@ export function registerAgentCommand(program: Command): Command {
     .option('--json', 'Output final result as JSON (deprecated: use --output-format json)')
     .option('--interactive', 'Render live progress (default when stdin is a TTY and --json is not used)')
     .option('--no-interactive', 'Force plain output even in a TTY')
+    .option('--no-brand', 'Omit the Venice brand header from noninteractive text output')
     .option('--skills-dir <dir>', 'Additional skills directory (repeatable; additive — user and project skills are still loaded)', (value: string, previous: string[]) => [...previous, value], [] as string[])
     .option('--add-dir <dir>', 'Add an additional workspace root the agent may read and edit (repeatable)', (value: string, previous: string[]) => [...previous, value], [] as string[])
     .option('--agent <name>', 'Select a custom main agent by name (built-in, user, or project)')
@@ -233,6 +236,14 @@ export function registerAgentCommand(program: Command): Command {
       const renderer = new AgentRenderer({ eventBus: events, interactive: false, outputFormat });
       renderer.start();
 
+      // Noninteractive text runs get the same crossed-keys brand header as the
+      // TUI greeting, colored with the cached accent policy (plain on piped
+      // output / non-truecolor terminals). Machine formats (json, stream-json)
+      // stay clean; --no-brand opts out (VCL-brand-03).
+      if (outputFormat === 'text' && options.brand !== false) {
+        printHeadlessBrandHeader();
+      }
+
       const runtime = new AgentRuntime({
         workspaceRoot,
         objective: objective!.trim(),
@@ -296,6 +307,29 @@ export function registerAgentCommand(program: Command): Command {
     });
 
   return agent;
+}
+
+function printHeadlessBrandHeader(): void {
+  const c = getChalk();
+  // `resolveGreetingPolicy` keys off truecolor support only; NO_COLOR is not
+  // part of its policy, so gate on the CLI color toggle before asking for an
+  // accent (getChalk()'s noop path has no hex() otherwise).
+  const accent = isColorEnabled() ? resolveGreetingPolicy().accentColor : undefined;
+  const hex = (c as { hex?: (color: string) => (s: string) => string }).hex;
+  const colorize = hex && accent ? (line: string) => hex(accent)(line) : (line: string) => line;
+  const lines = getHeadlessBrandHeader();
+  const markCount = lines.length - 2; // mark rows precede the wordmark + slogan
+  const colored = lines.map((line, index) => {
+    if (index < markCount) {
+      // The mark follows the greeting accent policy; the plain fallback keeps
+      // piped/256-color output free of ANSI escapes (matches the greeting).
+      return colorize(line);
+    }
+    if (index === markCount) return c.bold(line);
+    return line;
+  });
+  console.log(colored.join('\n'));
+  console.log('');
 }
 
 function validateApprovalMode(mode: string): 'suggest' | 'auto-edit' | 'auto' | 'yolo' | undefined {

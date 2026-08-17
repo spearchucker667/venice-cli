@@ -22,6 +22,30 @@ describe('registerAgentCommand', () => {
     assert.ok(agentCmd?.options.some((o) => o.long === '--no-interactive'));
   });
 
+  it('registers --no-brand and defaults brand to on', () => {
+    const parse = (args: string[]): Record<string, unknown> | undefined => {
+      const program = new Command();
+      registerAgentCommand(program);
+      program.exitOverride();
+      let capturedOptions: Record<string, unknown> | undefined;
+      const agent = program.commands.find((c) => c.name() === 'agent');
+      assert.ok(agent);
+      agent!.action((options) => { capturedOptions = options; });
+      program.parse(['node', 'venice', 'agent', ...args]);
+      return capturedOptions;
+    };
+
+    const agentCmd = new Command();
+    registerAgentCommand(agentCmd);
+    const registered = agentCmd.commands.find((c) => c.name() === 'agent');
+    assert.ok(registered?.options.some((o) => o.long === '--no-brand'));
+
+    // Default: brand on (commander sets the negated flag's default to true).
+    assert.strictEqual(parse(['-p', 'hi'])?.brand, true);
+    // Explicit opt-out.
+    assert.strictEqual(parse(['-p', 'hi', '--no-brand'])?.brand, false);
+  });
+
   it('registers --auto and --yolo shorthand flags', () => {
     const program = new Command();
     registerAgentCommand(program);

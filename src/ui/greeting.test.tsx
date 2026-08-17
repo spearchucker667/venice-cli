@@ -10,6 +10,7 @@ import {
   accentSweepStepCount,
   getAccentSweepCol,
   getGreetingVariant,
+  getHeadlessBrandHeader,
   getLogoFrame,
   isDarkBackground,
   resetGreetingPolicyCache,
@@ -125,6 +126,16 @@ describe('brand display policy', () => {
     assert.equal(getGreetingVariant(48, 18), 'compact');
     assert.equal(getGreetingVariant(40, 16), 'minimal');
     assert.equal(getGreetingVariant(80, 10), 'minimal');
+  });
+
+  it('getHeadlessBrandHeader mirrors the greeting mark plus wordmark and slogan', () => {
+    const header = getHeadlessBrandHeader();
+    assert.deepStrictEqual(header.slice(0, FULL_LOGO.length), [...FULL_LOGO]);
+    assert.strictEqual(header[FULL_LOGO.length], 'Venice CLI');
+    assert.strictEqual(header[FULL_LOGO.length + 1], VENICE_SLOGAN);
+    for (const line of header) {
+      assert.match(line, /^[ -~]*$/, `headless brand header must be plain ASCII: ${JSON.stringify(line)}`);
+    }
   });
 
   it('accentSweepStepCount covers the full logo width in two-column steps', () => {

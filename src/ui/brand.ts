@@ -56,6 +56,15 @@ export const COMPACT_FRAMES = [2, 4, 5] as const;
  */
 export const STATUS_MARK = '(_)X(_)';
 
+/**
+ * Brand header for headless text output: the crossed-keys mark plus the CLI
+ * wordmark and slogan, mirroring the interactive greeting. Returns plain
+ * lines; callers colorize the mark with the accent policy when available.
+ */
+export function getHeadlessBrandHeader(): string[] {
+  return [...FULL_LOGO, 'Venice CLI', VENICE_SLOGAN];
+}
+
 /** Interval (ms) between entrance frames; shared by reveal and accent sweep. */
 export const GREETING_FRAME_MS = 60;
 
