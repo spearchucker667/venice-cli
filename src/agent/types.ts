@@ -15,7 +15,10 @@ export type AgentStatus =
   | 'verifying'
   | 'complete'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  // Budget-constrained stop: the turn/step ceiling was hit before a natural
+  // stop, so the task is incomplete (VCL-010).
+  | 'limit_reached';
 
 export interface TodoItem {
   id: string;

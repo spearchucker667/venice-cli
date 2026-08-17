@@ -3,7 +3,7 @@
  */
 
 import { Command } from 'commander';
-import { AgentRuntime, detectWorkspaceRoot } from '../agent/runtime.js';
+import { AgentRuntime, detectWorkspaceRoot, type ResumeOverrides } from '../agent/runtime.js';
 import { resolveAgent, resolveAgentFile, resolvePersistedAgent, type AgentDefinition } from '../agent/agents.js';
 import { getDefaultModel, loadProjectConfig } from '../lib/config.js';
 import { formatError, getChalk } from '../lib/output.js';
@@ -76,6 +76,9 @@ export function registerAgentCommand(program: Command): Command {
           process.exit(2);
         }
       }
+      // Capture the explicitly-selected agent before the persisted agent may be
+      // re-resolved below, so resume overrides stay precise (VCL-012).
+      const explicitAgent = agent;
       // A project-sourced agent is high-authority prompt configuration the
       // repo controls; surface that trust guidance explicitly (VCL-R3-031).
       if (agent?.source === 'project') {
@@ -194,6 +197,18 @@ export function registerAgentCommand(program: Command): Command {
         }
       }
 
+      // Explicit CLI flags win over persisted session state on resume.
+      // Precedence: invocation flags > session state > config defaults (VCL-012).
+      const resumeOverrides: ResumeOverrides = {
+        mode: {
+          permissionMode: approvalMode,
+          ...(options.plan ? { operatingMode: 'plan' as const } : {}),
+        },
+        model: options.model ? String(options.model) : undefined,
+        additionalRoots: options.addDir?.length ? options.addDir.map(String) : undefined,
+        agent: explicitAgent,
+      };
+
       if (interactive) {
         const { runTui } = await import('../ui/tui.js');
         await runTui({
@@ -209,6 +224,7 @@ export function registerAgentCommand(program: Command): Command {
           additionalRoots: options.addDir,
           projectConfig,
           agent,
+          resumeOverrides,
         });
         process.exit(0);
       }
@@ -242,9 +258,7 @@ export function registerAgentCommand(program: Command): Command {
       }
 
       if (storedSession) {
-        // Explicit CLI flags win over the persisted session mode
-        // (VC-KIMI-004: stored suggest -> CLI auto override).
-        runtime.loadState(storedSession.state, { mode: { permissionMode: approvalMode } });
+        runtime.loadState(storedSession.state, resumeOverrides);
       }
 
       try {
@@ -272,6 +286,9 @@ export function registerAgentCommand(program: Command): Command {
           }
         }
         await mcpManager.stop();
+        // Terminal exit-code contract (VCL-010): 0 = completed successfully;
+        // 1 = any non-success terminal state (failed, cancelled, limit_reached).
+        // The exact state is exposed structurally via --output-format json/stream-json.
         process.exit(result.state.status === 'complete' ? 0 : 1);
       } catch (error) {
         renderer.stop();

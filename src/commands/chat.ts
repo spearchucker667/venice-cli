@@ -988,6 +988,9 @@ export async function streamChat(
       const requestsToolExecution =
         finishReason === 'tool_calls' || hasToolCalls;
       if (!requestsToolExecution || e2eeContext) {
+        // Persist the canonical final answer so the next --continue replays
+        // the exact transcript the user saw (VCL-011).
+        messages.push({ role: 'assistant', content: roundContent });
         break;
       }
       if (!hasToolCalls) {
@@ -1195,6 +1198,9 @@ export async function nonStreamChat(
     const hasToolCalls = Boolean(response.tool_calls?.length);
 
     if (response.finish_reason !== 'tool_calls' && !hasToolCalls) {
+      // Persist the canonical final answer before output so --continue replays
+      // the exact transcript the user saw (VCL-011).
+      messages.push({ role: 'assistant', content: response.content });
       if (extras.responseFormat) {
         outputStructuredResponse(response.content, extras.responseFormat, format);
       } else {

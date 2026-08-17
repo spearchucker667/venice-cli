@@ -830,6 +830,60 @@ describe('AgentRuntime', () => {
     fs.rmSync(otherWorkspace, { recursive: true, force: true });
   });
 
+  it('applies explicit CLI overrides over persisted state on resume (VCL-012)', () => {
+    const extraRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-extra-root-')));
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Resume',
+      approvalMode: 'auto-edit',
+      modelClient: new MockModelClient([]),
+    });
+    const persisted = runtime.getState();
+    const state: AgentState = {
+      ...persisted,
+      model: 'persisted-model',
+      modelProfile: { id: 'persisted-model', mode: 'agent', contextLimit: 32000 },
+      mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
+      workspace: { primaryRoot: tmp, additionalRoots: [] },
+    };
+    runtime.loadState(state, {
+      model: 'cli-model',
+      additionalRoots: [extraRoot],
+      mode: { operatingMode: 'plan' },
+    });
+    assert.strictEqual(runtime.getState().model, 'cli-model');
+    assert.strictEqual(runtime.getState().modelProfile, undefined, 'model override clears the persisted profile');
+    assert.strictEqual(runtime.getState().mode.operatingMode, 'plan');
+    assert.deepStrictEqual(runtime.getState().workspace.additionalRoots, [extraRoot]);
+    fs.rmSync(extraRoot, { recursive: true, force: true });
+  });
+
+  it('reports limit_reached instead of complete when the turn ceiling is hit (VCL-010)', async () => {
+    const registry = new ToolRegistry();
+    registry.register(readFileTool);
+    const toolCallResponse: ModelResponse = {
+      content: '',
+      toolCalls: [{
+        id: 'call',
+        type: 'function',
+        function: { name: 'read_file', arguments: JSON.stringify({ path: 'package.json' }) },
+      }],
+      finishReason: 'tool_calls',
+    };
+    const client = new RecordingModelClient(Array(6).fill(toolCallResponse));
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Loop forever',
+      approvalMode: 'auto-edit',
+      maxTurns: 2,
+      modelClient: client,
+      toolRegistry: registry,
+    });
+    const result = await runtime.run();
+    assert.strictEqual(result.state.status, 'limit_reached');
+    assert.ok(result.finalMessage.includes('Reached maximum turn limit'));
+  });
+
   it('emits session_completed only once even if complete is called after run', async () => {
     const runtime = new AgentRuntime({
       workspaceRoot: tmp,

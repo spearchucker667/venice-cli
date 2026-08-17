@@ -37,6 +37,12 @@ import type { ModelProfile } from './model-profile.js';
 export interface ResumeOverrides {
   objective?: string;
   mode?: Partial<RuntimeModeState>;
+  /** Explicit CLI --model wins over the persisted session model (VCL-012). */
+  model?: string;
+  /** Explicit CLI --add-dir wins over the persisted additional roots (VCL-012). */
+  additionalRoots?: string[];
+  /** Explicit CLI --agent/--agent-file wins over the persisted agent (VCL-012). */
+  agent?: AgentDefinition;
 }
 
 /**
@@ -619,8 +625,23 @@ export class AgentRuntime {
       throw new Error('Cannot resume a session from a different workspace');
     }
     Object.assign(this.state, state);
-    // Rebuild the path authority with the persisted additional roots so
-    // resumed sessions honor them (VC-KIMI-044).
+    // Explicit CLI flags win over persisted session state (VCL-012). Additional
+    // roots must be applied before the path authority is rebuilt below.
+    if (overrides?.additionalRoots !== undefined) {
+      this.state.workspace = {
+        primaryRoot: this.state.workspaceRoot,
+        additionalRoots: overrides.additionalRoots,
+      };
+    }
+    if (overrides?.model !== undefined && overrides.model !== this.state.model) {
+      this.state.model = overrides.model;
+      // A different model invalidates the persisted profile; capability is
+      // re-discovered (fail closed to chat-only) on start (VCL-009/012).
+      this.state.modelProfile = undefined;
+      this.state.agentMode = 'agent';
+    }
+    // Rebuild the path authority with the (possibly overridden) additional
+    // roots so resumed sessions honor them (VC-KIMI-044).
     this.workspace = new WorkspaceManager(
       this.state.workspaceRoot,
       this.state.workspace.additionalRoots
@@ -630,6 +651,16 @@ export class AgentRuntime {
     }
     if (overrides?.mode) {
       this.state.mode = { ...this.state.mode, ...overrides.mode };
+    }
+    if (overrides?.agent !== undefined) {
+      this.state.agent = {
+        name: overrides.agent.name,
+        source: overrides.agent.source,
+        sourcePath: overrides.agent.sourcePath,
+      };
+      if (overrides.agent.systemPrompt) {
+        this.context.setAgentPrompt(overrides.agent.systemPrompt);
+      }
     }
     this.workspace.replaceChangedFiles(this.state.changedFiles);
     // Normalize legacy string entries into root-aware refs so display and
@@ -641,7 +672,7 @@ export class AgentRuntime {
       this.sessions.root,
       this.state.workspace.additionalRoots
     );
-    this.sessionCompletedEmitted = state.status === 'complete' || state.status === 'failed' || state.status === 'cancelled';
+    this.sessionCompletedEmitted = state.status === 'complete' || state.status === 'failed' || state.status === 'cancelled' || state.status === 'limit_reached';
     this.modelClient.setModel(this.state.model);
     // Re-synchronize the live permission manager with the loaded mode and
     // emit one authoritative mode event so every UI surface converges on the
@@ -905,7 +936,10 @@ export class AgentRuntime {
 
       if (turns >= this.maxTurns && this.state.status !== 'complete') {
         finalMessage = `${finalMessage}\n\n(Reached maximum turn limit.)`;
-        this.state.status = 'complete';
+        // A budget-constrained stop is not success: expose it as a distinct
+        // terminal state so headless callers never mistake it for completion
+        // (VCL-010).
+        this.state.status = 'limit_reached';
       }
     } catch (error) {
       this.state.status = 'failed';

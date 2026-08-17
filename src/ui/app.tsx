@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import type { AgentRuntime } from '../agent/runtime.js';
-import { AgentRuntime as AgentRuntimeClass } from '../agent/runtime.js';
+import { AgentRuntime as AgentRuntimeClass, type ResumeOverrides } from '../agent/runtime.js';
 import type { AgentDefinition } from '../agent/agents.js';
 import type { AgentStatus } from '../agent/types.js';
 import type { AgentEvent } from '../agent/events.js';
@@ -51,6 +51,8 @@ export interface AppProps {
   projectConfig?: ProjectAgentConfig;
   /** Selected custom main agent (VCL-R3-031). */
   agent?: AgentDefinition;
+  /** Explicit CLI flags that win over persisted state on initial resume (VCL-012). */
+  resumeOverrides?: ResumeOverrides;
   onExit: () => void;
 }
 
@@ -110,7 +112,7 @@ function getGitBranch(cwd: string): string | undefined {
   }
 }
 
-export function App({ workspaceRoot, model, approvalMode, mode: initialMode, maxTurns, mcpManager, initialObjective, resumeSessionId, skillsDirs, additionalRoots, projectConfig, agent, onExit }: AppProps): JSX.Element {
+export function App({ workspaceRoot, model, approvalMode, mode: initialMode, maxTurns, mcpManager, initialObjective, resumeSessionId, skillsDirs, additionalRoots, projectConfig, agent, resumeOverrides, onExit }: AppProps): JSX.Element {
   const { exit } = useApp();
   const abortControllerRef = useRef<AbortController | null>(null);
   const runtimeRef = useRef<AgentRuntime | null>(null);
@@ -278,10 +280,10 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       if (stored) {
         // loadState emits an authoritative mode_changed event, which the
         // listener above applies to input/operating/approval mode state
-        // (VC-KIMI-025).
-        runtime.loadState(stored.state);
-        setCurrentModel(stored.state.model);
-        setCurrentModelProfile(stored.state.modelProfile);
+        // (VC-KIMI-025). Explicit CLI flags win over persisted state (VCL-012).
+        runtime.loadState(stored.state, resumeOverrides);
+        setCurrentModel(runtime.getState().model);
+        setCurrentModelProfile(runtime.getState().modelProfile);
         setStatus(stored.state.status);
         const restoredMessages: TuiMessage[] = stored.state.messages.slice(-50).flatMap((message, index) => {
           if (message.role !== 'user' && message.role !== 'assistant') return [];

@@ -658,6 +658,28 @@ test('structured non-streaming output stays valid JSON across tool rounds', asyn
   }
 });
 
+test('streaming chat persists the final assistant answer for --continue (VCL-011)', async () => {
+  const messages: Message[] = [{ role: 'user', content: 'Hello' }];
+  const completionStream: NonNullable<NonNullable<Parameters<typeof streamChat>[5]>['completionStream']> =
+    async function* () {
+      yield { content: 'Hi there', done: false };
+      yield { finish_reason: 'stop', done: false };
+      yield { done: true };
+    };
+  await streamChat(messages, 'test-model', [], false, 'raw', { quiet: true, completionStream });
+  assert.equal(messages.length, 2);
+  assert.deepEqual(messages[1], { role: 'assistant', content: 'Hi there' });
+});
+
+test('non-streaming chat persists the final assistant answer for --continue (VCL-011)', async () => {
+  const messages: Message[] = [{ role: 'user', content: 'Hello' }];
+  const completion: NonNullable<NonNullable<Parameters<typeof nonStreamChat>[5]>['completion']> =
+    async () => ({ content: 'Hi there', finish_reason: 'stop' });
+  await nonStreamChat(messages, 'test-model', [], false, 'raw', { quiet: true, completion });
+  assert.equal(messages.length, 2);
+  assert.deepEqual(messages[1], { role: 'assistant', content: 'Hi there' });
+});
+
 test('non-streaming tool rounds reuse encoded attachments without rereading files', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'venice-chat-round-attachment-'));
   const imagePath = join(dir, 'photo.png');
