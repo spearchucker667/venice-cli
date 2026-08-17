@@ -47,3 +47,4 @@ tmp/
 
 # Agent project memory (agentmemory skill) — never commit or publish
 .omk/
+/.freebuff
