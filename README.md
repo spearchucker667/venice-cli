@@ -39,6 +39,12 @@ Or run without installing globally:
 npx @spearchucker667/venice-cli
 ```
 
+To install directly from the GitHub source (builds the CLI from TypeScript via the `prepare` lifecycle):
+
+```bash
+npm install -g github:spearchucker667/venice-cli
+```
+
 Requirements:
 
 - Node.js 18 or newer for the published CLI

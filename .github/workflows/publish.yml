@@ -4,9 +4,17 @@ on:
   release:
     types: [published]
 
+# Trusted publishing (OIDC): id-token: write lets GitHub mint a short-lived
+# OIDC token that the npm CLI exchanges for a publish token. No long-lived
+# NPM_TOKEN is required. The npmjs.com "trusted publisher" for this package
+# must be configured with:
+#   Provider: GitHub Actions
+#   Organization or user: spearchucker667
+#   Repository: venice-cli
+#   Workflow filename: publish.yml
 permissions:
-  contents: read
   id-token: write
+  contents: read
 
 jobs:
   publish:
@@ -21,16 +29,43 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      # npm trusted publishing requires npm CLI >= 11.5.1 (Node 22 ships an
+      # older npm), so upgrade explicitly before publishing.
+      - name: Upgrade npm
+        run: npm install --global npm@11
+
+      - name: Show toolchain
+        run: |
+          node --version
+          npm --version
+
       - name: Install dependencies
         run: npm ci
 
       - name: Verify release
         run: npm run verify
 
-      # - name: Publish to npm
-      #   run: npm publish --provenance --access public
-      #   # Note: Trusted publishing (OIDC) is preferred over NPM_TOKEN. 
-      #   # When the npm package ownership for this fork is verified,
-      #   # enable trusted publishing in npm to remove the need for NODE_AUTH_TOKEN.
-      #   env:
-      #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Verify package identity
+        run: |
+          test "$(node -p "require('./package.json').name")" = "@spearchucker667/venice-cli"
+          echo "Package: $(node -p "require('./package.json').name")"
+          echo "Version: $(node -p "require('./package.json').version")"
+
+      # Release tag and npm version must not silently diverge: a release
+      # tagged v2.1.1 must carry package.json version 2.1.1.
+      - name: Verify version matches release tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG_VERSION" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match package.json version ${PKG_VERSION}" >&2
+            exit 1
+          fi
+          echo "Release tag ${GITHUB_REF_NAME} matches package version ${PKG_VERSION}"
+
+      # Trusted publishing (OIDC) authenticates the publish; provenance is
+      # generated automatically when publishing a public package from a public
+      # repository via trusted publishing. publishConfig in package.json
+      # forces public access for the scoped package.
+      - name: Publish to npm
+        run: npm publish --access public
