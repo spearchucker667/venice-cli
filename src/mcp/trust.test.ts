@@ -321,5 +321,11 @@ describe('formatTrustPrompt', () => {
     assert.ok(text.includes('GITHUB_TOKEN'));
     assert.ok(text.includes('values are not shown'));
     assert.ok(!text.includes('hunter2'));
+    // VCL-R3-017: the prompt must describe the chosen workspace-execution-trust
+    // semantics: approval covers the config, referenced executables may change
+    // and remain trusted, and only a config change invalidates it.
+    assert.ok(text.includes('workspace execution trust'));
+    assert.ok(text.includes('may change after approval and remain trusted'));
+    assert.ok(text.includes('only a change to this MCP config file invalidates this approval'));
   });
 });

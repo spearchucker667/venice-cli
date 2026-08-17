@@ -73,12 +73,22 @@ describe('brand display policy', () => {
   });
 
   it('resetGreetingPolicyCache re-reads the environment for each resolution', () => {
-    const prevColorTerm = process.env.COLORTERM;
-    const prevColorFgBg = process.env.COLORFGBG;
-    const prevNoAnimation = process.env.VENICE_NO_ANIMATION;
+    // Snapshot every environment variable the policy reads so the test is
+    // hermetic on any runner (CI sets CI=true, which would disable animation).
+    const previous = {
+      CI: process.env.CI,
+      TERM: process.env.TERM,
+      COLORTERM: process.env.COLORTERM,
+      COLORFGBG: process.env.COLORFGBG,
+      VENICE_NO_ANIMATION: process.env.VENICE_NO_ANIMATION,
+    };
     const isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
     try {
       Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+      // Define a complete, deterministic environment: no CI, a normal TERM,
+      // truecolor, and animation enabled.
+      delete process.env.CI;
+      process.env.TERM = 'xterm-256color';
       process.env.COLORTERM = 'truecolor';
       delete process.env.VENICE_NO_ANIMATION;
 
@@ -96,12 +106,10 @@ describe('brand display policy', () => {
       assert.equal(light.accentColor, VENICE_BRAND.accentLight);
       assert.notStrictEqual(dark, light);
     } finally {
-      if (prevColorTerm === undefined) delete process.env.COLORTERM;
-      else process.env.COLORTERM = prevColorTerm;
-      if (prevColorFgBg === undefined) delete process.env.COLORFGBG;
-      else process.env.COLORFGBG = prevColorFgBg;
-      if (prevNoAnimation === undefined) delete process.env.VENICE_NO_ANIMATION;
-      else process.env.VENICE_NO_ANIMATION = prevNoAnimation;
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       if (isTTYDescriptor) Object.defineProperty(process.stdout, 'isTTY', isTTYDescriptor);
       else Reflect.deleteProperty(process.stdout, 'isTTY');
       resetGreetingPolicyCache();

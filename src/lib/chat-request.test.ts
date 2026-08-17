@@ -78,6 +78,40 @@ test('buildChatCompletionBody preserves multimodal message content', () => {
   }]);
 });
 
+test('buildChatCompletionBody forwards Venice/OpenAI-compat fields (VCL-R3-018)', () => {
+  const body = buildChatCompletionBody(
+    messages,
+    {
+      model: 'zai-org-glm-5-1',
+      reasoning: { effort: 'high', summary: 'concise' },
+      max_temp: 1.5,
+      min_temp: 0.1,
+      user: 'abc-123',
+      store: false,
+      text: { verbosity: 'low' },
+      include: ['usage'],
+      metadata: { trace_id: 'trace-1' },
+    },
+    false
+  );
+
+  assert.deepEqual(body.reasoning, { effort: 'high', summary: 'concise' });
+  assert.equal(body.max_temp, 1.5);
+  assert.equal(body.min_temp, 0.1);
+  assert.equal(body.user, 'abc-123');
+  assert.equal(body.store, false);
+  assert.deepEqual(body.text, { verbosity: 'low' });
+  assert.deepEqual(body.include, ['usage']);
+  assert.deepEqual(body.metadata, { trace_id: 'trace-1' });
+});
+
+test('buildChatCompletionBody omits unset compat fields', () => {
+  const body = buildChatCompletionBody(messages, { model: 'm' }, false);
+  for (const key of ['reasoning', 'max_temp', 'min_temp', 'user', 'store', 'text', 'include', 'metadata']) {
+    assert.equal(key in body, false, `${key} must be omitted when unset`);
+  }
+});
+
 test('capability helpers read advertised model features', () => {
   const model: Model = {
     id: 'grok-4-20',

@@ -78,4 +78,67 @@ describe('CheckpointManager', () => {
     assert.strictEqual(state.count, 2);
     assert.strictEqual(state.index, 0);
   });
+
+  it('restores a checkpoint in an additional root, not the primary (VCL-R3-003)', async () => {
+    const primary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-primary-')));
+    const shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-shared-')));
+    // Two roots that both contain src/a.ts with different content.
+    fs.mkdirSync(path.join(primary, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(shared, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(primary, 'src', 'a.ts'), 'primary-version');
+    fs.writeFileSync(path.join(shared, 'src', 'a.ts'), 'shared-original');
+
+    const manager = new CheckpointManager(
+      'session-multiroot',
+      primary,
+      path.join(tmp, 'sessions'),
+      [shared]
+    );
+    manager.record({
+      operation: 'edit_file',
+      relativePath: 'src/a.ts',
+      rootId: shared,
+      originalContent: 'shared-original',
+      newContent: 'shared-edited',
+    });
+
+    // Simulate the edit having been applied to the shared root.
+    fs.writeFileSync(path.join(shared, 'src', 'a.ts'), 'shared-edited');
+
+    const result = await manager.undo();
+    assert.strictEqual(result.ok, true);
+    // The additional-root file is restored...
+    assert.strictEqual(fs.readFileSync(path.join(shared, 'src', 'a.ts'), 'utf-8'), 'shared-original');
+    // ...and the primary-root file with the same relative path is untouched.
+    assert.strictEqual(fs.readFileSync(path.join(primary, 'src', 'a.ts'), 'utf-8'), 'primary-version');
+
+    fs.rmSync(primary, { recursive: true, force: true });
+    fs.rmSync(shared, { recursive: true, force: true });
+  });
+
+  it('revalidates the target root on undo and refuses stale roots (VCL-R3-003)', async () => {
+    const primary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-reval-primary-')));
+    const removed = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-reval-removed-')));
+    fs.writeFileSync(path.join(removed, 'a.txt'), 'original');
+
+    // Manager knows only the primary root — the checkpoint references a root
+    // that is no longer part of the workspace scope.
+    const manager = new CheckpointManager('session-stale-root', primary, path.join(tmp, 'sessions'));
+    manager.record({
+      operation: 'edit_file',
+      relativePath: 'a.txt',
+      rootId: removed,
+      originalContent: 'original',
+      newContent: 'edited',
+    });
+
+    const result = await manager.undo();
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error ?? '', /no longer part of the workspace/);
+    // The file in the now-removed root must NOT have been modified.
+    assert.strictEqual(fs.readFileSync(path.join(removed, 'a.txt'), 'utf-8'), 'original');
+
+    fs.rmSync(primary, { recursive: true, force: true });
+    fs.rmSync(removed, { recursive: true, force: true });
+  });
 });

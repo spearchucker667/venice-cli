@@ -66,6 +66,26 @@ export interface AgentRuntimeResult {
   finalMessage: string;
 }
 
+/** A model-issued tool call in the turn loop. */
+type AgentToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } };
+
+/**
+ * Result of a tool run. When `deferRecording` was requested, `deferred` is
+ * present and the caller must record the call (in order) via `recordToolCall`.
+ */
+interface ToolRunOutcome {
+  result: ToolResult<unknown>;
+  approved: boolean;
+  changedFiles: boolean;
+  deferred?: {
+    toolName: string;
+    input: unknown;
+    toolCallId: string;
+    durationMs: number;
+    source?: string;
+  };
+}
+
 export class AgentRuntime {
   private readonly state: AgentState;
   private readonly modelClient: VeniceModelClient;
@@ -78,7 +98,7 @@ export class AgentRuntime {
   private readonly autoValidate: boolean;
   private signal?: AbortSignal;
   private readonly mcpManager?: McpManager;
-  private checkpoints: CheckpointManager;
+  private checkpointsField: CheckpointManager;
   private workspace: WorkspaceManager;
   private readonly skills: SkillRegistry;
   private readonly redactor = new SecretRedactor(collectKnownSecrets());
@@ -133,7 +153,12 @@ export class AgentRuntime {
     this.signal = options.signal;
     this.mcpManager = options.mcpManager;
     this.workspace = new WorkspaceManager(this.state.workspaceRoot, this.state.workspace.additionalRoots);
-    this.checkpoints = options.checkpointManager || new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
+    this.checkpointsField = options.checkpointManager || new CheckpointManager(
+      this.state.sessionId,
+      this.state.workspaceRoot,
+      this.sessions.root,
+      this.state.workspace.additionalRoots
+    );
     this.skills = new SkillRegistry(
       getGlobalSkillsDir(),
       getProjectSkillsDir(this.state.workspaceRoot),
@@ -147,6 +172,11 @@ export class AgentRuntime {
 
   getState(): Readonly<AgentState> {
     return this.state;
+  }
+
+  /** Expose the checkpoint manager (used by tests and direct undo/redo). */
+  get checkpoints(): CheckpointManager {
+    return this.checkpointsField;
   }
 
   /** Skill discovery errors, surfaced rather than swallowed (VC-KIMI-043). */
@@ -307,7 +337,7 @@ export class AgentRuntime {
       objective: this.state.objective,
       runtimeState: this.state,
       signal: this.signal,
-      checkpointManager: this.checkpoints,
+      checkpointManager: this.checkpointsField,
       skillRegistry: this.skills,
     });
     if (!result.ok) throw new Error(result.error?.message ?? 'Review failed.');
@@ -351,8 +381,19 @@ export class AgentRuntime {
   }
 
   async refreshModelProfile(): Promise<ModelProfile | undefined> {
+    // An explicitly applied profile (e.g. from the TUI model picker or a test
+    // fixture) is authoritative and is never overwritten by a re-fetch.
+    if (this.state.modelProfile?.id === this.state.model) {
+      return this.state.modelProfile;
+    }
     const profile = await this.modelClient.getModelProfile(this.state.model);
-    if (profile) this.setModelProfile(profile);
+    if (profile) {
+      this.setModelProfile(profile);
+    } else {
+      // Unknown model IDs fail closed into chat-only: tools are only granted
+      // on positive capability evidence (VCL-R3-006).
+      this.state.agentMode = 'chat-only';
+    }
     return profile;
   }
 
@@ -390,7 +431,12 @@ export class AgentRuntime {
     this.context.resetConversation();
     this.context.setWorkingMemory(this.state);
     this.workspace.replaceChangedFiles([]);
-    this.checkpoints = new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
+    this.checkpointsField = new CheckpointManager(
+      this.state.sessionId,
+      this.state.workspaceRoot,
+      this.sessions.root,
+      this.state.workspace.additionalRoots
+    );
     this.sessionCompletedEmitted = false;
     this.emitModeChanged();
   }
@@ -462,7 +508,15 @@ export class AgentRuntime {
       this.state.mode = { ...this.state.mode, ...overrides.mode };
     }
     this.workspace.replaceChangedFiles(this.state.changedFiles);
-    this.checkpoints = new CheckpointManager(this.state.sessionId, this.state.workspaceRoot, this.sessions.root);
+    // Normalize legacy string entries into root-aware refs so display and
+    // persistence stay unambiguous (VCL-R3-004).
+    this.state.changedFiles = this.workspace.changedFiles;
+    this.checkpointsField = new CheckpointManager(
+      this.state.sessionId,
+      this.state.workspaceRoot,
+      this.sessions.root,
+      this.state.workspace.additionalRoots
+    );
     this.sessionCompletedEmitted = state.status === 'complete' || state.status === 'failed' || state.status === 'cancelled';
     this.modelClient.setModel(this.state.model);
     // Re-synchronize the live permission manager with the loaded mode and
@@ -661,16 +715,14 @@ export class AgentRuntime {
         }
 
         let editedThisTurn = false;
-        for (const toolCall of response.toolCalls) {
-          if (this.signal?.aborted) {
-            this.state.status = 'cancelled';
-            break;
-          }
-          const changedFiles = await this.handleToolCall(toolCall);
-          if (changedFiles) editedThisTurn = true;
-        }
+        // Parallel-safe tool batches run concurrently; everything else stays
+        // strictly ordered (VCL-R3-022).
+        editedThisTurn = await this.processToolCalls(response.toolCalls);
 
-        if (this.state.status === 'cancelled') break;
+        if (this.signal?.aborted) {
+          this.state.status = 'cancelled';
+          break;
+        }
 
         if (editedThisTurn && this.autoValidate) {
           await this.runValidation();
@@ -761,29 +813,104 @@ export class AgentRuntime {
    * Execute a tool call from the agent turn loop.
    * Returns true when the call changed workspace files.
    */
-  private async handleToolCall(toolCall: { id: string; type: 'function'; function: { name: string; arguments: string } }): Promise<boolean> {
+  private async handleToolCall(toolCall: AgentToolCall): Promise<boolean> {
     const toolName = toolCall.function.name;
-    let input: unknown = toolCall.function.arguments;
-    try {
-      input = JSON.parse(toolCall.function.arguments || '{}');
-    } catch {
-      const result: ToolResult<unknown> = {
-        ok: false,
-        error: { code: 'INVALID_ARGUMENTS', message: 'Tool arguments are not valid JSON' },
-      };
-      this.emit({
-        type: 'tool_requested',
-        timestamp: new Date().toISOString(),
-        eventId: randomUUID(),
-        toolName,
-        input: this.redactor.redact(toolCall.function.arguments),
-      });
-      this.recordToolCall(toolCall.id, toolName, input, result, false, 0);
+    const parsed = this.parseToolCall(toolCall);
+    if ('error' in parsed) {
+      this.recordParseError(toolCall);
       return false;
     }
-
-    const { changedFiles } = await this.runTool(toolName, input, toolCall.id);
+    const { changedFiles } = await this.runTool(toolName, parsed.input, toolCall.id);
     return changedFiles;
+  }
+
+  /**
+   * Execute a turn's model tool calls (VCL-R3-022).
+   *
+   * Consecutive calls to explicitly `parallelSafe` tools run concurrently;
+   * every other call (writes, shell, MCP, plan, session mutation) runs serially
+   * in order. Tool history, transcript messages, and events are recorded in
+   * the original call order regardless of completion order.
+   */
+  private async processToolCalls(toolCalls: AgentToolCall[]): Promise<boolean> {
+    let edited = false;
+    let batch: AgentToolCall[] = [];
+
+    const flushBatch = async (): Promise<void> => {
+      if (batch.length === 0) return;
+      if (batch.length === 1) {
+        edited = (await this.handleToolCall(batch[0])) || edited;
+      } else {
+        // Parse all calls first so parse failures record immediately in order,
+        // then execute the valid ones concurrently.
+        const parsed = batch.map((call) => ({ call, parsed: this.parseToolCall(call) }));
+        const outcomes = await Promise.all(
+          parsed.map(async (entry) =>
+            'error' in entry.parsed
+              ? undefined
+              : this.runTool(entry.call.function.name, entry.parsed.input, entry.call.id, undefined, { deferRecording: true })
+          )
+        );
+        for (let i = 0; i < parsed.length; i++) {
+          const entry = parsed[i];
+          if ('error' in entry.parsed) {
+            this.recordParseError(entry.call);
+            continue;
+          }
+          const outcome = outcomes[i];
+          if (!outcome) continue;
+          if (outcome.deferred) {
+            this.recordToolCall(
+              outcome.deferred.toolCallId,
+              outcome.deferred.toolName,
+              outcome.deferred.input,
+              outcome.result,
+              outcome.approved,
+              outcome.deferred.durationMs,
+              outcome.deferred.source
+            );
+          }
+          if (outcome.changedFiles) edited = true;
+        }
+      }
+      batch = [];
+    };
+
+    for (const call of toolCalls) {
+      if (this.signal?.aborted) break;
+      const tool = this.registry.get(call.function.name);
+      if (tool?.parallelSafe === true) {
+        batch.push(call);
+      } else {
+        await flushBatch();
+        edited = (await this.handleToolCall(call)) || edited;
+      }
+    }
+    await flushBatch();
+    return edited;
+  }
+
+  private parseToolCall(toolCall: AgentToolCall): { input: unknown } | { error: true } {
+    try {
+      return { input: JSON.parse(toolCall.function.arguments || '{}') };
+    } catch {
+      return { error: true };
+    }
+  }
+
+  private recordParseError(toolCall: AgentToolCall): void {
+    const result: ToolResult<unknown> = {
+      ok: false,
+      error: { code: 'INVALID_ARGUMENTS', message: 'Tool arguments are not valid JSON' },
+    };
+    this.emit({
+      type: 'tool_requested',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      toolName: toolCall.function.name,
+      input: this.redactor.redact(toolCall.function.arguments),
+    });
+    this.recordToolCall(toolCall.id, toolCall.function.name, toolCall.function.arguments, result, false, 0);
   }
 
   /**
@@ -825,8 +952,9 @@ export class AgentRuntime {
     toolName: string,
     input: unknown,
     toolCallId: string,
-    source?: string
-  ): Promise<{ result: ToolResult<unknown>; approved: boolean; changedFiles: boolean }> {
+    source?: string,
+    options: { deferRecording?: boolean } = {}
+  ): Promise<ToolRunOutcome> {
     const tool = this.registry.get(toolName);
     const start = Date.now();
 
@@ -842,6 +970,22 @@ export class AgentRuntime {
       const result: ToolResult<unknown> = {
         ok: false,
         error: { code: 'UNKNOWN_TOOL', message: `Tool not found: ${toolName}` },
+      };
+      this.recordToolCall(toolCallId, toolName, input, result, false, 0, source);
+      return { result, approved: false, changedFiles: false };
+    }
+
+    // Schema validation before risk classification, permission matching, and
+    // execution (VCL-R3-005): a malformed argument set must never reach the
+    // tool's risk classifier or side effects.
+    const schemaErrors = this.registry.validateInput(toolName, input);
+    if (schemaErrors.length > 0) {
+      const result: ToolResult<unknown> = {
+        ok: false,
+        error: {
+          code: 'INVALID_ARGUMENTS',
+          message: `Tool arguments failed schema validation: ${schemaErrors.join('; ')}`,
+        },
       };
       this.recordToolCall(toolCallId, toolName, input, result, false, 0, source);
       return { result, approved: false, changedFiles: false };
@@ -924,7 +1068,8 @@ export class AgentRuntime {
           type: 'file_changed',
           timestamp: new Date().toISOString(),
           eventId: randomUUID(),
-          path: file,
+          path: typeof file === 'string' ? file : file.relativePath,
+          rootId: typeof file === 'string' ? this.state.workspace.primaryRoot : file.rootId,
           operation: toolName,
         });
       }
@@ -1066,6 +1211,15 @@ export class AgentRuntime {
     this.context.setWorkingMemory(this.state);
 
     const durationMs = Date.now() - start;
+    if (options.deferRecording) {
+      // The caller records this run in order (e.g. a parallel batch).
+      return {
+        result,
+        approved,
+        changedFiles: changedFilesThisCall,
+        deferred: { toolName, input, toolCallId, durationMs, source },
+      };
+    }
     this.recordToolCall(toolCallId, toolName, input, result, approved, durationMs, source);
     return { result, approved, changedFiles: changedFilesThisCall };
   }
@@ -1105,7 +1259,7 @@ export class AgentRuntime {
   }
 
   private syncCheckpointState(): void {
-    const state = this.checkpoints.state();
+    const state = this.checkpointsField.state();
     this.state.checkpointIndex = state.index;
     this.state.checkpointCount = state.count;
     this.state.canUndoCheckpoints = state.canUndo;
@@ -1123,7 +1277,7 @@ export class AgentRuntime {
       objective: this.state.objective,
       runtimeState: this.state,
       signal: this.signal,
-      checkpointManager: this.checkpoints,
+      checkpointManager: this.checkpointsField,
       skillRegistry: this.skills,
     };
   }
@@ -1137,8 +1291,19 @@ export class AgentRuntime {
 
     this.state.status = 'verifying';
 
-    for (const { command } of commands) {
+    for (const validationCommand of commands) {
+      const { command } = validationCommand;
       if (this.signal?.aborted) break;
+
+      // Provenance distinguishes repo-defined package scripts from
+      // deterministic toolchain-convention commands so the permission layer
+      // can enforce workspace execution trust (VCL-R3-001).
+      const validationInput = {
+        command,
+        sourcePath: validationCommand.sourcePath,
+        sourceKind: validationCommand.sourceKind,
+        requiresWorkspaceExecutionTrust: validationCommand.requiresWorkspaceExecutionTrust,
+      };
 
       this.emit({
         type: 'validation_started',
@@ -1147,7 +1312,7 @@ export class AgentRuntime {
         command,
       });
 
-      let approved = await this.permissions.isApproved('run_validation', { command }, 'execute');
+      let approved = await this.permissions.isApproved('run_validation', validationInput, 'execute');
       if (!approved) {
         this.emit({
           type: 'approval_requested',
@@ -1156,7 +1321,7 @@ export class AgentRuntime {
           toolName: 'run_validation',
           risk: 'execute',
         });
-        const decision = await this.permissions.requestApproval('run_validation', { command }, 'execute');
+        const decision = await this.permissions.requestApproval('run_validation', validationInput, 'execute');
         if (!decision.approved) {
           this.emit({
             type: 'validation_completed',

@@ -39,13 +39,25 @@ export function createMcpToolAdapter(
   };
 }
 
+/**
+ * Maximum serialized size of an MCP tool schema. Schemas are untrusted server
+ * input; capping the size prevents a malicious server from forcing unbounded
+ * memory/time during validation compilation (VCL-R3-005).
+ */
+export const MAX_MCP_SCHEMA_BYTES = 256 * 1024;
+
 function normalizeSchema(schema: unknown): AgentTool['inputSchema'] {
   if (
     schema &&
     typeof schema === 'object' &&
     (schema as Record<string, unknown>).type === 'object'
   ) {
-    return schema as AgentTool['inputSchema'];
+    // Oversized schemas fall back to unvalidated input rather than being
+    // compiled (the tool stays usable; its args are not schema-checked).
+    const size = Buffer.byteLength(JSON.stringify(schema));
+    if (size <= MAX_MCP_SCHEMA_BYTES) {
+      return schema as AgentTool['inputSchema'];
+    }
   }
   return { type: 'object', properties: {} };
 }

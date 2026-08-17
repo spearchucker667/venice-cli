@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { AgentRuntime, detectWorkspaceRoot } from './runtime.js';
+import { PermissionManager } from './permissions.js';
 import { SessionManager } from './sessions.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { readFileTool } from '../tools/filesystem/read.js';
@@ -106,6 +107,13 @@ describe('AgentRuntime', () => {
       objective: 'Inspect files',
       modelClient: client,
       toolRegistry: registry,
+    });
+    // Positive capability evidence is required for agent mode (VCL-R3-006);
+    // the mock's profile fetch returns undefined, so the test declares it.
+    runtime.setModelProfile({
+      id: runtime.getState().model,
+      mode: 'agent',
+      supportsFunctionCalling: true,
     });
 
     await runtime.run();
@@ -414,7 +422,9 @@ describe('AgentRuntime', () => {
     });
 
     const result = await runtime.run();
-    assert.deepStrictEqual(result.state.changedFiles, ['created.txt']);
+    assert.deepStrictEqual(result.state.changedFiles, [
+      { rootId: workspace, relativePath: 'created.txt' },
+    ]);
     fs.rmSync(workspace, { recursive: true, force: true });
   });
 
@@ -447,6 +457,7 @@ describe('AgentRuntime', () => {
       { content: 'Edit applied.', finishReason: 'stop' },
     ];
 
+    const permissions = new PermissionManager('auto-edit');
     const runtime = new AgentRuntime({
       workspaceRoot: workspace,
       objective: 'Edit and validate',
@@ -454,7 +465,12 @@ describe('AgentRuntime', () => {
       maxTurns: 5,
       modelClient: new MockModelClient(responses),
       toolRegistry: registry,
+      permissionManager: permissions,
     });
+    // Repo-defined package scripts execute repository-controlled code and
+    // require explicit workspace execution trust (VCL-R3-001). Grant it here
+    // to model the user having approved validation for this session.
+    permissions.grant('session', 'run_validation', undefined, 'execute');
 
     const result = await runtime.run();
     assert.strictEqual(result.state.status, 'complete');
@@ -495,6 +511,7 @@ describe('AgentRuntime', () => {
       { content: 'Edit applied.', finishReason: 'stop' },
     ];
 
+    const permissions = new PermissionManager('auto-edit');
     const runtime = new AgentRuntime({
       workspaceRoot: workspace,
       objective: 'Edit and validate',
@@ -502,7 +519,9 @@ describe('AgentRuntime', () => {
       maxTurns: 5,
       modelClient: new MockModelClient(responses),
       toolRegistry: registry,
+      permissionManager: permissions,
     });
+    permissions.grant('session', 'run_validation', undefined, 'execute');
 
     const result = await runtime.run();
     assert.strictEqual(result.state.status, 'complete');
@@ -590,7 +609,7 @@ describe('AgentRuntime', () => {
     const result = await runtime.run();
     assert.strictEqual(result.state.lastValidation, undefined);
     assert.ok(!result.events.some((e) => e.type === 'validation_started'));
-    assert.ok(result.state.changedFiles.includes('new.txt'));
+    assert.ok(result.state.changedFiles.some((f) => f.relativePath === 'new.txt'));
   });
 
   it('supports persistent follow-up messages in the same runtime', async () => {
@@ -942,5 +961,214 @@ describe('AgentRuntime', () => {
     assert.ok(ask);
     assert.strictEqual(ask.result.ok, false);
     assert.strictEqual(ask.result.error?.code, 'INTERACTION_REQUIRED');
+  });
+
+  it('tracks an additional-root edit with root-aware identity (VCL-R3-004)', async () => {
+    const primary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-r3-primary-')));
+    const shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-r3-shared-')));
+    fs.mkdirSync(path.join(shared, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(shared, 'src', 'a.ts'), 'shared-original');
+    fs.mkdirSync(path.join(primary, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(primary, 'src', 'a.ts'), 'primary-version');
+
+    const registry = new ToolRegistry();
+    registry.register(editFileTool);
+    const responses: ModelResponse[] = [
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: {
+              name: 'edit_file',
+              arguments: JSON.stringify({
+                path: path.join(shared, 'src', 'a.ts'),
+                oldString: 'shared-original',
+                newString: 'shared-edited',
+              }),
+            },
+          },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'Edited.', finishReason: 'stop' },
+    ];
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: primary,
+      objective: 'Edit shared file',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      autoValidate: false,
+      modelClient: new MockModelClient(responses),
+      toolRegistry: registry,
+      additionalRoots: [shared],
+    });
+
+    const result = await runtime.run();
+    // Changed identity keeps the owning root: NOT collapsed to primary-relative.
+    const changed = result.state.changedFiles.find((f) => f.relativePath === 'src/a.ts');
+    assert.ok(changed, 'shared file must be tracked');
+    assert.strictEqual(changed!.rootId, shared, 'identity must retain the additional root');
+    assert.strictEqual(fs.readFileSync(path.join(shared, 'src', 'a.ts'), 'utf-8'), 'shared-edited');
+    assert.strictEqual(fs.readFileSync(path.join(primary, 'src', 'a.ts'), 'utf-8'), 'primary-version');
+
+    // The checkpoint for the additional-root edit restores the right file.
+    const undo = await runtime.checkpoints.undo();
+    assert.strictEqual(undo.ok, true);
+    assert.strictEqual(fs.readFileSync(path.join(shared, 'src', 'a.ts'), 'utf-8'), 'shared-original');
+    assert.strictEqual(fs.readFileSync(path.join(primary, 'src', 'a.ts'), 'utf-8'), 'primary-version');
+
+    fs.rmSync(primary, { recursive: true, force: true });
+    fs.rmSync(shared, { recursive: true, force: true });
+  });
+
+  it('rejects tool arguments that fail schema validation before execution (VCL-R3-005)', async () => {
+    const registry = new ToolRegistry();
+    let executed = false;
+    const guardedTool: AgentTool<{ text: string }, string> = {
+      name: 'guarded',
+      description: 'Requires a string',
+      inputSchema: {
+        type: 'object',
+        properties: { text: { type: 'string' } },
+        required: ['text'],
+      },
+      risk: 'execute',
+      async execute(input) {
+        executed = true;
+        return { ok: true, data: input.text };
+      },
+    };
+    registry.register(guardedTool);
+
+    const responses: ModelResponse[] = [
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'guarded', arguments: JSON.stringify({ text: 123 }) },
+          },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'done', finishReason: 'stop' },
+    ];
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Trigger guarded tool',
+      approvalMode: 'auto',
+      maxTurns: 5,
+      autoValidate: false,
+      modelClient: new MockModelClient(responses),
+      toolRegistry: registry,
+    });
+
+    const result = await runtime.run();
+    assert.strictEqual(executed, false, 'tool must not execute on invalid arguments');
+    const call = result.state.toolHistory[0];
+    assert.strictEqual(call.toolName, 'guarded');
+    assert.strictEqual(call.result.ok, false);
+    assert.strictEqual(call.result.error?.code, 'INVALID_ARGUMENTS');
+    assert.match(call.result.error?.message ?? '', /schema validation/);
+  });
+
+  it('runs parallelSafe tool calls concurrently and records them in order (VCL-R3-022)', async () => {
+    const registry = new ToolRegistry();
+    let entered = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const barrierTool: AgentTool<{ n: number }, number> = {
+      name: 'parallel_reader',
+      description: 'Reads only after every call in the batch has started',
+      inputSchema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
+      risk: 'read',
+      parallelSafe: true,
+      async execute(input) {
+        entered++;
+        if (entered >= 2) release();
+        await gate;
+        return { ok: true, data: input.n };
+      },
+    };
+    registry.register(barrierTool);
+
+    const responses: ModelResponse[] = [
+      {
+        content: '',
+        toolCalls: [
+          { id: 'c1', type: 'function', function: { name: 'parallel_reader', arguments: JSON.stringify({ n: 1 }) } },
+          { id: 'c2', type: 'function', function: { name: 'parallel_reader', arguments: JSON.stringify({ n: 2 }) } },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'done', finishReason: 'stop' },
+    ];
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Parallel reads',
+      approvalMode: 'auto',
+      maxTurns: 5,
+      autoValidate: false,
+      modelClient: new MockModelClient(responses),
+      toolRegistry: registry,
+    });
+
+    // A serial runtime would deadlock on the barrier; bound the wait so a
+    // regression fails fast instead of hanging CI.
+    const result = await Promise.race([
+      runtime.run(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('parallelSafe batch did not run concurrently (deadlock)')), 8000)
+      ),
+    ]);
+
+    assert.strictEqual(entered, 2, 'both parallel-safe calls must have started');
+    assert.deepStrictEqual(
+      result.state.toolHistory.map((t) => (t.input as { n: number }).n),
+      [1, 2],
+      'tool history must preserve the original call order'
+    );
+    assert.ok(result.state.toolHistory.every((t) => t.result.ok));
+  });
+
+  it('keeps non-parallelSafe calls strictly ordered (VCL-R3-022)', async () => {
+    const registry = new ToolRegistry();
+    registry.register(shellTool);
+    registry.register(readFileTool);
+
+    const responses: ModelResponse[] = [
+      {
+        content: '',
+        toolCalls: [
+          { id: 'c1', type: 'function', function: { name: 'shell', arguments: JSON.stringify({ command: 'echo hi' }) } },
+          { id: 'c2', type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: 'package.json' }) } },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'done', finishReason: 'stop' },
+    ];
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Ordered calls',
+      approvalMode: 'auto',
+      maxTurns: 5,
+      autoValidate: false,
+      modelClient: new MockModelClient(responses),
+      toolRegistry: registry,
+    });
+
+    const result = await runtime.run();
+    assert.deepStrictEqual(
+      result.state.toolHistory.map((t) => t.toolName),
+      ['shell', 'read_file'],
+      'shell (not parallelSafe) must run before the following read, in order'
+    );
   });
 });

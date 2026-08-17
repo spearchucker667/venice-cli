@@ -4,6 +4,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { WorkspaceFileRef } from './types.js';
 
 export function isPathInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
@@ -16,6 +17,24 @@ export function isPathInside(root: string, candidate: string): boolean {
 
 export function toWorkspacePath(value: string): string {
   return value.split(path.sep).join('/');
+}
+
+/** Build a root-aware file ref from a root realpath and a relative path. */
+export function toFileRef(root: string, relativePath: string): WorkspaceFileRef {
+  return { rootId: root, relativePath: toWorkspacePath(relativePath) };
+}
+
+/**
+ * Human/context display for a file ref: primary-root files show just the
+ * relative path; files in additional roots stay unambiguous (VCL-R3-004).
+ */
+export function formatFileRef(ref: WorkspaceFileRef, primaryRoot: string): string {
+  return ref.rootId === primaryRoot ? ref.relativePath : `${ref.relativePath} (${ref.rootId})`;
+}
+
+/** Accept a bare relative path (primary root) or a structured ref. */
+export function normalizeFileRef(ref: WorkspaceFileRef | string, primaryRoot: string): WorkspaceFileRef {
+  return typeof ref === 'string' ? toFileRef(primaryRoot, ref) : ref;
 }
 
 export class WorkspaceManager {
@@ -44,8 +63,13 @@ export class WorkspaceManager {
     return [this.root, ...this.additionalRoots];
   }
 
-  get changedFiles(): string[] {
-    return Array.from(this.changed);
+  get changedFiles(): WorkspaceFileRef[] {
+    return Array.from(this.changed)
+      .map((key) => {
+        const sep = key.indexOf('\u0000');
+        return { rootId: key.slice(0, sep), relativePath: key.slice(sep + 1) };
+      })
+      .sort((a, b) => (a.rootId === b.rootId ? a.relativePath.localeCompare(b.relativePath) : a.rootId.localeCompare(b.rootId)));
   }
 
   resolve(inputPath: string): { absolute: string; relative: string; root: string } {
@@ -77,25 +101,26 @@ export class WorkspaceManager {
     }
   }
 
-  markChanged(relativePath: string): void {
-    this.changed.add(toWorkspacePath(path.normalize(relativePath)));
+  /**
+   * Record a file as changed. Accepts a bare relative path (interpreted as
+   * primary-root-relative, e.g. legacy persisted state) or a root-aware ref.
+   */
+  markChanged(ref: WorkspaceFileRef | string): void {
+    const normalized = normalizeFileRef(ref, this.root);
+    this.changed.add(`${normalized.rootId}\u0000${normalized.relativePath}`);
   }
 
   /**
-   * Record a resolved path as changed. Files in additional roots are tracked
-   * by their absolute path so the persisted list stays unambiguous.
+   * Record a resolved path as changed, preserving its owning root so the
+   * persisted list stays unambiguous across additional roots (VCL-R3-004).
    */
   markChangedResolved(resolved: { absolute: string; relative: string; root: string }): void {
-    if (resolved.root === this.root) {
-      this.markChanged(resolved.relative);
-    } else {
-      this.changed.add(toWorkspacePath(resolved.absolute));
-    }
+    this.markChanged(toFileRef(resolved.root, resolved.relative));
   }
 
-  replaceChangedFiles(relativePaths: string[]): void {
+  replaceChangedFiles(refs: (WorkspaceFileRef | string)[]): void {
     this.changed.clear();
-    for (const relativePath of relativePaths) this.markChanged(relativePath);
+    for (const ref of refs) this.markChanged(ref);
   }
 
   private matchingRoot(absolutePath: string): string | undefined {

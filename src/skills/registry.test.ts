@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { SkillRegistry, getGlobalSkillsDir, getProjectSkillsDir } from './registry.js';
+import { SkillRegistry, getGlobalSkillsDir, getProjectSkillsDir, type SkillFs } from './registry.js';
 
 describe('SkillRegistry', () => {
   let globalDir: string;
@@ -67,7 +67,31 @@ describe('SkillRegistry discovery errors (VC-KIMI-043)', () => {
     assert.match(registry.getErrors()[0], /invalid skill manifest/);
   });
 
-  it('surfaces unreadable skill files', () => {
+  it('surfaces unreadable skill files via an injected read failure (cross-platform)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-unreadable-'));
+    const skillDir = path.join(dir, 'secret');
+    fs.mkdirSync(skillDir, { recursive: true });
+    const skillPath = path.join(skillDir, 'SKILL.md');
+    fs.writeFileSync(skillPath, '---\nname: secret\ndescription: x\n---\n\nBody\n');
+
+    const fakeFs: SkillFs = {
+      ...fs,
+      readFileSync: ((filePath: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+        if (String(filePath).endsWith('SKILL.md')) {
+          throw new Error('simulated unreadable skill file');
+        }
+        return fs.readFileSync(filePath as fs.PathLike, ...(args as [BufferEncoding]));
+      }) as typeof fs.readFileSync,
+    };
+
+    const registry = new SkillRegistry(dir, undefined, [], fakeFs);
+    registry.discover();
+    assert.strictEqual(registry.getErrors().length, 1);
+    assert.match(registry.getErrors()[0], /failed to parse skill/);
+    assert.match(registry.getErrors()[0], /simulated unreadable skill file/);
+  });
+
+  it('surfaces unreadable skill files via real permissions (POSIX only)', { skip: process.platform === 'win32' }, () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-unreadable-'));
     const skillDir = path.join(dir, 'secret');
     fs.mkdirSync(skillDir, { recursive: true });

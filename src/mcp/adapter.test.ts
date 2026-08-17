@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { createMcpToolAdapter } from './adapter.js';
+import { createMcpToolAdapter, MAX_MCP_SCHEMA_BYTES } from './adapter.js';
+import { compileToolSchema } from '../lib/tool-schema.js';
 import type { ToolContext } from '../tools/types.js';
 import { defaultMode } from '../agent/mode.js';
 
@@ -44,5 +45,29 @@ describe('createMcpToolAdapter', () => {
     assert.strictEqual(result.ok, false);
     assert.strictEqual(result.error?.code, 'MCP_TOOL_ERROR');
     assert.ok(result.error?.message.includes('boom'));
+  });
+
+  it('caps oversized MCP schemas instead of compiling them (VCL-R3-005)', () => {
+    const bigSchema = {
+      type: 'object',
+      properties: { data: { type: 'string', description: 'x'.repeat(MAX_MCP_SCHEMA_BYTES) } },
+    };
+    const adapter = createMcpToolAdapter('server', { name: 't', inputSchema: bigSchema }, async () => ({}));
+    assert.deepStrictEqual(adapter.inputSchema, { type: 'object', properties: {} });
+  });
+});
+
+describe('compileToolSchema hardening (VCL-R3-005)', () => {
+  it('rejects remote $ref loading without fetching', () => {
+    // AJV cannot resolve an external reference and throws at compile time;
+    // the schema is never fetched and the tool is unusable.
+    assert.throws(
+      () =>
+        compileToolSchema({
+          type: 'object',
+          properties: { a: { $ref: 'https://evil.example/schema.json' } },
+        }),
+      /can't resolve reference/
+    );
   });
 });

@@ -18,7 +18,7 @@ import { writeFileTool } from '../filesystem/write.js';
 import { editFileTool } from '../filesystem/edit.js';
 import { applyPatchTool } from '../filesystem/patch.js';
 import type { CheckpointManager } from '../../agent/checkpoints.js';
-import type { AgentStatus, SubagentKind, SubagentMode, SubagentResult, ToolInvocation } from '../../agent/types.js';
+import type { AgentStatus, SubagentKind, SubagentMode, SubagentResult, ToolInvocation, WorkspaceFileRef } from '../../agent/types.js';
 import {
   buildSubagentObjective,
   collectSubagentFilesInspected,
@@ -50,7 +50,7 @@ export interface RunSubagentResult {
   finalMessage: string;
   state: {
     status: AgentStatus;
-    changedFiles: string[];
+    changedFiles: WorkspaceFileRef[];
     toolHistory: ToolInvocation[];
   };
 }
@@ -119,7 +119,11 @@ export function createSpawnAgentTool(deps: SpawnAgentToolDeps = {}): AgentTool<S
         findings: parsed.findings,
         recommendations: parsed.recommendations,
         filesInspected: collectSubagentFilesInspected(run.state.toolHistory),
-        changedFiles: [...run.state.changedFiles].sort(),
+        changedFiles: [...run.state.changedFiles].sort((a, b) =>
+          a.rootId === b.rootId
+            ? a.relativePath.localeCompare(b.relativePath)
+            : a.rootId.localeCompare(b.rootId)
+        ),
       };
 
       return success(report, {

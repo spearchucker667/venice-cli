@@ -27,7 +27,10 @@ export function profileModel(model: Model): ModelProfile {
   const supportsFunctionCalling = capabilities?.supportsFunctionCalling;
   return {
     id: model.id,
-    mode: supportsFunctionCalling === false ? 'chat-only' : 'agent',
+    // Fail closed: tools are granted only on positive capability evidence.
+    // A model that omits the flag, or an unknown model, is chat-only until
+    // its tool support is confirmed (VCL-R3-006).
+    mode: supportsFunctionCalling === true ? 'agent' : 'chat-only',
     contextLimit: model.model_spec?.availableContextTokens,
     privacy: model.model_spec?.privacy,
     supportsFunctionCalling,

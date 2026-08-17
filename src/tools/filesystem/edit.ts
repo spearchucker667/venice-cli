@@ -5,7 +5,7 @@
 import * as fs from 'node:fs';
 import type { AgentTool } from '../types.js';
 import { success, failure } from '../result.js';
-import { WorkspaceManager } from '../../agent/workspace.js';
+import { WorkspaceManager, toFileRef } from '../../agent/workspace.js';
 
 export const editFileTool: AgentTool<{ path: string; oldString: string; newString: string }, { replacements: number }> = {
   name: 'edit_file',
@@ -32,6 +32,7 @@ export const editFileTool: AgentTool<{ path: string; oldString: string; newStrin
       context.checkpointManager?.record({
         operation: 'edit_file',
         relativePath: relative,
+        rootId: root,
         originalContent: content,
         newContent,
       });
@@ -39,7 +40,7 @@ export const editFileTool: AgentTool<{ path: string; oldString: string; newStrin
       workspace.markChangedResolved({ absolute, relative, root });
       return success(
         { replacements: content.split(input.oldString).length - 1 },
-        { affectedFiles: [relative] }
+        { affectedFiles: [toFileRef(root, relative)] }
       );
     } catch (error) {
       return failure('EDIT_ERROR', error instanceof Error ? error.message : String(error));

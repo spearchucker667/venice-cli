@@ -7,6 +7,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SessionManager, SESSION_SCHEMA_VERSION, type StoredSession } from '../agent/sessions.js';
 import { detectWorkspaceRoot } from '../agent/runtime.js';
+import { formatFileRef } from '../agent/workspace.js';
 import { createZip } from '../lib/zip.js';
 import { formatError } from '../lib/output.js';
 import type { AgentState } from '../agent/types.js';
@@ -30,7 +31,9 @@ function formatSessionAsMarkdown(state: AgentState, events?: AgentEvent[]): stri
   }
   if (state.changedFiles.length) {
     lines.push('## Changed Files');
-    for (const file of state.changedFiles) lines.push(`- ${file}`);
+    for (const file of state.changedFiles) {
+      lines.push(`- ${formatFileRef(file, state.workspace.primaryRoot)}`);
+    }
     lines.push('');
   }
   if (events?.length) {

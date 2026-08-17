@@ -108,7 +108,7 @@ describe('spawn_agent tool', () => {
         finalMessage: '{"summary":"bad"}',
         state: {
           status: 'complete',
-          changedFiles: ['src/unsafe.ts'],
+          changedFiles: [{ rootId: '/ws', relativePath: 'src/unsafe.ts' }],
           toolHistory: [],
         },
       }),
@@ -149,7 +149,7 @@ describe('spawn_agent tool', () => {
           finalMessage: '{"summary":"Updated source."}',
           state: {
             status: 'complete',
-            changedFiles: ['src/a.ts'],
+            changedFiles: [{ rootId: '/ws', relativePath: 'src/a.ts' }],
             toolHistory: [],
           },
         };
@@ -160,7 +160,7 @@ describe('spawn_agent tool', () => {
     assert.strictEqual(result.ok, true);
     assert.strictEqual(receivedMode, 'write');
     assert.strictEqual(result.data?.mode, 'write');
-    assert.deepStrictEqual(result.data?.changedFiles, ['src/a.ts']);
-    assert.deepStrictEqual(result.metadata?.affectedFiles, ['src/a.ts']);
+    assert.deepStrictEqual(result.data?.changedFiles, [{ rootId: '/ws', relativePath: 'src/a.ts' }]);
+    assert.deepStrictEqual(result.metadata?.affectedFiles, [{ rootId: '/ws', relativePath: 'src/a.ts' }]);
   });
 });

@@ -6,7 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTool } from '../types.js';
 import { success, failure } from '../result.js';
-import { WorkspaceManager } from '../../agent/workspace.js';
+import { WorkspaceManager, toFileRef } from '../../agent/workspace.js';
 
 export const writeFileTool: AgentTool<{ path: string; content: string }, { bytesWritten: number }> = {
   name: 'write_file',
@@ -30,11 +30,15 @@ export const writeFileTool: AgentTool<{ path: string; content: string }, { bytes
       context.checkpointManager?.record({
         operation: 'write_file',
         relativePath: relative,
+        rootId: root,
         originalContent,
         newContent: input.content,
       });
       workspace.markChangedResolved({ absolute, relative, root });
-      return success({ bytesWritten: Buffer.byteLength(input.content, 'utf-8') }, { affectedFiles: [relative] });
+      return success(
+        { bytesWritten: Buffer.byteLength(input.content, 'utf-8') },
+        { affectedFiles: [toFileRef(root, relative)] }
+      );
     } catch (error) {
       return failure('WRITE_ERROR', error instanceof Error ? error.message : String(error));
     }

@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import * as path from 'node:path';
 import { McpStdioClient } from './client.js';
+import { MCP_PROTOCOL_VERSION } from './protocol.js';
 
 // Tests run from the project root via `npm test`.
 const fakeServer = path.join(process.cwd(), 'src/mcp/test-server.js');
@@ -139,6 +140,42 @@ describe('McpStdioClient', () => {
     assert.strictEqual(client.isRunning(), true);
     await client.stop();
     assert.strictEqual(client.isRunning(), false);
+  });
+
+  it('advertises the current MCP protocol revision (VCL-R3-019)', async () => {
+    const script = `
+      process.stdin.once('data',(chunk)=>{
+        const req=JSON.parse(chunk.toString().trim());
+        process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:req.id,result:{protocolVersion:req.params.protocolVersion,capabilities:{},serverInfo:{name:'t',version:'1'}}})+'\\n');
+      });
+      setInterval(()=>{},1000);
+    `;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 1000, requestTimeoutMs: 1000, stopGraceMs: 20 }
+    );
+    await client.start();
+    // The negotiated version is whatever the client advertised.
+    assert.strictEqual(client.getNegotiatedProtocolVersion(), MCP_PROTOCOL_VERSION);
+    assert.strictEqual(client.getNegotiatedProtocolVersion(), '2025-06-18');
+    await client.stop();
+  });
+
+  it('accepts a server negotiating down to the previous revision (VCL-R3-019)', async () => {
+    const script = `
+      process.stdin.once('data',(chunk)=>{
+        const req=JSON.parse(chunk.toString().trim());
+        process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:req.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'t',version:'1'}}})+'\\n');
+      });
+      setInterval(()=>{},1000);
+    `;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 1000, requestTimeoutMs: 1000, stopGraceMs: 20 }
+    );
+    await client.start();
+    assert.strictEqual(client.getNegotiatedProtocolVersion(), '2024-11-05');
+    await client.stop();
   });
 });
 

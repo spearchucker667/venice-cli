@@ -119,7 +119,7 @@ describe('SessionManager', () => {
   it('loads state and events from the same canonical generation', () => {
     const restored = state('restore-all');
     restored.model = 'restored-model';
-    restored.changedFiles = ['src/a.ts'];
+    restored.changedFiles = [{ rootId: '/tmp', relativePath: 'src/a.ts' }];
     restored.activeSkills = ['review'];
     restored.checkpointIndex = 2;
     restored.checkpointCount = 3;
@@ -131,7 +131,7 @@ describe('SessionManager', () => {
     fs.writeFileSync(path.join(tmp, 'restore-all', 'events.jsonl'), '{corrupt projection}\n');
     const loaded = manager.load('restore-all');
     assert.strictEqual(loaded?.state.model, 'restored-model');
-    assert.deepEqual(loaded?.state.changedFiles, ['src/a.ts']);
+    assert.deepEqual(loaded?.state.changedFiles, [{ rootId: '/tmp', relativePath: 'src/a.ts' }]);
     assert.deepEqual(loaded?.state.activeSkills, ['review']);
     assert.strictEqual(loaded?.state.checkpointIndex, 2);
     assert.strictEqual(loaded?.events[0].eventId, 'generation-event');

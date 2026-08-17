@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import { SessionManager, SESSION_SCHEMA_VERSION, type StoredSession } from './sessions.js';
 import type { AgentEvent } from './events.js';
-import type { AgentState } from './types.js';
+import { isWorkspaceFileRef, type AgentState, type WorkspaceFileRef } from './types.js';
 import { isZipArchive, readZipEntry } from '../lib/zip.js';
 
 export interface ImportSessionOptions {
@@ -157,11 +157,33 @@ function normalizeImportedState(input: unknown): AgentState {
 
   const array = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 
+  // Guarded passthrough for durable optional fields (VCL-R3-009): a field is
+  // preserved only when it has the expected shape, so a malformed export can
+  // never poison the resumed runtime, and a well-formed one round-trips.
+  const objectField = (value: unknown, guard: (v: Record<string, unknown>) => boolean): Record<string, unknown> | undefined =>
+    typeof value === 'object' && value !== null && !Array.isArray(value) && guard(value as Record<string, unknown>)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const numberField = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  const booleanField = (value: unknown): boolean | undefined =>
+    typeof value === 'boolean' ? value : undefined;
+
+  const primaryRoot = typeof rawWorkspace.primaryRoot === 'string' ? rawWorkspace.primaryRoot : workspaceRoot;
+
+  // Root-aware changed-file refs; legacy string entries are normalized to the
+  // primary root so identity stays unambiguous (VCL-R3-004).
+  const changedFiles = array(state.changedFiles)
+    .filter((f): f is WorkspaceFileRef | string =>
+      typeof f === 'string' || isWorkspaceFileRef(f)
+    )
+    .map((f) => (typeof f === 'string' ? { rootId: primaryRoot, relativePath: f } : f));
+
   return {
     sessionId,
     workspaceRoot,
     workspace: {
-      primaryRoot: typeof rawWorkspace.primaryRoot === 'string' ? rawWorkspace.primaryRoot : workspaceRoot,
+      primaryRoot,
       additionalRoots,
     },
     model: typeof state.model === 'string' && state.model ? state.model : 'default',
@@ -174,8 +196,34 @@ function normalizeImportedState(input: unknown): AgentState {
     messages: array(state.messages) as AgentState['messages'],
     todos: array(state.todos) as AgentState['todos'],
     relevantFiles: array(state.relevantFiles) as AgentState['relevantFiles'],
-    changedFiles: array(state.changedFiles) as AgentState['changedFiles'],
+    changedFiles: changedFiles as AgentState['changedFiles'],
     toolHistory: array(state.toolHistory) as AgentState['toolHistory'],
+    tokenUsage: objectField(state.tokenUsage, (v) =>
+      typeof v.prompt_tokens === 'number' &&
+      typeof v.completion_tokens === 'number' &&
+      typeof v.total_tokens === 'number'
+    ) as AgentState['tokenUsage'],
+    contextSummary: objectField(state.contextSummary, (v) =>
+      typeof v.objective === 'string' && Array.isArray(v.completedWork)
+    ) as AgentState['contextSummary'],
+    modelProfile: objectField(state.modelProfile, (v) =>
+      typeof v.id === 'string' && (v.mode === 'agent' || v.mode === 'chat-only')
+    ) as AgentState['modelProfile'],
+    checkpointIndex: numberField(state.checkpointIndex),
+    checkpointCount: numberField(state.checkpointCount),
+    canUndoCheckpoints: booleanField(state.canUndoCheckpoints),
+    canRedoCheckpoints: booleanField(state.canRedoCheckpoints),
+    plan: objectField(state.plan, (v) =>
+      typeof v.summary === 'string' &&
+      typeof v.filePath === 'string' &&
+      typeof v.updatedAt === 'string' &&
+      Array.isArray(v.steps)
+    ) as AgentState['plan'],
+    lastValidation: objectField(state.lastValidation, (v) =>
+      typeof v.overallSuccess === 'boolean' &&
+      Array.isArray(v.commands) &&
+      typeof v.timestamp === 'string'
+    ) as AgentState['lastValidation'],
     skillSummaries: array(state.skillSummaries) as AgentState['skillSummaries'],
     activeSkills: array(state.activeSkills) as AgentState['activeSkills'],
     subagentReports: array(state.subagentReports) as AgentState['subagentReports'],

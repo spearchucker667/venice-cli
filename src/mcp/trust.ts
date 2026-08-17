@@ -270,9 +270,12 @@ export function formatTrustPrompt(info: ProjectMcpTrustInfo): string {
   }
   lines.push('');
   lines.push(
-    `Trusting this config lets it run ${c.bold('executable code')} when the agent starts in this workspace.`
+    `Approving grants ${c.bold('workspace execution trust')}: the servers above may run ${c.bold('executable code')} in this workspace.`
   );
-  lines.push('Any change to the MCP config invalidates this approval.');
+  lines.push(
+    'The executables they reference (scripts, npx packages, commands) may change after approval and remain trusted;'
+  );
+  lines.push('only a change to this MCP config file invalidates this approval.');
   return lines.join('\n');
 }
 

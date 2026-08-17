@@ -160,9 +160,18 @@ export class PermissionManager {
       return true;
     }
 
-    // Auto-validation is a direct consequence of file edits in auto-edit mode.
+    // Auto-validation in auto-edit mode (VCL-R3-001): deterministic
+    // toolchain-convention commands (provenance flag false) are a direct
+    // consequence of edits and stay auto-approved. Repository-defined
+    // package scripts (flag true) and direct tool calls without provenance
+    // execute repository-controlled code and fall through to grants, so they
+    // require explicit workspace execution trust (a grant or approval) like
+    // the shell tool.
     if (this.mode === 'auto-edit' && toolName === 'run_validation') {
-      return true;
+      const provenance = (input ?? {}) as { requiresWorkspaceExecutionTrust?: boolean };
+      if (provenance.requiresWorkspaceExecutionTrust === false) {
+        return true;
+      }
     }
 
     for (const grant of this.grants) {

@@ -7,6 +7,7 @@
 import type { AgentMessage, AgentState, StructuredSummary } from './types.js';
 import type { Message, MessageContent } from '../types/index.js';
 import type { Skill } from '../skills/types.js';
+import { formatFileRef } from './workspace.js';
 
 export interface ContextLayer {
   name: string;
@@ -70,7 +71,9 @@ export class ContextManager {
     }
     if (state.changedFiles.length) {
       lines.push('Changed files:');
-      for (const file of state.changedFiles) lines.push(`- ${file}`);
+      for (const file of state.changedFiles) {
+        lines.push(`- ${formatFileRef(file, state.workspace.primaryRoot)}`);
+      }
     }
     if (state.relevantFiles.length) {
       lines.push('Relevant files:');
@@ -231,7 +234,7 @@ export function buildStructuredSummary(state: AgentState): StructuredSummary {
     decisions: [],
     discoveries: state.relevantFiles.map((f) => `Relevant file: ${f}`),
     filesRead: state.toolHistory.filter((t) => t.toolName === 'read_file').map((t) => String((t.input as { path?: string })?.path || '')),
-    filesChanged: state.changedFiles,
+    filesChanged: state.changedFiles.map((f) => formatFileRef(f, state.workspace.primaryRoot)),
     commandsRun,
     failures: state.toolHistory.filter((t) => !t.result.ok).map((t) => `${t.toolName}: ${t.result.error?.message || 'failed'}`),
     importantConstraints: [],

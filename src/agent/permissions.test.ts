@@ -22,9 +22,30 @@ describe('PermissionManager', () => {
     assert.strictEqual(await pm.isApproved('write_file', { path: 'x' }, 'write'), true);
   });
 
-  it('auto-edit mode auto-approves run_validation', async () => {
+  it('auto-edit auto-approves toolchain validation but not repo scripts (VCL-R3-001)', async () => {
     const pm = new PermissionManager('auto-edit');
-    assert.strictEqual(await pm.isApproved('run_validation', { command: 'npm test' }, 'execute'), true);
+    // Deterministic toolchain-convention commands are a direct consequence of edits.
+    assert.strictEqual(
+      await pm.isApproved('run_validation', { command: 'pytest', sourceKind: 'toolchain-convention', requiresWorkspaceExecutionTrust: false }, 'execute'),
+      true
+    );
+    // Repository-defined package scripts execute repo-controlled code and
+    // require explicit workspace execution trust.
+    assert.strictEqual(
+      await pm.isApproved('run_validation', { command: 'npm run test', sourceKind: 'package-script', requiresWorkspaceExecutionTrust: true }, 'execute'),
+      false
+    );
+    // Direct tool calls without provenance also require approval.
+    assert.strictEqual(await pm.isApproved('run_validation', { command: 'npm run test' }, 'execute'), false);
+  });
+
+  it('auto-edit approves repo-script validation once execution trust is granted', async () => {
+    const pm = new PermissionManager('auto-edit');
+    pm.grant('session', 'run_validation', undefined, 'execute');
+    assert.strictEqual(
+      await pm.isApproved('run_validation', { command: 'npm run test', sourceKind: 'package-script', requiresWorkspaceExecutionTrust: true }, 'execute'),
+      true
+    );
   });
 
   it('suggest mode requires approval for run_validation', async () => {

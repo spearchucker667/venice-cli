@@ -58,14 +58,17 @@ export function registerAgentCommand(program: Command): Command {
         process.exit(2);
       }
 
-      const interactive = options.interactive ?? (process.stdin.isTTY && process.stdout.isTTY && !options.json && options.outputFormat !== 'stream-json');
+      const outputFormat = options.json ? 'json' : options.outputFormat;
+      const interactive = resolveInteractive(
+        { prompt: options.prompt, interactive: options.interactive, json: options.json, outputFormat },
+        { stdinTTY: process.stdin.isTTY, stdoutTTY: process.stdout.isTTY }
+      );
 
       // Headless `-p` defaults to auto-edit so normal workspace edits can
       // proceed without a human approver; shell/network still prompt (and fail
       // closed with no approver). Interactive keeps `suggest` (VC-KIMI-017).
       const approvalMode = resolveApprovalMode(requestedApproval, interactive);
 
-      const outputFormat = options.json ? 'json' : options.outputFormat;
       if (!['text', 'stream-json', 'json'].includes(outputFormat)) {
         console.error(formatError(`Invalid output format: ${outputFormat}`));
         process.exit(2);
@@ -228,6 +231,29 @@ export function resolveApprovalMode(
 ): 'suggest' | 'auto-edit' | 'auto' | 'yolo' {
   if (requested) return requested;
   return interactive ? 'suggest' : 'auto-edit';
+}
+
+/**
+ * Decide whether the agent run should open the TUI (VCL-R3-007/008).
+ *
+ * A `-p/--prompt` run is never interactive by default, and any machine
+ * output format (`json`/`stream-json`) forces headless behavior. Only a plain
+ * text run on a TTY with no prompt is interactive. An explicit
+ * `--interactive`/`--no-interactive` flag always wins.
+ */
+export function resolveInteractive(
+  options: {
+    prompt?: string;
+    interactive?: boolean;
+    json?: boolean;
+    outputFormat?: string;
+  },
+  env: { stdinTTY: boolean; stdoutTTY: boolean }
+): boolean {
+  if (options.interactive !== undefined) return options.interactive;
+  const promptMode = options.prompt !== undefined;
+  const outputFormat = options.json ? 'json' : options.outputFormat;
+  return !promptMode && env.stdinTTY && env.stdoutTTY && outputFormat === 'text';
 }
 
 function readStdin(): Promise<string> {

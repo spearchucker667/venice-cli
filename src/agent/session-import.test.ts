@@ -151,4 +151,83 @@ describe('SessionImportService', () => {
     assert.strictEqual(result.state.mode.permissionMode, 'auto');
     assert.strictEqual(result.state.mode.inputMode, 'agent');
   });
+
+  it('round-trips every durable field through export/import (VCL-R3-009)', () => {
+    const durableState = makeState({
+      sessionId: 'roundtrip-1',
+      modelProfile: { id: 'venice/glm', mode: 'agent', supportsFunctionCalling: true, contextLimit: 128000 },
+      tokenUsage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+      contextSummary: {
+        objective: 'roundtrip objective',
+        completedWork: ['a'],
+        remainingWork: ['b'],
+        decisions: [],
+        discoveries: [],
+        filesRead: [],
+        filesChanged: [],
+        commandsRun: [{ command: 'npm test', result: 'pass' }],
+        failures: [],
+        importantConstraints: [],
+      },
+      checkpointIndex: 1,
+      checkpointCount: 3,
+      canUndoCheckpoints: true,
+      canRedoCheckpoints: false,
+      plan: {
+        summary: 'Plan summary',
+        steps: [{ id: '1', text: 'step one' }],
+        filePath: '/workspace/PLAN.md',
+        updatedAt: new Date().toISOString(),
+      },
+      lastValidation: {
+        commands: [{ command: 'npm run build', exitCode: 0, stdout: 'ok', stderr: '' }],
+        overallSuccess: true,
+        timestamp: new Date().toISOString(),
+      },
+      title: 'My session',
+    });
+
+    // encode(state) is the JSON the exporter writes; decode is importData.
+    const encoded = JSON.parse(JSON.stringify(makeStored({ sessionId: 'roundtrip-1', state: durableState })));
+    const service = new SessionImportService(manager);
+    const result = service.importData(encoded);
+
+    assert.deepStrictEqual(result.state.modelProfile, durableState.modelProfile);
+    assert.deepStrictEqual(result.state.tokenUsage, durableState.tokenUsage);
+    assert.deepStrictEqual(result.state.contextSummary, durableState.contextSummary);
+    assert.strictEqual(result.state.checkpointIndex, 1);
+    assert.strictEqual(result.state.checkpointCount, 3);
+    assert.strictEqual(result.state.canUndoCheckpoints, true);
+    assert.strictEqual(result.state.canRedoCheckpoints, false);
+    assert.deepStrictEqual(result.state.plan, durableState.plan);
+    assert.deepStrictEqual(result.state.lastValidation, durableState.lastValidation);
+    assert.strictEqual(result.state.title, 'My session');
+
+    // And it survives persistence so a resumed runtime sees it all.
+    const stored = manager.load('roundtrip-1');
+    assert.deepStrictEqual(stored?.state.lastValidation, durableState.lastValidation);
+    assert.deepStrictEqual(stored?.state.plan, durableState.plan);
+    assert.deepStrictEqual(stored?.state.modelProfile, durableState.modelProfile);
+  });
+
+  it('drops malformed durable fields instead of crashing (VCL-R3-009)', () => {
+    const service = new SessionImportService(manager);
+    const raw = makeStored({
+      sessionId: 'bad-durable-1',
+      state: {
+        ...makeState({ sessionId: 'bad-durable-1' }),
+        modelProfile: { id: 42 } as never,
+        tokenUsage: 'nope' as never,
+        plan: { summary: 'no file path' } as never,
+        lastValidation: { overallSuccess: 'yes' } as never,
+        checkpointCount: 'three' as never,
+      },
+    });
+    const result = service.importData(raw);
+    assert.strictEqual(result.state.modelProfile, undefined);
+    assert.strictEqual(result.state.tokenUsage, undefined);
+    assert.strictEqual(result.state.plan, undefined);
+    assert.strictEqual(result.state.lastValidation, undefined);
+    assert.strictEqual(result.state.checkpointCount, undefined);
+  });
 });

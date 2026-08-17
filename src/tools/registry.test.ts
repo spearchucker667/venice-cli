@@ -72,4 +72,15 @@ describe('ToolRegistry', () => {
     assert.ok(registry.definitions().some((d) => d.function.name === 'echo'));
     assert.ok(!registry.definitions('plan').some((d) => d.function.name === 'echo'));
   });
+
+  it('validates tool arguments against the advertised schema (VCL-R3-005)', () => {
+    const registry = new ToolRegistry();
+    registry.register(echoTool);
+
+    assert.deepStrictEqual(registry.validateInput('echo', { text: 'ok' }), []);
+    const missing = registry.validateInput('echo', {});
+    assert.ok(missing.some((m) => /missing required property "text"/.test(m)));
+    const wrongType = registry.validateInput('echo', { text: 42 });
+    assert.ok(wrongType.some((m) => /text/.test(m)));
+  });
 });

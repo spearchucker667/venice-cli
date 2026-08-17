@@ -151,7 +151,7 @@ describe('buildStructuredSummary', () => {
         { id: '2', content: 'edit', status: 'in_progress' },
       ],
       relevantFiles: ['src/app.ts'],
-      changedFiles: ['src/app.ts'],
+      changedFiles: [{ rootId: '/tmp', relativePath: 'src/app.ts' }],
       toolHistory: [
         {
           id: '1',

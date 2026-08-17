@@ -78,7 +78,32 @@ export interface SubagentResult {
   findings: SubagentFinding[];
   recommendations: string[];
   filesInspected: string[];
-  changedFiles?: string[];
+  changedFiles?: WorkspaceFileRef[];
+}
+
+/**
+ * Root-aware file identity (VCL-R3-003/004).
+ *
+ * `relativePath` alone is ambiguous across multiple workspace roots: the same
+ * path can name different files under the primary root and an additional
+ * root. Every durable file reference carries the realpath of its owning root
+ * so checkpoints, changed-file tracking, and session persistence resolve the
+ * same file on every restore/resume.
+ */
+export interface WorkspaceFileRef {
+  /** Realpath of the owning workspace root (primary or additional). */
+  rootId: string;
+  /** Workspace-normalized ('/') path relative to that root. */
+  relativePath: string;
+}
+
+export function isWorkspaceFileRef(value: unknown): value is WorkspaceFileRef {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).rootId === 'string' &&
+    typeof (value as Record<string, unknown>).relativePath === 'string'
+  );
 }
 
 export interface PlanStep {
@@ -131,7 +156,7 @@ export interface AgentState {
   messages: AgentMessage[];
   todos: TodoItem[];
   relevantFiles: string[];
-  changedFiles: string[];
+  changedFiles: WorkspaceFileRef[];
   toolHistory: ToolInvocation[];
   tokenUsage?: TokenUsage;
   contextSummary?: StructuredSummary;
@@ -173,7 +198,8 @@ export interface ToolResult<T = unknown> {
   metadata?: {
     durationMs?: number;
     truncated?: boolean;
-    affectedFiles?: string[];
+    /** Root-aware file refs; bare strings are treated as primary-root-relative. */
+    affectedFiles?: (WorkspaceFileRef | string)[];
   };
 }
 

@@ -398,6 +398,17 @@ export async function apiRequest<T>(
   throw lastError || new Error('Request failed after retries');
 }
 
+/** Reasoning configuration for supported models (Venice `reasoning` field). */
+export interface ReasoningConfig {
+  effort?: ReasoningEffort;
+  summary?: 'auto' | 'concise' | 'detailed';
+}
+
+/** OpenAI-compatible text configuration (Venice `text` field). */
+export interface TextConfig {
+  verbosity?: 'low' | 'medium' | 'high' | 'auto';
+}
+
 export interface ChatCompletionRequestOptions {
   model?: string;
   tools?: ToolDefinition[];
@@ -406,6 +417,8 @@ export interface ChatCompletionRequestOptions {
   additionalHeaders?: Record<string, string>;
   response_format?: ResponseFormat;
   reasoning_effort?: ReasoningEffort;
+  /** Structured reasoning config (`reasoning.effort` / `reasoning.summary`). */
+  reasoning?: ReasoningConfig;
   prompt_cache_key?: string;
   prompt_cache_retention?: PromptCacheRetention;
   showSpinner?: boolean;
@@ -416,6 +429,10 @@ export interface ChatCompletionRequestOptions {
   top_p?: number;
   top_k?: number;
   min_p?: number;
+  /** Dynamic temperature floor (Venice `min_temp`). */
+  min_temp?: number;
+  /** Dynamic temperature ceiling (Venice `max_temp`). */
+  max_temp?: number;
   seed?: number;
   logprobs?: boolean;
   top_logprobs?: number;
@@ -425,6 +442,16 @@ export interface ChatCompletionRequestOptions {
   stop?: string | string[];
   stop_token_ids?: number[];
   n?: number;
+  /** OpenAI-compatible user id (discarded by Venice). */
+  user?: string;
+  /** OpenAI-compatible store flag (accepted but unused by Venice). */
+  store?: boolean;
+  /** OpenAI-compatible text configuration. */
+  text?: TextConfig;
+  /** OpenAI-compatible request to include additional response data. */
+  include?: string[];
+  /** OpenAI-compatible request tracking metadata. */
+  metadata?: Record<string, string>;
 }
 
 export function buildChatCompletionBody(
@@ -448,11 +475,12 @@ export function buildChatCompletionBody(
   }
 
   const optionalFields: (keyof ChatCompletionRequestOptions)[] = [
-    'venice_parameters', 'response_format', 'reasoning_effort', 
+    'venice_parameters', 'response_format', 'reasoning_effort', 'reasoning',
     'prompt_cache_key', 'prompt_cache_retention', 'parallel_tool_calls',
-    'max_completion_tokens', 'max_tokens', 'temperature', 'top_p', 'top_k', 
-    'min_p', 'seed', 'logprobs', 'top_logprobs', 'frequency_penalty', 
-    'presence_penalty', 'repetition_penalty', 'stop', 'stop_token_ids', 'n'
+    'max_completion_tokens', 'max_tokens', 'temperature', 'top_p', 'top_k',
+    'min_p', 'min_temp', 'max_temp', 'seed', 'logprobs', 'top_logprobs',
+    'frequency_penalty', 'presence_penalty', 'repetition_penalty', 'stop',
+    'stop_token_ids', 'n', 'user', 'store', 'text', 'include', 'metadata'
   ];
 
   for (const field of optionalFields) {

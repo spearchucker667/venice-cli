@@ -5,7 +5,7 @@
 import * as fs from 'node:fs';
 import type { AgentTool } from '../types.js';
 import { success, failure } from '../result.js';
-import { WorkspaceManager } from '../../agent/workspace.js';
+import { WorkspaceManager, toFileRef } from '../../agent/workspace.js';
 
 export const applyPatchTool: AgentTool<{ path: string; patch: string }, { applied: boolean }> = {
   name: 'apply_patch',
@@ -68,12 +68,13 @@ export const applyPatchTool: AgentTool<{ path: string; patch: string }, { applie
       context.checkpointManager?.record({
         operation: 'apply_patch',
         relativePath: relative,
+        rootId: root,
         originalContent: original,
         newContent,
       });
       fs.writeFileSync(absolute, newContent, 'utf-8');
       workspace.markChangedResolved({ absolute, relative, root });
-      return success({ applied: true }, { affectedFiles: [relative] });
+      return success({ applied: true }, { affectedFiles: [toFileRef(root, relative)] });
     } catch (error) {
       return failure('PATCH_ERROR', error instanceof Error ? error.message : String(error));
     }

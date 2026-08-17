@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentState, AgentStatus } from '../agent/types.js';
+import { formatFileRef } from '../agent/workspace.js';
 import { defaultMode } from '../agent/mode.js';
 import { SLASH_COMMANDS, findSlashCommandDefinition, getSlashCommandBase, isSlashCommandAvailable } from './slash-commands.js';
 import type { TuiMessage } from './types.js';
@@ -33,7 +34,9 @@ function formatSessionAsMarkdown(state: AgentState): string {
   }
   if (state.changedFiles.length) {
     lines.push('## Changed Files');
-    for (const file of state.changedFiles) lines.push(`- ${file}`);
+    for (const file of state.changedFiles) {
+      lines.push(`- ${formatFileRef(file, state.workspace.primaryRoot)}`);
+    }
     lines.push('');
   }
   return lines.join('\n');
@@ -180,7 +183,8 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
       const runtime = getRuntime?.();
       const changed = runtime?.getState().changedFiles || [];
       if (changed.length > 0) {
-        addEvent(`Changed files in session:\n${changed.map((f) => `  ${f}`).join('\n')}`);
+        const primary = runtime?.getState().workspace.primaryRoot ?? '';
+        addEvent(`Changed files in session:\n${changed.map((f) => `  ${formatFileRef(f, primary)}`).join('\n')}`);
       } else {
         addEvent('No git diff or changed files.');
       }

@@ -49,16 +49,18 @@ describe('WorkspaceManager', () => {
     assert.strictEqual(workspace.isBinaryFile(binPath), true);
   });
 
-  it('tracks changed files', () => {
+  it('tracks changed files as root-aware refs', () => {
     workspace.markChanged('src/app.ts');
-    assert.ok(workspace.changedFiles.includes('src/app.ts'));
+    assert.ok(workspace.changedFiles.some((f) => f.relativePath === 'src/app.ts' && f.rootId === workspace.workspaceRoot));
   });
 
   it('replaces changed files when session state is loaded', () => {
     const workspace = new WorkspaceManager(tmp);
     workspace.markChanged('old.ts');
     workspace.replaceChangedFiles(['new.ts']);
-    assert.deepStrictEqual(workspace.changedFiles, ['new.ts']);
+    assert.deepStrictEqual(workspace.changedFiles, [
+      { rootId: workspace.workspaceRoot, relativePath: 'new.ts' },
+    ]);
   });
 });
 
@@ -92,11 +94,13 @@ describe('WorkspaceManager additional roots (VC-KIMI-044)', () => {
 
     const resolved = workspace.resolve(path.join(extra, 'extra.txt'));
     workspace.markChangedResolved(resolved);
-    assert.ok(workspace.changedFiles.some((f) => path.isAbsolute(f)));
+    assert.ok(workspace.changedFiles.some((f) => f.rootId === extra && f.relativePath === 'extra.txt'));
 
     const primaryResolved = workspace.resolve('src/app.ts');
     workspace.markChangedResolved(primaryResolved);
-    assert.ok(workspace.changedFiles.includes('src/app.ts'));
+    assert.ok(
+      workspace.changedFiles.some((f) => f.rootId === primary && f.relativePath === 'src/app.ts')
+    );
   });
 });
 

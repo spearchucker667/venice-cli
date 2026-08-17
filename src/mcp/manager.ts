@@ -29,9 +29,14 @@ export class McpManager {
     return this.startPromise;
   }
 
+  /** Max MCP servers starting in parallel (VCL-R3-020). */
+  private static readonly START_CONCURRENCY = 4;
+
   private async startServers(): Promise<void> {
-    for (const [name, config] of Object.entries(this.config.mcpServers)) {
-      if (config.disabled) continue;
+    const entries = Object.entries(this.config.mcpServers).filter(([, config]) => !config.disabled);
+    const states = new Map<string, ServerState>();
+
+    const startOne = async (name: string, config: McpServerConfig): Promise<void> => {
       const client = new McpStdioClient(config);
       const state: ServerState = { name, config, client, tools: [] };
       try {
@@ -45,7 +50,27 @@ export class McpManager {
           // Ignore stop errors after a failed start.
         }
       }
-      this.servers.push(state);
+      states.set(name, state);
+    };
+
+    // Start independent servers with bounded concurrency; results are then
+    // registered in config order so tool discovery stays deterministic
+    // (VCL-R3-020).
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const index = cursor++;
+        if (index >= entries.length) return;
+        const [name, config] = entries[index];
+        await startOne(name, config);
+      }
+    };
+    const concurrency = Math.max(1, Math.min(McpManager.START_CONCURRENCY, entries.length || 1));
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+    for (const [name] of entries) {
+      const state = states.get(name);
+      if (state) this.servers.push(state);
     }
   }
 

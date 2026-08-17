@@ -137,7 +137,7 @@ describe('plan artifact lifecycle', () => {
 
     const markdown = fs.readFileSync(path.join(tmp, 'PLAN.md'), 'utf-8');
     assert.ok(markdown.includes('Centralize auth headers'));
-    assert.ok(runtime.getState().changedFiles.includes('PLAN.md'));
+    assert.ok(runtime.getState().changedFiles.some((f) => f.relativePath === 'PLAN.md'));
   });
 
   it('write_plan locks the plan file path after the first write', async () => {

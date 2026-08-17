@@ -56,4 +56,26 @@ describe('McpManager', () => {
       await manager.stop();
     }
   });
+
+  it('starts multiple servers concurrently and registers them in config order (VCL-R3-020)', async () => {
+    const manager = new McpManager({
+      mcpServers: {
+        a: { command: 'node', args: [fakeServer] },
+        b: { command: 'node', args: [fakeServer] },
+        c: { command: 'node', args: [fakeServer] },
+      },
+    });
+    await manager.start();
+    try {
+      const states = manager.getServerStates();
+      assert.deepStrictEqual(
+        states.map((s) => s.name),
+        ['a', 'b', 'c'],
+        'server states must be registered in config order regardless of start completion order'
+      );
+      assert.strictEqual(manager.getTools().length, 3);
+    } finally {
+      await manager.stop();
+    }
+  });
 });

@@ -20,7 +20,7 @@ export type AgentEvent =
   | { type: 'tool_completed'; timestamp: string; eventId: string; toolCallId?: string; toolName: string; input?: unknown; result: unknown }
   | { type: 'subagent_started'; timestamp: string; eventId: string; kind: string; mode: string; task: string; maxTurns: number }
   | { type: 'subagent_completed'; timestamp: string; eventId: string; kind: string; mode: string; status: string; findings: number; filesInspected: number; changedFiles: number }
-  | { type: 'file_changed'; timestamp: string; eventId: string; path: string; operation: string }
+  | { type: 'file_changed'; timestamp: string; eventId: string; path: string; rootId?: string; operation: string }
   | { type: 'validation_started'; timestamp: string; eventId: string; command: string }
   | { type: 'validation_completed'; timestamp: string; eventId: string; command: string; exitCode: number; stdout?: string; stderr?: string }
   | { type: 'context_compacted'; timestamp: string; eventId: string; summary: unknown }

@@ -59,14 +59,18 @@ function parseYamlSubset(text: string): Partial<SkillManifest> & Record<string, 
   return metadata;
 }
 
-export function parseSkillMarkdown(filePath: string): Skill | undefined {
+export function parseSkillMarkdown(
+  filePath: string,
+  readFileSync: typeof fs.readFileSync = fs.readFileSync,
+): Skill | undefined {
   if (!fs.existsSync(filePath)) {
     return undefined;
   }
 
   // Read errors propagate so discovery can surface them instead of swallowing
-  // them (VC-KIMI-043).
-  const content = fs.readFileSync(filePath, 'utf-8');
+  // them (VC-KIMI-043). The reader is injectable so the error path can be
+  // tested on every platform without relying on chmod semantics.
+  const content = readFileSync(filePath, 'utf-8');
   const { metadata, body } = parseFrontmatter(content);
 
   if (!metadata.name || !metadata.description) {

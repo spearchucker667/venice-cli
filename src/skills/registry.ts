@@ -19,30 +19,44 @@ export function getProjectSkillsDir(workspaceRoot: string): string {
   return path.join(workspaceRoot, '.venice', 'skills');
 }
 
+export interface SkillFs {
+  readFileSync: typeof fs.readFileSync;
+  readdirSync: typeof fs.readdirSync;
+  existsSync: typeof fs.existsSync;
+  lstatSync: typeof fs.lstatSync;
+}
+
 export class SkillRegistry {
   private readonly globalDir: string;
   private readonly projectDir: string;
   private readonly extraDirs: string[];
+  private readonly fsImpl: SkillFs;
   private readonly skills = new Map<string, Skill>();
   private readonly errors: string[] = [];
 
-  constructor(globalDir = getGlobalSkillsDir(), projectDir?: string, extraDirs: string[] = []) {
+  constructor(
+    globalDir = getGlobalSkillsDir(),
+    projectDir?: string,
+    extraDirs: string[] = [],
+    fsImpl: SkillFs = fs,
+  ) {
     this.globalDir = globalDir;
     this.projectDir = projectDir || '';
     this.extraDirs = extraDirs;
+    this.fsImpl = fsImpl;
   }
 
   discover(): void {
     this.skills.clear();
     this.errors.length = 0;
     for (const dir of [this.globalDir, this.projectDir, ...this.extraDirs]) {
-      if (!dir || !fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) {
+      if (!dir || !this.fsImpl.existsSync(dir) || !this.fsImpl.lstatSync(dir).isDirectory()) {
         continue;
       }
 
       let entries: fs.Dirent[];
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = this.fsImpl.readdirSync(dir, { withFileTypes: true });
       } catch (error) {
         this.errors.push(
           `cannot read skills directory ${dir}: ${error instanceof Error ? error.message : String(error)}`
@@ -53,9 +67,9 @@ export class SkillRegistry {
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         const skillPath = path.join(dir, entry.name, 'SKILL.md');
-        if (!fs.existsSync(skillPath)) continue; // not a skill directory
+        if (!this.fsImpl.existsSync(skillPath)) continue; // not a skill directory
         try {
-          const skill = parseSkillMarkdown(skillPath);
+          const skill = parseSkillMarkdown(skillPath, this.fsImpl.readFileSync);
           if (skill) {
             this.skills.set(skill.name, skill);
           } else {

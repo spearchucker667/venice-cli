@@ -6,6 +6,8 @@ import type { AgentTool, ToolContext } from './types.js';
 import { toToolDefinition } from './types.js';
 import type { ToolDefinition } from '../types/index.js';
 import type { ToolResult } from '../agent/types.js';
+import { compileToolSchema, formatSchemaErrors } from '../lib/tool-schema.js';
+import type { ValidateFunction } from 'ajv';
 import { readFileTool } from './filesystem/read.js';
 import { readManyFilesTool } from './filesystem/read-many.js';
 import { writeFileTool } from './filesystem/write.js';
@@ -37,12 +39,16 @@ import { generateVideoTool, imageToVideoTool } from './venice/video.js';
 
 export class ToolRegistry {
   private readonly tools = new Map<string, AgentTool>();
+  private readonly validators = new Map<string, ValidateFunction>();
 
   register(tool: AgentTool): void {
     if (this.tools.has(tool.name)) {
       throw new Error(`Tool already registered: ${tool.name}`);
     }
     this.tools.set(tool.name, tool);
+    // Compile the schema up front so a malformed schema fails at registration
+    // (VCL-R3-005). A tool whose schema cannot be compiled is not usable.
+    this.validators.set(tool.name, compileToolSchema(tool.inputSchema));
   }
 
   get(name: string): AgentTool | undefined {
@@ -71,34 +77,48 @@ export class ToolRegistry {
     }
     return await tool.execute(input as never, context);
   }
+
+  /**
+   * Validate parsed tool arguments against the tool's advertised schema.
+   * Returns a list of human-readable problems; empty means valid.
+   */
+  validateInput(name: string, input: unknown): string[] {
+    const validate = this.validators.get(name);
+    if (!validate) return [];
+    if (validate(input)) return [];
+    return formatSchemaErrors(validate.errors);
+  }
 }
 
 export function createDefaultRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
   // Read-only tools are explicitly plan-safe; every mutating or external
   // tool is explicitly excluded from plan mode.
-  registry.register({ ...readFileTool, planSafe: true });
-  registry.register({ ...readManyFilesTool, planSafe: true });
+  // Read-only tools are explicitly plan-safe AND parallel-safe (VCL-R3-022):
+  // they have no shared mutable state, so the runtime may run them
+  // concurrently. Every mutating/external tool stays serial.
+  registry.register({ ...readFileTool, planSafe: true, parallelSafe: true });
+  registry.register({ ...readManyFilesTool, planSafe: true, parallelSafe: true });
   registry.register({ ...writeFileTool, planSafe: false });
   registry.register({ ...editFileTool, planSafe: false });
   registry.register({ ...applyPatchTool, planSafe: false });
-  registry.register({ ...listDirectoryTool, planSafe: true });
-  registry.register({ ...globTool, planSafe: true });
-  registry.register({ ...grepTool, planSafe: true });
-  registry.register({ ...findTool, planSafe: true });
+  registry.register({ ...listDirectoryTool, planSafe: true, parallelSafe: true });
+  registry.register({ ...globTool, planSafe: true, parallelSafe: true });
+  registry.register({ ...grepTool, planSafe: true, parallelSafe: true });
+  registry.register({ ...findTool, planSafe: true, parallelSafe: true });
   registry.register({ ...shellTool, planSafe: false });
-  registry.register({ ...gitStatusTool, planSafe: true });
-  registry.register({ ...gitDiffTool, planSafe: true });
-  registry.register({ ...gitLogTool, planSafe: true });
-  registry.register({ ...todoReadTool, planSafe: true });
+  registry.register({ ...gitStatusTool, planSafe: true, parallelSafe: true });
+  registry.register({ ...gitDiffTool, planSafe: true, parallelSafe: true });
+  registry.register({ ...gitLogTool, planSafe: true, parallelSafe: true });
+  registry.register({ ...todoReadTool, planSafe: true, parallelSafe: true });
   registry.register({ ...todoWriteTool, planSafe: false });
   registry.register({ ...askUserTool, planSafe: true });
-  registry.register({ ...checkpointListTool, planSafe: true });
+  registry.register({ ...checkpointListTool, planSafe: true, parallelSafe: true });
   // Checkpoint undo/redo restore files and must not be usable as a loophole
   // around plan-mode restrictions (VC-KIMI-006).
   registry.register({ ...checkpointUndoTool, planSafe: false });
   registry.register({ ...checkpointRedoTool, planSafe: false });
-  registry.register({ ...skillListTool, planSafe: true });
+  registry.register({ ...skillListTool, planSafe: true, parallelSafe: true });
   registry.register({ ...skillLoadTool, planSafe: true });
   registry.register({ ...spawnAgentTool, planSafe: false });
   // Plan-mode lifecycle tools: only the plan artifact may be written in plan
@@ -107,8 +127,9 @@ export function createDefaultRegistry(): ToolRegistry {
   registry.register({ ...writePlanTool, planSafe: true });
   registry.register({ ...exitPlanModeTool, planSafe: true });
   registry.register({ ...runValidationTool, planSafe: false });
-  registry.register({ ...webSearchTool, planSafe: true });
-  registry.register({ ...webScrapeTool, planSafe: true });
+  // Web reads are side-effect-free on the workspace and safe to parallelize.
+  registry.register({ ...webSearchTool, planSafe: true, parallelSafe: true });
+  registry.register({ ...webScrapeTool, planSafe: true, parallelSafe: true });
   registry.register({ ...generateImageTool, planSafe: false });
   registry.register({ ...editImageTool, planSafe: false });
   registry.register({ ...upscaleImageTool, planSafe: false });
