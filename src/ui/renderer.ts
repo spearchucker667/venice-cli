@@ -9,7 +9,7 @@
 import type { AgentEvent } from '../agent/events.js';
 import { EventBus } from '../agent/events.js';
 import { getChalk } from '../lib/output.js';
-import { toStreamJson, serializeStreamJson } from '../agent/stream-json.js';
+import { toStreamJson, serializeStreamJson, buildTerminalResult } from '../agent/stream-json.js';
 import { getTheme } from './theme.js';
 
 export interface RendererOptions {
@@ -29,6 +29,8 @@ export class AgentRenderer {
   private sequence = 0;
   private sessionId = '';
   private turnId: string | undefined;
+  // Final assistant text of the current run, carried by the terminal record.
+  private finalText = '';
 
   constructor(options: RendererOptions) {
     this.eventBus = options.eventBus;
@@ -49,7 +51,11 @@ export class AgentRenderer {
     const c = getChalk();
     if (this.outputFormat === 'stream-json') {
       if (event.type === 'session_started') this.sessionId = event.sessionId;
-      if (event.type === 'model_request') this.turnId = event.eventId;
+      // R2-011: correlate records to the real turn id — prefer the event's own
+      // turn id (model_request now carries it); previously the renderer
+      // synthesized the turn id from an unrelated event id (VCL-052).
+      if ('turnId' in event && event.turnId) this.turnId = event.turnId;
+      if (event.type === 'assistant_complete') this.finalText = event.content;
       const streamEvent = toStreamJson(event, {
         sessionId: this.sessionId,
         sequence: this.sequence++,
@@ -57,6 +63,15 @@ export class AgentRenderer {
       });
       if (streamEvent) {
         console.log(serializeStreamJson(streamEvent));
+      }
+      // R2-011: exactly one authoritative terminal record per run, carrying
+      // status, final text, and an explicit incomplete reason.
+      if (event.type === 'session_completed') {
+        console.log(serializeStreamJson(buildTerminalResult(event, {
+          sessionId: this.sessionId,
+          sequence: this.sequence++,
+          turnId: this.turnId,
+        }, this.finalText)));
       }
       return;
     }

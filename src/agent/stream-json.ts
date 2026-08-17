@@ -23,8 +23,15 @@
 
 import type { AgentEvent } from './events.js';
 
-/** Monotonic protocol revision. Bump on any breaking envelope change. */
-export const PROTOCOL_SCHEMA_VERSION = 2;
+/**
+ * Monotonic protocol revision. Bump on any breaking envelope change.
+ *
+ * v3 (R2-011): `turnId` now reflects the event's own turn (not a static
+ * context value), `assistant.completed`/`assistant.error` are mapped instead
+ * of dropped, tool lifecycle records carry the stable `toolCallId`, and a
+ * single authoritative `run.result` terminal record is emitted.
+ */
+export const PROTOCOL_SCHEMA_VERSION = 3;
 
 export interface AgentProtocolEvent<T = unknown> {
   schemaVersion: typeof PROTOCOL_SCHEMA_VERSION;
@@ -60,7 +67,9 @@ export function toStreamJson(
     sequence: ctx.sequence,
     eventId: event.eventId,
     sessionId: ctx.sessionId,
-    turnId: ctx.turnId,
+    // R2-011: prefer the event's own turn id so every record correlates to the
+    // real turn; the context value is only a fallback for events without one.
+    turnId: 'turnId' in event && event.turnId ? event.turnId : ctx.turnId,
     timestamp: event.timestamp,
   };
 
@@ -111,12 +120,32 @@ export function toStreamJson(
       return { ...base, type: 'assistant.message', data: { content: event.content } };
     case 'assistant_reasoning':
       return { ...base, type: 'assistant.reasoning', data: { content: event.content } };
+    case 'assistant_complete':
+      return { ...base, type: 'assistant.completed', data: { content: event.content } };
+    case 'assistant_error':
+      return {
+        ...base,
+        type: 'assistant.error',
+        data: { message: event.message, ...(event.code ? { code: event.code } : {}) },
+      };
     case 'tool_requested':
-      return { ...base, type: 'tool.requested', data: { tool: event.toolName, input: event.input } };
+      return {
+        ...base,
+        type: 'tool.requested',
+        data: { tool: event.toolName, input: event.input, ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}) },
+      };
     case 'tool_started':
-      return { ...base, type: 'tool.started', data: { tool: event.toolName, input: event.input } };
+      return {
+        ...base,
+        type: 'tool.started',
+        data: { tool: event.toolName, input: event.input, ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}) },
+      };
     case 'tool_completed':
-      return { ...base, type: 'tool.completed', data: { tool: event.toolName, result: event.result } };
+      return {
+        ...base,
+        type: 'tool.completed',
+        data: { tool: event.toolName, result: event.result, ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}) },
+      };
     case 'approval_requested':
       return { ...base, type: 'approval.requested', data: { tool: event.toolName, risk: event.risk } };
     case 'approval_granted':
@@ -183,4 +212,39 @@ export function toStreamJson(
 
 export function serializeStreamJson(event: AgentProtocolEvent): string {
   return JSON.stringify(event);
+}
+
+/** Authoritative terminal record carried by `run.result` (R2-011). */
+export interface RunResultData {
+  status: string;
+  finalText?: string;
+  incompleteReason?: string;
+  error?: string;
+}
+
+/**
+ * Build the single authoritative terminal record for a run. Consumers can
+ * determine the outcome from this record alone: `completed`/`failed`/
+ * `cancelled`/`limit_reached` status, the final assistant text, and an
+ * explicit incomplete reason where applicable.
+ */
+export function buildTerminalResult(
+  event: Extract<AgentEvent, { type: 'session_completed' }>,
+  ctx: StreamJsonContext,
+  finalText?: string
+): AgentProtocolEvent {
+  const data: RunResultData = { status: event.status };
+  if (finalText) data.finalText = finalText;
+  if (event.status === 'limit_reached') data.incompleteReason = 'max_turns';
+  if (event.status === 'failed' || event.status === 'cancelled') data.error = event.status;
+  return {
+    schemaVersion: PROTOCOL_SCHEMA_VERSION,
+    sequence: ctx.sequence,
+    eventId: event.eventId,
+    sessionId: ctx.sessionId,
+    turnId: ctx.turnId,
+    timestamp: event.timestamp,
+    type: 'run.result',
+    data,
+  };
 }

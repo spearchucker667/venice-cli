@@ -10,7 +10,7 @@ export type AgentEvent =
   | { type: 'message_queued'; timestamp: string; eventId: string; content: string; queueLength: number }
   | { type: 'message_queued_consumed'; timestamp: string; eventId: string; content: string; remaining: number }
   | { type: 'message_injected'; timestamp: string; eventId: string; content: string }
-  | { type: 'model_request'; timestamp: string; eventId: string; messageCount: number }
+  | { type: 'model_request'; timestamp: string; eventId: string; turnId: string; messageCount: number }
   | { type: 'model_profile_updated'; timestamp: string; eventId: string; profile: import('./model-profile.js').ModelProfile }
   | { type: 'model_catalog_failed'; timestamp: string; eventId: string; message: string }
   | { type: 'balance_remaining'; timestamp: string; eventId: string; balanceUsd: number; rateLimit?: { limit?: number; remaining?: number; reset?: number } }
@@ -18,7 +18,7 @@ export type AgentEvent =
   | { type: 'assistant_reasoning'; timestamp: string; eventId: string; turnId: string; content?: string }
   | { type: 'assistant_complete'; timestamp: string; eventId: string; turnId: string; content: string }
   | { type: 'assistant_error'; timestamp: string; eventId: string; turnId: string; message: string; code?: string }
-  | { type: 'tool_requested'; timestamp: string; eventId: string; toolName: string; input: unknown }
+  | { type: 'tool_requested'; timestamp: string; eventId: string; toolCallId?: string; toolName: string; input: unknown }
   | { type: 'approval_requested'; timestamp: string; eventId: string; toolName: string; risk: string }
   | { type: 'approval_granted'; timestamp: string; eventId: string; toolName: string; scope: string }
   | { type: 'tool_started'; timestamp: string; eventId: string; toolCallId?: string; toolName: string; input: unknown }

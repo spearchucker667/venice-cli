@@ -744,6 +744,77 @@ export async function* chatCompletionStream(
   let buffer = '';
   let totalUsage: any = null;
   let completionId: string | undefined;
+  // R2-010: SSE events are assembled as complete frames (blank-line delimited,
+  // CRLF-tolerant, multi-line `data:` lines joined with `\n`), and a clean
+  // protocol terminal ([DONE] or a finish_reason) is tracked explicitly so
+  // unexpected EOF is reported as truncation instead of fake success.
+  let frameData: string[] = [];
+  let sawTerminalMarker = false;
+
+  // Decode one complete SSE data payload. Returns the deltas to yield; throws
+  // for malformed frames and mid-stream json.error payloads (VC-KIMI-031).
+  const decodeFrame = (data: string): Array<{
+    content?: string;
+    reasoning_content?: string;
+    tool_calls?: any[];
+    finish_reason?: string;
+  }> => {
+    if (data === '[DONE]') {
+      sawTerminalMarker = true;
+      return [];
+    }
+    if (!data.trim()) return [];
+    let json: any;
+    try {
+      json = JSON.parse(data);
+    } catch {
+      // VC-KIMI-031: never silently drop malformed SSE frames. Surface a
+      // bounded snippet so tool calls, text, usage, or finish reasons are
+      // not lost without notice.
+      const snippet = data.length > 200 ? `${data.slice(0, 200)}…` : data;
+      throw new Error(`Malformed SSE frame from API: ${snippet}`);
+    }
+
+    if (json.error) {
+      const streamError = new VeniceApiError(
+        json.error.message || JSON.stringify(json.error),
+        undefined,
+        json.error.code
+      );
+      streamError.cause = 'The Venice API returned an error during the stream';
+      streamError.fix = 'Retry the request; if the error persists, check the model and your quota.';
+      streamError.debug = json.error.code ? `Code: ${json.error.code}` : undefined;
+      throw streamError;
+    }
+
+    const choice = json.choices?.[0];
+    const delta = choice?.delta;
+
+    // Capture completion ID for E2EE signature verification
+    if (json.id && !completionId) {
+      completionId = json.id;
+    }
+
+    if (json.usage) {
+      totalUsage = json.usage;
+    }
+
+    const out: Array<{
+      content?: string;
+      reasoning_content?: string;
+      tool_calls?: any[];
+      finish_reason?: string;
+    }> = [];
+    if (delta?.reasoning_content) out.push({ reasoning_content: delta.reasoning_content });
+    if (delta?.content) out.push({ content: delta.content });
+    if (delta?.tool_calls) out.push({ tool_calls: delta.tool_calls });
+    if (choice?.finish_reason) {
+      // A finish reason is a valid protocol terminal marker (R2-010).
+      sawTerminalMarker = true;
+      out.push({ finish_reason: choice.finish_reason });
+    }
+    return out;
+  };
 
   try {
     while (true) {
@@ -756,98 +827,74 @@ export async function* chatCompletionStream(
       };
 
       const { done, value } = await readWithTimeout();
-      let lines: string[] = [];
       if (done) {
+        // Flush the tail: servers may omit the trailing blank line / newline.
+        // Process any remaining complete lines as a final unterminated frame.
+        buffer += decoder.decode();
         if (buffer.trim()) {
-          lines = [buffer];
+          for (const rawLine of buffer.split('\n')) {
+            let line = rawLine;
+            if (line.endsWith('\r')) line = line.slice(0, -1);
+            if (line.startsWith('data:')) frameData.push(line.slice(5).replace(/^ /, ''));
+          }
+          buffer = '';
         }
-      } else {
-        buffer += decoder.decode(value, { stream: true });
-        lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        if (frameData.length > 0) {
+          const data = frameData.join('\n');
+          frameData = [];
+          for (const item of decodeFrame(data)) {
+            yield { ...item, done: false, completionId };
+          }
+        }
+        // R2-010: EOF without a clean terminal marker is truncation, never
+        // success. An intentional abort cancels the reader instead.
+        if (!sawTerminalMarker && !options.abortSignal?.aborted) {
+          throw new VeniceApiError(
+            'Stream ended before a completion marker (connection truncated)',
+            502,
+            'STREAM_TRUNCATED'
+          );
+        }
+        if (totalUsage) {
+          trackUsage({
+            command: 'chat',
+            model: options.model || DEFAULT_MODELS.chat,
+            ...totalUsage,
+          });
+        }
+        yield { done: true, usage: totalUsage, completionId, usageHeaders };
+        return;
       }
 
-      for (let line of lines) {
-        line = line.trim();
-        if (!line) continue;
-        if (line.startsWith(':')) continue; // Ignore SSE comments/heartbeats
+      buffer += decoder.decode(value, { stream: true });
+      let newlineIndex: number;
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        let line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        if (line.endsWith('\r')) line = line.slice(0, -1); // CRLF framing
 
+        if (line === '') {
+          // Blank line terminates the current SSE event frame.
+          if (frameData.length > 0) {
+            const data = frameData.join('\n');
+            frameData = [];
+            for (const item of decodeFrame(data)) {
+              yield { ...item, done: false, completionId };
+            }
+          }
+          continue;
+        }
+        if (line.startsWith(':')) continue; // SSE comments/heartbeats
         if (line.startsWith('data:')) {
-          const data = line.slice(5).trim();
-          if (data === '[DONE]') {
-            if (totalUsage) {
-              trackUsage({
-                command: 'chat',
-                model: options.model || DEFAULT_MODELS.chat,
-                ...totalUsage,
-              });
-            }
-            yield { done: true, usage: totalUsage, completionId, usageHeaders };
-            return;
-          }
-
-          try {
-            const json = JSON.parse(data);
-            
-            if (json.error) {
-              const streamError = new VeniceApiError(
-                json.error.message || JSON.stringify(json.error),
-                undefined,
-                json.error.code
-              );
-              streamError.cause = 'The Venice API returned an error during the stream';
-              streamError.fix = 'Retry the request; if the error persists, check the model and your quota.';
-              streamError.debug = json.error.code ? `Code: ${json.error.code}` : undefined;
-              throw streamError;
-            }
-
-            const choice = json.choices?.[0];
-            const delta = choice?.delta;
-            
-            // Capture completion ID for E2EE signature verification
-            if (json.id && !completionId) {
-              completionId = json.id;
-            }
-
-            if (json.usage) {
-              totalUsage = json.usage;
-            }
-
-            if (delta?.reasoning_content) {
-              yield { reasoning_content: delta.reasoning_content, done: false, completionId };
-            }
-
-            if (delta?.content) {
-              yield { content: delta.content, done: false, completionId };
-            }
-
-            if (delta?.tool_calls) {
-              yield { tool_calls: delta.tool_calls, done: false, completionId };
-            }
-
-            if (choice?.finish_reason) {
-              yield { finish_reason: choice.finish_reason, done: false, completionId };
-            }
-          } catch (err) {
-            // A VeniceApiError raised for a mid-stream json.error payload must
-            // propagate as-is; only JSON.parse failures are malformed frames.
-            if (err instanceof VeniceApiError) throw err;
-            // VC-KIMI-031: never silently drop malformed SSE frames. Surface a
-            // bounded snippet so tool calls, text, usage, or finish reasons are
-            // not lost without notice.
-            const snippet = data.length > 200 ? `${data.slice(0, 200)}…` : data;
-            throw new Error(`Malformed SSE frame from API: ${snippet}`);
-          }
+          frameData.push(line.slice(5).replace(/^ /, ''));
         }
+        // Other SSE fields (event:, id:, retry:) are ignored.
       }
-      if (done) break;
     }
   } finally {
     options.abortSignal?.removeEventListener('abort', onAbort);
     reader.cancel().catch(() => {});
   }
-
-  yield { done: true, usage: totalUsage, completionId, usageHeaders };
 }
 
 // Image generation (Venice-native endpoint)

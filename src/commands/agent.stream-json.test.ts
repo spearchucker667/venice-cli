@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { toStreamJson, serializeStreamJson, PROTOCOL_SCHEMA_VERSION } from '../agent/stream-json.js';
+import { toStreamJson, serializeStreamJson, buildTerminalResult, PROTOCOL_SCHEMA_VERSION } from '../agent/stream-json.js';
 import type { AgentEvent } from '../agent/events.js';
 
 const ctx = { sessionId: 's1', sequence: 0, turnId: 't1' };
@@ -17,7 +17,7 @@ describe('stream-json protocol (VCL-R3-011)', () => {
     const out = toStreamJson(event, ctx);
     assert.strictEqual(out?.type, 'session.started');
     assert.strictEqual(out?.schemaVersion, PROTOCOL_SCHEMA_VERSION);
-    assert.strictEqual(out?.schemaVersion, 2);
+    assert.strictEqual(out?.schemaVersion, 3);
     assert.strictEqual(out?.sequence, 0);
     assert.strictEqual(out?.eventId, '1');
     assert.strictEqual(out?.sessionId, 's1');
@@ -60,7 +60,13 @@ describe('stream-json protocol (VCL-R3-011)', () => {
     assert.strictEqual(requestedOut?.type, 'tool.requested');
     assert.deepStrictEqual(requestedOut?.data, { tool: 'read_file', input: { path: 'x.txt' } });
     assert.strictEqual(completedOut?.type, 'tool.completed');
-    assert.deepStrictEqual(completedOut?.data, { tool: 'read_file', result: { ok: true, data: 'content' } });
+    // R2-011: the stable toolCallId must survive into the protocol record so
+    // consumers can pair tool lifecycle events without relying on order.
+    assert.deepStrictEqual(completedOut?.data, {
+      tool: 'read_file',
+      result: { ok: true, data: 'content' },
+      toolCallId: '3',
+    });
   });
 
   it('maps plan lifecycle events', () => {
@@ -154,9 +160,74 @@ describe('stream-json protocol (VCL-R3-011)', () => {
     const line = serializeStreamJson(toStreamJson(event, ctx)!);
     assert.strictEqual(line.includes('\n'), false);
     const parsed = JSON.parse(line);
-    assert.strictEqual(parsed.schemaVersion, 2);
+    assert.strictEqual(parsed.schemaVersion, 3);
     assert.strictEqual(parsed.type, 'assistant.message');
     assert.deepStrictEqual(parsed.data, { content: 'hello' });
+  });
+
+  it('maps assistant_complete and assistant_error (R2-011)', () => {
+    const complete: AgentEvent = {
+      type: 'assistant_complete',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: 'c1',
+      turnId: 't1',
+      content: 'done',
+    };
+    const error: AgentEvent = {
+      type: 'assistant_error',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: 'e1',
+      turnId: 't1',
+      message: 'boom',
+      code: 'X',
+    };
+    const completeOut = toStreamJson(complete, ctx);
+    const errorOut = toStreamJson(error, ctx);
+    assert.strictEqual(completeOut?.type, 'assistant.completed');
+    assert.deepStrictEqual(completeOut?.data, { content: 'done' });
+    assert.strictEqual(errorOut?.type, 'assistant.error');
+    assert.deepStrictEqual(errorOut?.data, { message: 'boom', code: 'X' });
+  });
+
+  it('prefers the event turnId over the context turnId (R2-011)', () => {
+    const event: AgentEvent = {
+      type: 'assistant_delta',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: '2',
+      turnId: 'REAL_TURN',
+      content: 'hello',
+    };
+    const out = toStreamJson(event, { ...ctx, turnId: 'STALE_TURN' });
+    assert.strictEqual(out?.turnId, 'REAL_TURN');
+  });
+
+  it('builds the authoritative run.result terminal record (R2-011)', () => {
+    const completed: Extract<AgentEvent, { type: 'session_completed' }> = {
+      type: 'session_completed',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: 'done',
+      status: 'complete',
+    };
+    const limited: Extract<AgentEvent, { type: 'session_completed' }> = {
+      type: 'session_completed',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: 'limit',
+      status: 'limit_reached',
+    };
+    const failed: Extract<AgentEvent, { type: 'session_completed' }> = {
+      type: 'session_completed',
+      timestamp: '2026-08-16T00:00:00Z',
+      eventId: 'fail',
+      status: 'failed',
+    };
+    const ok = buildTerminalResult(completed, ctx, 'final answer');
+    assert.strictEqual(ok.type, 'run.result');
+    assert.deepStrictEqual(ok.data, { status: 'complete', finalText: 'final answer' });
+    assert.strictEqual(ok.turnId, 't1');
+    const lim = buildTerminalResult(limited, ctx);
+    assert.deepStrictEqual(lim.data, { status: 'limit_reached', incompleteReason: 'max_turns' });
+    const fail = buildTerminalResult(failed, ctx);
+    assert.deepStrictEqual(fail.data, { status: 'failed', error: 'failed' });
   });
 
   it('returns undefined for event types without a mapping', () => {

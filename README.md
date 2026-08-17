@@ -181,7 +181,7 @@ Plain-text non-interactive runs print the same crossed-keys brand header as the 
 | `5` | Cancelled |
 | `6` | Turn/step budget reached (`limit_reached`) |
 
-The exact terminal state is also available structurally via `--output-format json`/`stream-json` (`status` / `session.completed.status`).
+The exact terminal state is also available structurally via `--output-format json`/`stream-json`. The stream ends with exactly one authoritative `run.result` record (protocol v3) carrying `status`, `finalText`, and an explicit `incompleteReason` for budget-constrained stops; `session.completed.status` remains for backward compatibility, and per-turn events carry a stable `turnId` plus `toolCallId` on tool lifecycle records.
 
 Write-capable subagents remain bounded to workspace read/edit operations. They do not receive shell or network tools.
 

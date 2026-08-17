@@ -81,4 +81,31 @@ describe('AgentRenderer', () => {
     assert.ok(event);
     assert.equal(event.type, 'balance.remaining');
   });
+
+  it('emits one authoritative run.result terminal record after session.completed (R2-011)', () => {
+    const bus = new EventBus();
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (line?: unknown) => { lines.push(String(line)); };
+    const renderer = new AgentRenderer({ eventBus: bus, outputFormat: 'stream-json' });
+    renderer.start();
+
+    try {
+      bus.emit({ type: 'session_started', timestamp: new Date().toISOString(), eventId: 's1', sessionId: 'sid', objective: 'x' });
+      bus.emit({ type: 'model_request', timestamp: new Date().toISOString(), eventId: 'm1', turnId: 'turn-7', messageCount: 1 });
+      bus.emit({ type: 'assistant_complete', timestamp: new Date().toISOString(), eventId: 'a1', turnId: 'turn-7', content: 'the final answer' });
+      bus.emit({ type: 'session_completed', timestamp: new Date().toISOString(), eventId: 'sc1', status: 'complete' });
+
+      const parsed = lines.map((line) => JSON.parse(line));
+      const results = parsed.filter((event) => event.type === 'run.result');
+      assert.equal(results.length, 1, 'exactly one terminal result record');
+      assert.equal(results[0].data.status, 'complete');
+      assert.equal(results[0].data.finalText, 'the final answer');
+      assert.equal(results[0].turnId, 'turn-7');
+      assert.equal(results[0].schemaVersion, 3);
+    } finally {
+      console.log = originalLog;
+      renderer.stop();
+    }
+  });
 });
