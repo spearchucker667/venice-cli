@@ -47,4 +47,5 @@ tmp/
 
 # Agent project memory (agentmemory skill) — never commit or publish
 .omk/
+.freebuff/worktrees/.metadata_never_index
 /.freebuff
