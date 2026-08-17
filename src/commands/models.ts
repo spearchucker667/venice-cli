@@ -10,7 +10,7 @@ import {
   detectOutputFormat,
 } from '../lib/output.js';
 import type { Model } from '../types/index.js';
-import { modelUsdPrice } from '../types/index.js';
+import { isE2EEModel, isTEEModel, modelUsdPrice } from '../types/index.js';
 
 export function registerModelsCommand(program: Command): void {
   const modelsCmd = program
@@ -22,38 +22,15 @@ export function registerModelsCommand(program: Command): void {
     .option('-d, --details', 'Show detailed model specs and capabilities')
     .option('-c, --capability <cap>', 'Filter by capability (e.g., vision, webSearch, optimizedForCode, logProbs)')
     .option('--sort <field>', 'Sort models by field (id|context|price)', 'id')
+    .option('--tee', 'Show only TEE-attestable models')
+    .option('--e2ee', 'Show only E2EE-capable models')
     .option('-f, --format <format>', 'Output format (pretty|json)')
     .action(async (options) => {
       const format = detectOutputFormat(options.format);
       const c = getChalk();
 
       try {
-        let models = await listModels();
-
-        // Filter by type (API-aligned)
-        if (options.type) {
-          const requestedType = String(options.type).toLowerCase().trim();
-
-          if (requestedType !== 'all') {
-            models = models.filter((m: Model) =>
-              m.type?.toLowerCase() === requestedType
-            );
-          }
-        }
-
-        // Filter by search query
-        if (options.search) {
-          const query = options.search.toLowerCase();
-          models = models.filter((m: Model) =>
-            m.id?.toLowerCase().includes(query) ||
-            m.model_spec?.description?.toLowerCase().includes(query)
-          );
-        }
-
-        // Filter by privacy
-        if (options.privacy) {
-          models = models.filter((m: Model) => isPrivacyPreserving(m));
-        }
+        let models = applyModelFilters(await listModels(), options);
 
         // Filter by capability
         if (options.capability) {
@@ -109,20 +86,32 @@ export function registerModelsCommand(program: Command): void {
           console.log(c.dim('─'.repeat(50)));
 
           for (const model of typeModels) {
-            const privacy = isPrivacyPreserving(model) ? c.green('🔒') : c.dim('📊');
-            console.log(`  ${privacy} ${c.cyan(model.id)}`);
+            const badges: string[] = [];
+            if (isPrivacyPreserving(model)) {
+              badges.push(c.green('🔒'));
+            }
+            if (isE2EEModel(model)) {
+              badges.push(c.magenta('🔐'));
+            } else if (isTEEModel(model)) {
+              badges.push(c.blue('🛡️'));
+            }
+            if (badges.length === 0) {
+              badges.push(c.dim('📊'));
+            }
+
+            console.log(`  ${badges.join(' ')} ${c.cyan(model.id)}`);
             if (options.details) {
               const spec = model.model_spec || {};
               const caps = spec.capabilities as Record<string, any> || {};
               const indent = '     ';
               const maxWidth = Math.max(60, (process.stdout.columns || 80) - indent.length - 2);
-              
+
               if (spec.description) {
                 for (const line of wrapText(spec.description, maxWidth)) {
                   console.log(`${indent}${c.dim(line)}`);
                 }
               }
-              
+
               const details = [];
               if (spec.availableContextTokens) details.push(`Context: ${spec.availableContextTokens}`);
               if (caps.supportsVision) details.push('Vision: Yes');
@@ -131,12 +120,12 @@ export function registerModelsCommand(program: Command): void {
               if (caps.supportsFunctionCalling) details.push('Tools: Yes');
               if (caps.supportsCustomDimensions) details.push('Custom Dimensions: Yes');
               if (caps.embeddingDimensions) details.push(`Embedding Dims: ${caps.embeddingDimensions}`);
-              
+
               if (spec.traits && spec.traits.length > 0) {
                 const traitNames = spec.traits.map((t: any) => typeof t === 'string' ? t : t.name).join(', ');
                 details.push(`Traits: ${traitNames}`);
               }
-              
+
               if (details.length > 0) {
                 // Split long details lines
                 const detailsStr = details.join(' • ');
@@ -156,7 +145,7 @@ export function registerModelsCommand(program: Command): void {
           }
         }
 
-        console.log(`\n${c.dim('🔒 = Privacy-preserving (no data retention)')}`);
+        console.log(`\n${c.dim('🔒 = Privacy-preserving    🛡️ = TEE attestation    🔐 = E2EE encrypted')}`);
         console.log(c.dim('📊 = Standard model'));
       } catch (error) {
         console.error(formatError(error instanceof Error ? error.message : String(error)));
@@ -251,6 +240,48 @@ export function registerModelsCommand(program: Command): void {
       modelsCmd.outputHelp();
     }
   });
+}
+
+export function applyModelFilters(
+  models: Model[],
+  options: {
+    type?: string;
+    search?: string;
+    privacy?: boolean;
+    tee?: boolean;
+    e2ee?: boolean;
+  }
+): Model[] {
+  let filtered = models;
+
+  if (options.type) {
+    const requestedType = String(options.type).toLowerCase().trim();
+    if (requestedType !== 'all') {
+      filtered = filtered.filter((m) => m.type?.toLowerCase() === requestedType);
+    }
+  }
+
+  if (options.search) {
+    const query = options.search.toLowerCase();
+    filtered = filtered.filter((m) =>
+      m.id?.toLowerCase().includes(query) ||
+      m.model_spec?.description?.toLowerCase().includes(query)
+    );
+  }
+
+  if (options.privacy) {
+    filtered = filtered.filter((m) => isPrivacyPreserving(m));
+  }
+
+  if (options.tee) {
+    filtered = filtered.filter((m) => isTEEModel(m));
+  }
+
+  if (options.e2ee) {
+    filtered = filtered.filter((m) => isE2EEModel(m));
+  }
+
+  return filtered;
 }
 
 function groupModelsByType(models: Model[]): Record<string, Model[]> {
