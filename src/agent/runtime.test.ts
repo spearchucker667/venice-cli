@@ -17,8 +17,8 @@ import type { ModelResponse } from './model-client.js';
 import type { AgentMessage, AgentState } from './types.js';
 import { McpManager } from '../mcp/manager.js';
 import { ModelCatalog } from './model-catalog.js';
-import { EventBus } from './events.js';
-import type { ToolDefinition } from '../types/index.js';
+import { enterPlanModeTool, writePlanTool, exitPlanModeTool } from '../tools/agent-meta/plan.js';
+import type { ApprovalDecision } from './permissions.js';
 import type { ModelProfile } from './model-profile.js';
 
 class MockModelClient extends VeniceModelClient {
@@ -1737,5 +1737,233 @@ describe('AgentRuntime', () => {
     // Fails closed to chat-only and uses a conservative budget, not 128K.
     assert.strictEqual(runtime.getState().agentMode, 'chat-only');
     assert.strictEqual(runtime.getContextManager().getMaxTokens(), UNKNOWN_CONTEXT_LIMIT);
+  });
+
+  it('serializes concurrent sendUserMessage calls via turn lock (R2-001)', async () => {
+    let activeTurns = 0;
+    let maxConcurrentTurns = 0;
+
+    class ConcurrencyTrackingClient extends VeniceModelClient {
+      async complete(messages: AgentMessage[]): Promise<ModelResponse> {
+        activeTurns++;
+        maxConcurrentTurns = Math.max(maxConcurrentTurns, activeTurns);
+        // Small delay to simulate in-flight turn
+        await new Promise((r) => setTimeout(r, 20));
+        activeTurns--;
+        const lastUser = messages.filter((m) => m.role === 'user').at(-1)?.content;
+        return { content: `Response to ${lastUser}`, finishReason: 'stop' };
+      }
+      async getModelContextLimit(): Promise<number> {
+        return 128000;
+      }
+      async getModelProfile() {
+        return undefined;
+      }
+    }
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Concurrent test',
+      approvalMode: 'auto-edit',
+      maxTurns: 3,
+      modelClient: new ConcurrencyTrackingClient({ model: 'mock' }),
+    });
+
+    const [res1, res2] = await Promise.all([
+      runtime.sendUserMessage('msg 1'),
+      runtime.sendUserMessage('msg 2'),
+    ]);
+
+    assert.strictEqual(maxConcurrentTurns, 1, 'Turns must be strictly serialized');
+    assert.strictEqual(res1, 'Response to msg 1');
+    assert.strictEqual(res2, 'Response to msg 2');
+  });
+
+  it('fails closed when direct tool is invoked while runtime isBusy (R2-001)', async () => {
+    let unblockModel!: () => void;
+    const modelBlocked = new Promise<void>((resolve) => {
+      unblockModel = resolve;
+    });
+
+    class BlockingClient extends VeniceModelClient {
+      async complete(): Promise<ModelResponse> {
+        await modelBlocked;
+        return { content: 'done', finishReason: 'stop' };
+      }
+      async getModelContextLimit(): Promise<number> {
+        return 128000;
+      }
+      async getModelProfile() {
+        return undefined;
+      }
+    }
+
+    const registry = new ToolRegistry();
+    registry.register(readFileTool);
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Busy test',
+      approvalMode: 'auto-edit',
+      maxTurns: 3,
+      modelClient: new BlockingClient({ model: 'mock' }),
+      toolRegistry: registry,
+    });
+
+    const turnPromise = runtime.sendUserMessage('start');
+    assert.strictEqual(runtime.isBusy(), true);
+
+    const directResult = await runtime.executeDirectTool('read_file', { path: 'test.txt' });
+    assert.strictEqual(directResult.ok, false);
+    assert.strictEqual(directResult.error?.code, 'TURN_IN_PROGRESS');
+
+    unblockModel();
+    await turnPromise;
+    assert.strictEqual(runtime.isBusy(), false);
+  });
+
+  it('cancelling while tool approval is pending aborts execution without running tool (R2-002)', async () => {
+    let executedTool = false;
+    const customTool: AgentTool<{ value: string }, { result: string }> = {
+      name: 'custom_mutating_tool',
+      description: 'Mutating tool for approval test',
+      risk: 'write',
+      inputSchema: {
+        type: 'object',
+        properties: { value: { type: 'string' } },
+        required: ['value'],
+      },
+      execute: async () => {
+        executedTool = true;
+        return { ok: true, data: { result: 'executed' } };
+      },
+    };
+
+    const registry = new ToolRegistry();
+    registry.register(customTool);
+
+    let resolveApproval!: (decision: ApprovalDecision) => void;
+    const approvalPromise = new Promise<ApprovalDecision>((resolve) => {
+      resolveApproval = resolve;
+    });
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Approval cancel test',
+      approvalMode: 'suggest',
+      maxTurns: 3,
+      modelClient: new MockModelClient([
+        {
+          content: 'calling tool',
+          toolCalls: [
+            {
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'custom_mutating_tool', arguments: JSON.stringify({ value: 'foo' }) },
+            },
+          ],
+        },
+      ]),
+      toolRegistry: registry,
+      approver: async () => approvalPromise,
+    });
+
+    const controller = new AbortController();
+    runtime.updateSignal(controller.signal);
+
+    const turnPromise = runtime.sendUserMessage('run tool');
+
+    // Wait a brief tick for approval request to be emitted
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Cancel before approving
+    controller.abort();
+
+    // Now resolve the approval promise (simulating a late user click or race)
+    resolveApproval({ approved: true });
+
+    await turnPromise;
+
+    assert.strictEqual(executedTool, false, 'Tool must NOT have executed after cancellation');
+    assert.strictEqual(runtime.getState().status, 'cancelled');
+  });
+
+  it('cancelling while plan approval is pending prevents exiting plan mode (R2-002)', async () => {
+    const registry = new ToolRegistry();
+    registry.register(enterPlanModeTool);
+    registry.register(writePlanTool);
+    registry.register(exitPlanModeTool);
+
+    let resolvePlanApproval!: (approved: boolean) => void;
+    const planApprovalPromise = new Promise<boolean>((resolve) => {
+      resolvePlanApproval = resolve;
+    });
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Plan cancel test',
+      approvalMode: 'yolo',
+      maxTurns: 5,
+      modelClient: new MockModelClient([
+        {
+          content: 'entering plan mode',
+          toolCalls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'enter_plan_mode', arguments: '{}' },
+            },
+          ],
+        },
+        {
+          content: 'writing plan',
+          toolCalls: [
+            {
+              id: 'c2',
+              type: 'function',
+              function: {
+                name: 'write_plan',
+                arguments: JSON.stringify({
+                  title: 'My Plan',
+                  overview: 'Plan overview',
+                  steps: [{ id: 's1', description: 'Step 1', status: 'pending' }],
+                }),
+              },
+            },
+          ],
+        },
+        {
+          content: 'exiting plan mode',
+          toolCalls: [
+            {
+              id: 'c3',
+              type: 'function',
+              function: { name: 'exit_plan_mode', arguments: '{}' },
+            },
+          ],
+        },
+      ]),
+      toolRegistry: registry,
+      planApprover: async () => planApprovalPromise,
+    });
+
+    const controller = new AbortController();
+    runtime.updateSignal(controller.signal);
+
+    const turnPromise = runtime.sendUserMessage('plan');
+
+    // Wait a brief tick for plan approval request to be reached
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Abort while plan approval is pending
+    controller.abort();
+
+    // Late resolution
+    resolvePlanApproval(true);
+
+    await turnPromise;
+
+    assert.strictEqual(runtime.getState().mode.operatingMode, 'plan', 'Operating mode must remain plan');
+    assert.strictEqual(runtime.getState().status, 'cancelled');
   });
 });

@@ -80,9 +80,10 @@ export interface AgentRuntimeOptions {
   checkpointManager?: CheckpointManager;
   contextManager?: ContextManager;
   sessionManager?: SessionManager;
-  eventBus?: EventBus;
   signal?: AbortSignal;
   mcpManager?: McpManager;
+  approver?: import('./permissions.js').Approver;
+  planApprover?: import('./permissions.js').PlanApprover;
   skillsDirs?: string[];
   additionalRoots?: string[];
 }
@@ -147,6 +148,9 @@ export class AgentRuntime {
   private queuedMessages: PendingUserMessage[] = [];
   private injectedMessages: PendingUserMessage[] = [];
   private turnInProgress = false;
+  private pendingTurnCount = 0;
+  private activeTurn?: { id: string; signal: AbortSignal; startedAt: number };
+  private turnLockPromise: Promise<void> = Promise.resolve();
 
   constructor(options: AgentRuntimeOptions) {
     // Merge CLI --add-dir roots with any persisted/explicit workspace roots,
@@ -208,6 +212,12 @@ export class AgentRuntime {
     });
     this.registry = options.toolRegistry || createDefaultRegistry();
     this.permissions = options.permissionManager || new PermissionManager(approvalMode);
+    if (options.approver) {
+      this.permissions.setApprover(options.approver);
+    }
+    if (options.planApprover) {
+      this.permissions.setPlanApprover(options.planApprover);
+    }
     // The persisted mode is the single authority; keep the permission
     // manager in lockstep from the start (VC-KIMI-004).
     this.permissions.setMode(this.state.mode.permissionMode);
@@ -310,13 +320,35 @@ export class AgentRuntime {
   }
 
   /**
+   * Acquire the serial turn lock. Ensures concurrent sendUserMessage or run
+   * invocations serialize cleanly without interleaving state or context (R2-001).
+   */
+  private async acquireTurnLock(): Promise<() => void> {
+    let releaseLock!: () => void;
+    const nextLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const currentLock = this.turnLockPromise;
+    this.turnLockPromise = this.turnLockPromise.then(() => nextLock, () => nextLock);
+    await currentLock;
+    return releaseLock;
+  }
+
+  /**
+   * True when a foreground turn is starting or actively executing (R2-001).
+   */
+  isBusy(): boolean {
+    return this.turnInProgress || this.activeTurn !== undefined || this.pendingTurnCount > 0;
+  }
+
+  /**
    * Inject a user message into the current turn after the next tool boundary
    * (Ctrl-S). No-op when there is no active turn to inject into.
    */
   injectUserMessage(content: string, attachment?: string): void {
     const trimmed = content.trim();
     if (!trimmed) return;
-    if (!this.turnInProgress) {
+    if (!this.isBusy()) {
       // No active turn to inject into — fall back to queuing (VC-KIMI-053).
       this.queueUserMessage(trimmed, attachment);
       return;
@@ -534,35 +566,44 @@ export class AgentRuntime {
   }
 
   /**
-   * Fully reset every session-owned field (VC-KIMI-026). A new session has a
-   * fresh id, no title/parent/objective/plan, no history, and no active
-   * skills. The user's permission preference and model are retained; the
-   * operating/input modes return to their defaults.
+   * Fully reset every session-owned field (VC-KIMI-026, R2-003). A new session
+   * has a fresh id, no title/parent/objective/plan, no history, no queued/injected
+   * messages, no active skills, and no lingering context layers (summary, agent
+   * prompt, file attachments). The user's permission preference and model are
+   * retained; the operating/input modes return to their defaults.
    */
   resetSession(): void {
     const permissionMode = this.state.mode.permissionMode;
-    this.state.sessionId = randomUUID();
-    this.state.status = 'idle';
-    this.state.title = undefined;
-    this.state.parentSessionId = undefined;
-    this.state.objective = '';
-    this.state.messages = [];
-    this.state.todos = [];
-    this.state.plan = undefined;
-    this.state.relevantFiles = [];
-    this.state.changedFiles = [];
-    this.state.toolHistory = [];
-    this.state.subagentReports = [];
-    this.state.lastValidation = undefined;
-    this.state.checkpointIndex = undefined;
-    this.state.checkpointCount = undefined;
-    this.state.canUndoCheckpoints = undefined;
-    this.state.canRedoCheckpoints = undefined;
-    this.state.activeSkills = [];
-    this.state.mode = { inputMode: 'agent', operatingMode: 'agent', permissionMode };
-    this.context.resetConversation();
+    this.queuedMessages = [];
+    this.injectedMessages = [];
+    this.activeTurn = undefined;
+    this.turnInProgress = false;
+    this.state = {
+      sessionId: randomUUID(),
+      workspaceRoot: this.workspace.workspaceRoot,
+      workspace: {
+        primaryRoot: this.workspace.primaryRoot,
+        additionalRoots: this.workspace.additionalRoots,
+      },
+      model: this.state.model,
+      agentMode: 'agent',
+      objective: '',
+      status: 'idle',
+      mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode },
+      messages: [],
+      todos: [],
+      relevantFiles: [],
+      changedFiles: [],
+      toolHistory: [],
+      skillSummaries: [],
+      activeSkills: [],
+      subagentReports: [],
+    };
+    this.context.resetSession();
     this.context.setWorkingMemory(this.state);
     this.workspace.replaceChangedFiles([]);
+    this.permissions.clearGrants();
+    this.permissions.setMode(permissionMode);
     this.checkpointsField = new CheckpointManager(
       this.state.sessionId,
       this.state.workspaceRoot,
@@ -621,7 +662,8 @@ export class AgentRuntime {
   /**
    * Load a stored session. `overrides` are applied AFTER the stored state so
    * explicit startup flags (e.g. a CLI approval mode) win over the persisted
-   * session (VC-KIMI-004).
+   * session (VC-KIMI-004). Replaces the in-memory state cleanly without
+   * inheriting unpersisted leftovers or queues from the prior session (R2-003).
    */
   loadState(state: AgentState, overrides?: ResumeOverrides): void {
     const resumedWorkspace = new WorkspaceManager(
@@ -631,77 +673,115 @@ export class AgentRuntime {
     if (resumedWorkspace.workspaceRoot !== this.workspace.workspaceRoot) {
       throw new Error('Cannot resume a session from a different workspace');
     }
-    Object.assign(this.state, state);
-    // Explicit CLI flags win over persisted session state (VCL-012). Additional
-    // roots must be applied before the path authority is rebuilt below.
-    if (overrides?.additionalRoots !== undefined) {
-      this.state.workspace = {
-        primaryRoot: this.state.workspaceRoot,
-        additionalRoots: overrides.additionalRoots,
-      };
-    }
-    if (overrides?.model !== undefined && overrides.model !== this.state.model) {
-      this.state.model = overrides.model;
-      // A different model invalidates the persisted profile; capability is
-      // re-discovered (fail closed to chat-only) on start (VCL-009/012).
-      this.state.modelProfile = undefined;
-      this.state.agentMode = 'agent';
-    }
-    // Rebuild the path authority with the (possibly overridden) additional
-    // roots so resumed sessions honor them (VC-KIMI-044).
+
+    // Clear runtime-owned queues and context layers so a resumed session never
+    // inherits stale in-memory state from the prior session (R2-003).
+    this.queuedMessages = [];
+    this.injectedMessages = [];
+    this.context.resetSession();
+
+    const additionalRoots = overrides?.additionalRoots !== undefined
+      ? overrides.additionalRoots
+      : (state.workspace?.additionalRoots ?? []);
+
+    const model = overrides?.model !== undefined ? overrides.model : (state.model || getDefaultModel());
+    const modelProfile = (overrides?.model !== undefined && overrides.model !== state.model)
+      ? undefined
+      : state.modelProfile;
+
+    const mode: RuntimeModeState = {
+      ...defaultMode('suggest'),
+      ...state.mode,
+      ...(overrides?.mode ?? {}),
+    };
+
+    const agent = overrides?.agent !== undefined
+      ? (overrides.agent.name ? {
+          name: overrides.agent.name,
+          source: overrides.agent.source,
+          sourcePath: overrides.agent.sourcePath,
+        } : undefined)
+      : state.agent;
+
+    this.state = {
+      sessionId: state.sessionId || randomUUID(),
+      workspaceRoot: state.workspaceRoot,
+      workspace: {
+        primaryRoot: state.workspace?.primaryRoot ?? state.workspaceRoot ?? this.workspace.workspaceRoot,
+        additionalRoots,
+      },
+      model,
+      agentMode: modelProfile ? (state.agentMode ?? 'agent') : 'agent',
+      modelProfile,
+      objective: overrides?.objective !== undefined ? overrides.objective : (state.objective ?? ''),
+      status: state.status ?? 'idle',
+      mode,
+      title: state.title,
+      parentSessionId: state.parentSessionId,
+      reasoningEffort: state.reasoningEffort,
+      messages: Array.isArray(state.messages) ? [...state.messages] : [],
+      todos: Array.isArray(state.todos) ? [...state.todos] : [],
+      relevantFiles: Array.isArray(state.relevantFiles) ? [...state.relevantFiles] : [],
+      changedFiles: Array.isArray(state.changedFiles) ? [...state.changedFiles] : [],
+      toolHistory: Array.isArray(state.toolHistory) ? [...state.toolHistory] : [],
+      tokenUsage: state.tokenUsage,
+      contextSummary: state.contextSummary,
+      checkpointIndex: state.checkpointIndex,
+      checkpointCount: state.checkpointCount,
+      canUndoCheckpoints: state.canUndoCheckpoints,
+      canRedoCheckpoints: state.canRedoCheckpoints,
+      skillSummaries: Array.isArray(state.skillSummaries) ? [...state.skillSummaries] : [],
+      activeSkills: Array.isArray(state.activeSkills) ? [...state.activeSkills] : [],
+      subagentReports: Array.isArray(state.subagentReports) ? [...state.subagentReports] : [],
+      lastValidation: state.lastValidation,
+      plan: state.plan,
+      agent,
+    };
+
     this.workspace = new WorkspaceManager(
       this.state.workspaceRoot,
       this.state.workspace.additionalRoots
     );
-    if (overrides?.objective !== undefined) {
-      this.state.objective = overrides.objective;
-    }
-    if (overrides?.mode) {
-      this.state.mode = { ...this.state.mode, ...overrides.mode };
-    }
-    if (overrides?.agent !== undefined) {
-      this.state.agent = {
-        name: overrides.agent.name,
-        source: overrides.agent.source,
-        sourcePath: overrides.agent.sourcePath,
-      };
-      if (overrides.agent.systemPrompt) {
-        this.context.setAgentPrompt(overrides.agent.systemPrompt);
-      }
-    }
     this.workspace.replaceChangedFiles(this.state.changedFiles);
-    // Normalize legacy string entries into root-aware refs so display and
-    // persistence stay unambiguous (VCL-R3-004).
     this.state.changedFiles = this.workspace.changedFiles;
+
     this.checkpointsField = new CheckpointManager(
       this.state.sessionId,
       this.state.workspaceRoot,
       this.sessions.root,
       this.state.workspace.additionalRoots
     );
-    this.sessionCompletedEmitted = state.status === 'complete' || state.status === 'failed' || state.status === 'cancelled' || state.status === 'limit_reached';
+
+    this.sessionCompletedEmitted =
+      state.status === 'complete' ||
+      state.status === 'failed' ||
+      state.status === 'cancelled' ||
+      state.status === 'limit_reached';
+
     this.modelClient.setModel(this.state.model);
-    // Re-synchronize the live permission manager with the loaded mode and
-    // emit one authoritative mode event so every UI surface converges on the
-    // resumed state (VC-KIMI-004/025).
+    this.permissions.clearGrants();
     this.permissions.setMode(this.state.mode.permissionMode);
     this.emitModeChanged();
-    this.context.setWorkingMemory(this.state);
-    // Re-apply the restored model profile's context budget so the fresh
-    // ContextManager's zero default never becomes a pathological compaction
-    // budget (VCL-008).
+
+    if (agent && overrides?.agent?.systemPrompt) {
+      this.context.setAgentPrompt(overrides.agent.systemPrompt);
+    }
+
     if (this.state.modelProfile?.contextLimit) {
       this.context.setModelContextLimit(this.state.modelProfile.contextLimit);
     }
-    this.context.resetConversation();
+
     for (const message of this.state.messages) {
       this.context.addConversationMessage(message);
     }
+
     this.context.setActiveSkills(
       this.state.activeSkills
         .map((name) => this.skills.load(name))
         .filter((skill): skill is Skill => skill !== undefined)
     );
+
+    this.context.setWorkingMemory(this.state);
   }
 
   async start(): Promise<void> {
@@ -742,40 +822,60 @@ export class AgentRuntime {
   }
 
   async sendUserMessage(content: string, attachedContext?: string): Promise<string> {
-    // Mark the runtime busy before startup so the slash-command gate observes
-    // the turn even during the initial model-profile fetch (VCL-003).
-    this.state.status = 'thinking';
-    await this.start();
-
-    this.sessionCompletedEmitted = false;
-    this.setTurnFileContext(attachedContext);
-    this.addUserMessage(content);
+    this.pendingTurnCount++;
+    this.turnInProgress = true;
+    // Acquire the serial turn lock so concurrent entries queue/serialize cleanly (R2-001).
+    const release = await this.acquireTurnLock();
     try {
-      let finalMessage = await this.processTurns();
-      // Drain any messages queued while this turn was running (VC-KIMI-053).
-      // Each queued message starts a fresh turn with its own turn budget.
-      // A cancelled turn halts the drain: remaining queued messages are
-      // preserved for the next explicit submission instead of being silently
-      // cancelled by the aborted signal (VCL-001).
-      while (this.queuedMessages.length > 0 && this.getState().status !== 'cancelled') {
-        const next = this.queuedMessages.shift()!;
-        this.emit({
-          type: 'message_queued_consumed',
-          timestamp: new Date().toISOString(),
-          eventId: randomUUID(),
-          content: next.text,
-          remaining: this.queuedMessages.length,
-        });
-        // Each queued turn owns its attachment; a turn without one must not
-        // inherit the previous turn's file context (VCL-006).
-        this.setTurnFileContext(next.attachment);
-        this.addUserMessage(next.text);
-        finalMessage = await this.processTurns();
+      const turnSignal = this.signal;
+      this.activeTurnSignal = turnSignal;
+      this.turnInProgress = true;
+      this.activeTurn = {
+        id: randomUUID(),
+        signal: turnSignal ?? new AbortController().signal,
+        startedAt: Date.now(),
+      };
+      this.state.status = 'thinking';
+      await this.start();
+
+      this.sessionCompletedEmitted = false;
+      this.setTurnFileContext(attachedContext);
+      this.addUserMessage(content);
+      try {
+        let finalMessage = await this.processTurns();
+        // Drain any messages queued while this turn was running (VC-KIMI-053).
+        // Each queued message starts a fresh turn with its own turn budget.
+        // A cancelled turn halts the drain: remaining queued messages are
+        // preserved for the next explicit submission instead of being silently
+        // cancelled by the aborted signal (VCL-001).
+        while (this.queuedMessages.length > 0 && this.getState().status !== 'cancelled') {
+          const next = this.queuedMessages.shift()!;
+          this.emit({
+            type: 'message_queued_consumed',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            content: next.text,
+            remaining: this.queuedMessages.length,
+          });
+          // Each queued turn owns its attachment; a turn without one must not
+          // inherit the previous turn's file context (VCL-006).
+          this.setTurnFileContext(next.attachment);
+          this.addUserMessage(next.text);
+          finalMessage = await this.processTurns();
+        }
+        this.persist();
+        return finalMessage;
+      } finally {
+        this.context.setFileContext([]);
       }
-      this.persist();
-      return finalMessage;
     } finally {
-      this.context.setFileContext([]);
+      this.pendingTurnCount--;
+      if (this.pendingTurnCount === 0) {
+        this.turnInProgress = false;
+      }
+      this.activeTurn = undefined;
+      this.activeTurnSignal = undefined;
+      release();
     }
   }
 
@@ -816,23 +916,45 @@ export class AgentRuntime {
   }
 
   async run(): Promise<AgentRuntimeResult> {
-    await this.start();
-    this.addUserMessage(this.state.objective);
-    let finalMessage = await this.processTurns();
-    finalMessage = this.appendValidationSummary(finalMessage);
+    this.pendingTurnCount++;
+    this.turnInProgress = true;
+    const release = await this.acquireTurnLock();
+    try {
+      const turnSignal = this.signal;
+      this.activeTurnSignal = turnSignal;
+      this.turnInProgress = true;
+      this.activeTurn = {
+        id: randomUUID(),
+        signal: turnSignal ?? new AbortController().signal,
+        startedAt: Date.now(),
+      };
+      await this.start();
+      this.addUserMessage(this.state.objective);
+      let finalMessage = await this.processTurns();
+      finalMessage = this.appendValidationSummary(finalMessage);
 
-    if (!this.sessionCompletedEmitted) {
-      this.sessionCompletedEmitted = true;
-      this.emit({
-        type: 'session_completed',
-        timestamp: new Date().toISOString(),
-        eventId: randomUUID(),
-        status: this.state.status,
-      });
+      if (!this.sessionCompletedEmitted) {
+        this.sessionCompletedEmitted = true;
+        this.emit({
+          type: 'session_completed',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          status: this.state.status,
+        });
+      }
+
+      this.persist();
+      return { state: this.state, events: this.events.events, finalMessage };
+    } finally {
+      this.context.setFileContext([]);
+      this.pendingTurnCount--;
+      if (this.pendingTurnCount === 0) {
+        this.turnInProgress = false;
+      }
+      this.activeTurn = undefined;
+      this.activeTurnSignal = undefined;
+      release();
     }
-
-    this.persist();
-    return { state: this.state, events: this.events.events, finalMessage };
   }
 
   /**
@@ -854,10 +976,9 @@ export class AgentRuntime {
 
   private async processTurns(): Promise<string> {
     this.turnInProgress = true;
-    // Freeze the abort signal for this entire turn. Later updateSignal() calls
-    // (e.g. the UI preparing the next turn) must not affect the work in flight
-    // (VCL-001).
-    this.activeTurnSignal = this.signal;
+    if (!this.activeTurnSignal) {
+      this.activeTurnSignal = this.signal;
+    }
     let turns = 0;
     let finalMessage = '';
     let currentTurnId = randomUUID();
@@ -942,7 +1063,7 @@ export class AgentRuntime {
         turns++;
       }
 
-      if (turns >= this.maxTurns && this.state.status !== 'complete') {
+      if (turns >= this.maxTurns && this.state.status !== 'complete' && this.state.status !== 'cancelled') {
         finalMessage = `${finalMessage}\n\n(Reached maximum turn limit.)`;
         // A budget-constrained stop is not success: expose it as a distinct
         // terminal state so headless callers never mistake it for completion
@@ -960,8 +1081,6 @@ export class AgentRuntime {
         message: finalMessage,
       });
     } finally {
-      this.turnInProgress = false;
-      this.activeTurnSignal = undefined;
       // Preserve injections that arrived after the turn limit was reached by
       // rolling them into the queue so they still run (VC-KIMI-053).
       if (this.injectedMessages.length > 0) {
@@ -1080,6 +1199,7 @@ export class AgentRuntime {
       type: 'model_request',
       timestamp: new Date().toISOString(),
       eventId: randomUUID(),
+      turnId,
       messageCount: messages.length,
     });
     const tools = this.state.agentMode === 'chat-only'
@@ -1233,6 +1353,7 @@ export class AgentRuntime {
       type: 'tool_requested',
       timestamp: new Date().toISOString(),
       eventId: randomUUID(),
+      toolCallId: toolCall.id,
       toolName: toolCall.function.name,
       input: this.redactor.redact(toolCall.function.arguments),
     });
@@ -1251,9 +1372,9 @@ export class AgentRuntime {
     options: { source?: string } = {}
   ): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string }; approved: boolean }> {
     // A foreground turn owns the workspace/session while it runs; a direct
-    // shell/tool passthrough must not overlap it (VCL-004). Fail closed rather
+    // shell/tool passthrough must not overlap it (VCL-004, R2-001). Fail closed rather
     // than running two mutating executions concurrently.
-    if (this.turnInProgress) {
+    if (this.isBusy()) {
       return {
         ok: false,
         approved: false,
@@ -1301,6 +1422,7 @@ export class AgentRuntime {
       type: 'tool_requested',
       timestamp: new Date().toISOString(),
       eventId: randomUUID(),
+      toolCallId,
       toolName,
       input: this.redactor.redact(input),
     });
@@ -1352,7 +1474,16 @@ export class AgentRuntime {
         toolName,
         risk,
       });
-      const decision = await this.permissions.requestApproval(toolName, input, risk);
+      const decision = await this.permissions.requestApproval(toolName, input, risk, this.activeTurnSignal);
+      if (this.activeTurnSignal?.aborted) {
+        this.state.status = 'cancelled';
+        const result: ToolResult<unknown> = {
+          ok: false,
+          error: { code: 'CANCELLED', message: `Operation cancelled by user for ${toolName}` },
+        };
+        this.recordToolCall(toolCallId, toolName, input, result, false, Date.now() - start, source);
+        return { result, approved: false, changedFiles: false };
+      }
       if (!decision.approved) {
         const result: ToolResult<unknown> = {
           ok: false,
@@ -1369,6 +1500,17 @@ export class AgentRuntime {
         }
       }
       approved = true;
+    }
+
+    // Cancellation check before executing tool side effects (R2-002).
+    if (this.activeTurnSignal?.aborted) {
+      this.state.status = 'cancelled';
+      const result: ToolResult<unknown> = {
+        ok: false,
+        error: { code: 'CANCELLED', message: `Operation cancelled by user for ${toolName}` },
+      };
+      this.recordToolCall(toolCallId, toolName, input, result, false, Date.now() - start, source);
+      return { result, approved: false, changedFiles: false };
     }
 
     this.emit({
@@ -1531,7 +1673,23 @@ export class AgentRuntime {
           eventId: randomUUID(),
           plan,
         });
-        const approved = await this.permissions.requestPlanApproval(plan);
+        const approved = await this.permissions.requestPlanApproval(plan, this.activeTurnSignal);
+        if (this.activeTurnSignal?.aborted) {
+          this.state.status = 'cancelled';
+          result = {
+            ok: false,
+            error: {
+              code: 'CANCELLED',
+              message: 'Plan approval was cancelled by user.',
+            },
+          };
+          this.emit({
+            type: 'plan_exit_denied',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+          });
+          return { result, approved: false, changedFiles: changedFilesThisCall };
+        }
         if (approved) {
           this.setMode({ operatingMode: 'agent' });
           this.emit({
@@ -1688,7 +1846,12 @@ export class AgentRuntime {
             toolName: 'run_validation',
             risk: 'execute',
           });
-          const decision = await this.permissions.requestApproval('run_validation', validationInput, 'execute');
+          const decision = await this.permissions.requestApproval('run_validation', validationInput, 'execute', this.activeTurnSignal);
+          if (this.activeTurnSignal?.aborted) {
+            this.state.status = 'cancelled';
+            overallSuccess = false;
+            break;
+          }
           if (!decision.approved) {
             this.emit({
               type: 'validation_completed',
@@ -1707,6 +1870,12 @@ export class AgentRuntime {
           if (decision.scope) {
             this.permissions.grant(decision.scope, 'run_validation', undefined, 'execute');
           }
+        }
+
+        if (this.activeTurnSignal?.aborted) {
+          this.state.status = 'cancelled';
+          overallSuccess = false;
+          break;
         }
 
         const result = await runValidationTool.execute(

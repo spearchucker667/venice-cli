@@ -101,11 +101,22 @@ export class PermissionManager {
   /**
    * Ask the user to approve leaving plan mode with a proposed plan.
    * Fails closed (denies) when no approver is installed, which also means
-   * YOLO mode cannot bypass plan approval.
+   * YOLO mode cannot bypass plan approval. Aborts promptly if signal is aborted.
    */
-  async requestPlanApproval(plan: import('./types.js').PlanArtifact): Promise<boolean> {
+  async requestPlanApproval(plan: import('./types.js').PlanArtifact, signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return false;
     if (this.planApprover) {
-      return await this.planApprover(plan);
+      const promise = this.planApprover(plan);
+      if (signal) {
+        return await Promise.race([
+          promise,
+          new Promise<boolean>((resolve) => {
+            if (signal.aborted) return resolve(false);
+            signal.addEventListener('abort', () => resolve(false), { once: true });
+          }),
+        ]);
+      }
+      return await promise;
     }
     return false;
   }
@@ -119,13 +130,29 @@ export class PermissionManager {
     this.grants.length = 0;
   }
 
+  clearGrants(): void {
+    this.grants.length = 0;
+  }
+
   async requestApproval(
     toolName: string,
     input: unknown,
-    risk: RiskLevel
+    risk: RiskLevel,
+    signal?: AbortSignal
   ): Promise<ApprovalDecision> {
+    if (signal?.aborted) return { approved: false };
     if (this.approver) {
-      return await this.approver(toolName, input, risk);
+      const promise = this.approver(toolName, input, risk);
+      if (signal) {
+        return await Promise.race([
+          promise,
+          new Promise<ApprovalDecision>((resolve) => {
+            if (signal.aborted) return resolve({ approved: false });
+            signal.addEventListener('abort', () => resolve({ approved: false }), { once: true });
+          }),
+        ]);
+      }
+      return await promise;
     }
     return { approved: false };
   }

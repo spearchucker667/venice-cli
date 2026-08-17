@@ -21,9 +21,12 @@ function runCli(
   apiBaseUrl: string
 ): Promise<CliResult> {
   return new Promise((resolve, reject) => {
+    const envCopy = { ...process.env };
+    delete envCopy.VENICE_API_KEY;
+
     const child = spawn(process.execPath, [cliPath, ...args], {
       env: {
-        ...process.env,
+        ...envCopy,
         HOME: homeDir,
         USERPROFILE: homeDir,
         APPDATA: homeDir,

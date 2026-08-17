@@ -131,6 +131,30 @@ export class ContextManager {
     this.summary = summary;
   }
 
+  getSummary(): StructuredSummary | undefined {
+    return this.summary;
+  }
+
+  clearSummary(): void {
+    this.summary = undefined;
+  }
+
+  getAgentPrompt(): string {
+    return this.agentPrompt;
+  }
+
+  clearAgentPrompt(): void {
+    this.agentPrompt = '';
+  }
+
+  clearActiveSkills(): void {
+    this.activeSkills = [];
+  }
+
+  clearFileContext(): void {
+    this.fileContext = [];
+  }
+
   setActiveSkills(skills: Skill[]): void {
     this.activeSkills = skills;
   }
@@ -141,6 +165,20 @@ export class ContextManager {
 
   resetConversation(): void {
     this.conversation = [];
+  }
+
+  /**
+   * Reset all session-owned context layers: conversation, file attachments,
+   * compaction summaries, active skills, custom agent prompts, and working memory.
+   * Project instructions and system contract are retained.
+   */
+  resetSession(): void {
+    this.conversation = [];
+    this.fileContext = [];
+    this.summary = undefined;
+    this.activeSkills = [];
+    this.agentPrompt = '';
+    this.workingMemory = '';
   }
 
   setFileContext(messages: AgentMessage[]): void {

@@ -438,8 +438,10 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
 
   const submitToModel = async (rawText: string) => {
     const { text: resolvedText, mentions } = resolveMentions(rawText);
+    const runtime = runtimeRef.current;
+    const busy = isRunning || (runtime?.isBusy() ?? false);
 
-    if (isRunning) {
+    if (busy) {
       // Queue instead of rejecting (VC-KIMI-053): Enter while busy appends
       // the next user message, which runs after the current turn completes.
       // The queued message carries its own resolved attachment so a queued
@@ -450,29 +452,31 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
         addEvent(`Attached files: ${mentions.join(', ')}`);
         attachment = await readMentionedFiles(workspaceRoot, mentions);
       }
-      runtimeRef.current?.queueUserMessage(resolvedText, attachment);
+      runtime?.queueUserMessage(resolvedText, attachment);
       return;
     }
 
-    let attachedContext: string | undefined;
+    // Set busy state immediately BEFORE any async attachment resolution
+    // so subsequent submits or injections within this window observe busy state (R2-001).
+    setIsRunning(true);
+    setError(undefined);
 
+    let attachedContext: string | undefined;
     if (mentions.length) {
       addEvent(`Attached files: ${mentions.join(', ')}`);
       attachedContext = await readMentionedFiles(workspaceRoot, mentions);
     }
 
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'user', content: resolvedText }]);
-    setIsRunning(true);
-    setError(undefined);
 
     // Each foreground turn owns a fresh, non-aborted controller. The previous
     // signal may be aborted from an earlier cancellation; the runtime adopts
     // this new signal for the turn that is about to start (VCL-001).
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    runtimeRef.current?.updateSignal(controller.signal);
+    runtime?.updateSignal(controller.signal);
 
-    runtimeRef.current
+    runtime
       ?.sendUserMessage(resolvedText, attachedContext)
       .then(() => {
         setStatus(runtimeRef.current?.getState().status ?? 'idle');

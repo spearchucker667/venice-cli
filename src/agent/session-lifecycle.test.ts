@@ -185,4 +185,95 @@ describe('session resume lifecycle', () => {
     );
     assert.strictEqual(runtime.isPersistDirty(), true);
   });
+
+  it('resetSession isolates queues, context summary, custom prompt, and grants (R2-003)', async () => {
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'prior objective',
+      approvalMode: 'suggest',
+      modelClient: new StubModelClient('done'),
+      sessionManager: manager,
+    });
+
+    // Seed state, context layers, queues, and grants
+    runtime.getContextManager().setSummary({
+      created: new Date().toISOString(),
+      updated: new Date().toISOString(),
+      goals: ['prior goal'],
+      progress: ['did things'],
+      keyDecisions: [],
+      nextSteps: [],
+      filesChanged: [],
+      commandsRun: [],
+      openIssues: [],
+    });
+    runtime.getContextManager().setAgentPrompt('custom system prompt');
+    runtime.getPermissionManager().grant('session', 'edit_file', undefined, 'write');
+    runtime.queueUserMessage('queued 1');
+
+    assert.strictEqual(runtime.getQueuedMessageCount(), 1);
+    assert.ok(runtime.getContextManager().getSummary() !== undefined);
+    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), 'custom system prompt');
+    assert.strictEqual(await runtime.getPermissionManager().isApproved('edit_file', {}, 'write'), true);
+
+    // Call resetSession
+    runtime.resetSession();
+
+    assert.strictEqual(runtime.getQueuedMessageCount(), 0, 'queued messages must be cleared');
+    assert.strictEqual(runtime.getContextManager().getSummary(), undefined, 'summary must be cleared');
+    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), undefined, 'agent prompt must be cleared');
+    assert.strictEqual(await runtime.getPermissionManager().isApproved('edit_file', {}, 'write'), false, 'grants must be cleared');
+  });
+
+  it('loadState isolates queues, context layers, and permission grants from prior session (R2-003)', async () => {
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'first session',
+      approvalMode: 'suggest',
+      modelClient: new StubModelClient('done'),
+      sessionManager: manager,
+    });
+
+    runtime.getContextManager().setSummary({
+      created: new Date().toISOString(),
+      updated: new Date().toISOString(),
+      goals: ['old summary'],
+      progress: [],
+      keyDecisions: [],
+      nextSteps: [],
+      filesChanged: [],
+      commandsRun: [],
+      openIssues: [],
+    });
+    runtime.getContextManager().setAgentPrompt('old agent prompt');
+    runtime.getPermissionManager().grant('session', 'read_file', undefined, 'read');
+    runtime.queueUserMessage('old queued message');
+
+    const freshState: AgentState = {
+      sessionId: 'fresh-id',
+      workspaceRoot: tmp,
+      workspace: { primaryRoot: tmp, additionalRoots: [] },
+      model: 'mock',
+      agentMode: 'agent',
+      objective: 'resumed objective',
+      status: 'idle',
+      mode: { inputMode: 'agent', operatingMode: 'agent', permissionMode: 'suggest' },
+      messages: [{ role: 'user', content: 'hello restored' }],
+      todos: [],
+      relevantFiles: [],
+      changedFiles: [],
+      toolHistory: [],
+      skillSummaries: [],
+      activeSkills: [],
+      subagentReports: [],
+    };
+
+    runtime.loadState(freshState);
+
+    assert.strictEqual(runtime.getState().sessionId, 'fresh-id');
+    assert.strictEqual(runtime.getQueuedMessageCount(), 0, 'queues must not bleed across loadState');
+    assert.strictEqual(runtime.getContextManager().getSummary(), undefined, 'summary must not bleed across loadState');
+    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), undefined, 'agent prompt must not bleed across loadState');
+    assert.strictEqual(runtime.getState().messages.length, 1);
+  });
 });
