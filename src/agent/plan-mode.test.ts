@@ -221,6 +221,29 @@ describe('plan artifact lifecycle', () => {
     assert.ok(!fs.existsSync(path.join(tmp, 'PLAN.md')), 'plan file must be removed');
   });
 
+  it('clearPlan refuses to delete a plan path outside the workspace (VCL-040)', () => {
+    const outside = path.resolve(path.join(tmp, '..', 'venice-plan-outside-target.md'));
+    fs.writeFileSync(outside, 'must survive');
+
+    const runtime = planRuntime();
+    const state = runtime.getState();
+    runtime.loadState({
+      ...state,
+      plan: {
+        summary: 'tampered',
+        steps: [],
+        filePath: outside,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    runtime.clearPlan();
+    assert.strictEqual(runtime.getState().plan, undefined);
+    assert.ok(fs.existsSync(outside), 'a plan path outside the workspace must never be deleted');
+
+    fs.rmSync(outside, { force: true });
+  });
+
   it('persists the plan with the session', async () => {
     const runtime = planRuntime();
     await runtime.executeDirectTool('write_plan', { summary: 'Persisted plan', steps: ['a'] });

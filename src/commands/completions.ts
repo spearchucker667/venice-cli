@@ -676,12 +676,6 @@ ${program.commands
                     )
                     _describe -t wallet_cmds 'wallet commands' wallet_cmds
                     ;;
-                top-up)
-                    _arguments \\
-                        '--payment-signature[Signed x402 v2 payment payload (base64)]:header:' \\
-                        '-f[Output format]:format:((\$formats))' \\
-                        '--format[Output format]:format:((\$formats))'
-                    ;;
                 completions)
                     _arguments '1:shell:(bash zsh fish)'
                     ;;

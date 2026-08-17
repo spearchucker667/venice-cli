@@ -576,10 +576,15 @@ export class AgentRuntime {
   /** Clear the plan artifact (used by /plan clear). */
   clearPlan(): void {
     if (this.state.plan?.filePath) {
+      // Never trust a persisted absolute deletion target (VCL-040): a
+      // tampered or imported session could supply a path outside the workspace.
+      // Validate realpath/parent boundaries and skip deletion on escape.
       try {
+        this.workspace.assertInsideWorkspace(this.state.plan.filePath);
         fs.rmSync(this.state.plan.filePath, { force: true });
       } catch {
-        // Best effort: the plan state is cleared regardless.
+        // Best effort: an escaping path is not deleted; the plan state is
+        // still cleared regardless.
       }
     } else {
       try {

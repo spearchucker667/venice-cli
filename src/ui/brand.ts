@@ -17,39 +17,32 @@ export const VENICE_BRAND = {
 export const VENICE_SLOGAN = 'Private and uncensored AI.';
 
 /**
- * Full-size crossed-keys mark (11 rows), traced from the official Venice
- * keys asset: two warded key heads at the top, shafts crossing in the middle,
- * and two bow rings at the bottom.
+ * Full-size crossed-keys mark (7 rows), traced from the official Venice keys
+ * asset: two warded heads at the top whose teeth meet in the middle, shafts
+ * crossing in an X, and two bow rings at the bottom.
  */
 export const FULL_LOGO = [
-  '        _/\\_  _/\\_',
-  '          \\    /',
-  '           \\  /',
-  '            X',
-  '           / \\',
-  '          /   \\',
-  '         /     \\',
-  '        /       \\',
-  '       /         \\',
-  '      /           \\',
-  '     (___)     (___)',
+  '    /\\  /\\',
+  '   /  \\/  \\',
+  '   \\      /',
+  '    \\    /',
+  '     X',
+  '   /    \\',
+  '  (__)  (__)',
 ] as const;
 
-/** Compact crossed-keys mark (8 rows) for medium terminals. */
+/** Compact crossed-keys mark (5 rows) for medium terminals. */
 export const COMPACT_LOGO = [
-  '   _/\\_  _/\\_',
-  '     \\    /',
-  '      \\  /',
-  '       X',
-  '      / \\',
-  '     /   \\',
-  '    /     \\',
-  '   (__) (__)',
+  '  /\\  /\\',
+  ' /  \\/  \\',
+  '  \\    /',
+  '   X',
+  ' (_) (_)',
 ] as const;
 
 /** Progressive-reveal frame steps (count of visible logo rows). */
-export const FULL_FRAMES = [3, 6, 9, 11] as const;
-export const COMPACT_FRAMES = [3, 5, 8] as const;
+export const FULL_FRAMES = [2, 4, 6, 7] as const;
+export const COMPACT_FRAMES = [2, 4, 5] as const;
 
 export type GreetingVariant = 'full' | 'compact' | 'minimal';
 
