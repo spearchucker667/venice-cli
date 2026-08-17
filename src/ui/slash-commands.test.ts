@@ -8,6 +8,7 @@ import {
   getSlashCommandBase,
   isSlashCommandAvailable,
   isBusyStatus,
+  skillSlashCommands,
 } from './slash-commands.js';
 
 describe('parseSlashCommand', () => {
@@ -56,6 +57,21 @@ describe('parseSlashCommand', () => {
     assert.strictEqual(getSlashCommandBase('plan'), 'plan');
     assert.strictEqual(getSlashCommandBase('plan view'), 'plan');
     assert.strictEqual(getSlashCommandBase('export-debug-zip'), 'export-debug-zip');
+  });
+
+  it('contributes dynamic /skill <name> definitions from the skill registry (VCL-R3-032)', () => {
+    const defs = skillSlashCommands(['release', 'review']);
+    assert.strictEqual(defs.length, 2);
+    assert.deepStrictEqual(
+      defs.map((d) => d.name),
+      ['skill release', 'skill review']
+    );
+    assert.ok(defs.every((d) => d.availability === 'always'));
+    // They participate in composer completion alongside static commands.
+    assert.ok(findSlashCommands('/skill', defs).some((c) => c.name === 'skill release'));
+    assert.ok(findSlashCommands('/skill re', defs).some((c) => c.name === 'skill release'));
+    // Static commands are still found without extra definitions.
+    assert.ok(findSlashCommands('/skill').some((c) => c.name === 'skill'));
   });
 
   it('finds the metadata entry for a parsed command token', () => {

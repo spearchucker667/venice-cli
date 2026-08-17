@@ -130,6 +130,28 @@ describe('SkillRegistry discovery errors (VC-KIMI-043)', () => {
     const names = registry.list().map((s) => s.name);
     assert.ok(names.includes('extra-toolkit'));
   });
+
+  it('extra directories are additive: user/project skills are still discovered (VCL-R3-030)', () => {
+    const globalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-additive-global-'));
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-additive-project-'));
+    const extraDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-additive-extra-'));
+
+    for (const [dir, name, description] of [
+      [path.join(globalDir, 'global-skill'), 'global-skill', 'From global dir'],
+      [path.join(projectDir, 'project-skill'), 'project-skill', 'From project dir'],
+      [path.join(extraDir, 'extra-skill'), 'extra-skill', 'From extra dir'],
+    ] as const) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(dir + path.sep + 'SKILL.md', `---\nname: ${name}\ndescription: ${description}.\n---\n\nBody\n`);
+    }
+
+    // --skills-dir adds on top of the default user/project directories rather
+    // than replacing them (additive Venice semantics, VCL-R3-030).
+    const registry = new SkillRegistry(globalDir, projectDir, [extraDir]);
+    registry.discover();
+    const names = registry.list().map((s) => s.name).sort();
+    assert.deepStrictEqual(names, ['extra-skill', 'global-skill', 'project-skill']);
+  });
 });
 
 describe('getGlobalSkillsDir', () => {

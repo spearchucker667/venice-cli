@@ -4,6 +4,7 @@
 
 import { Command } from 'commander';
 import { AgentRuntime, detectWorkspaceRoot } from '../agent/runtime.js';
+import { resolveAgent, resolveAgentFile, resolvePersistedAgent, type AgentDefinition } from '../agent/agents.js';
 import { getDefaultModel, loadProjectConfig } from '../lib/config.js';
 import { formatError, getChalk } from '../lib/output.js';
 import { EventBus } from '../agent/events.js';
@@ -12,6 +13,7 @@ import { buildAgentMcpConfig } from '../mcp/config.js';
 import { McpManager } from '../mcp/manager.js';
 import { defaultMode } from '../agent/mode.js';
 import { SessionManager } from '../agent/sessions.js';
+import type { AgentState } from '../agent/types.js';
 
 export function registerAgentCommand(program: Command): Command {
   const agent = program
@@ -31,8 +33,10 @@ export function registerAgentCommand(program: Command): Command {
     .option('--json', 'Output final result as JSON (deprecated: use --output-format json)')
     .option('--interactive', 'Render live progress (default when stdin is a TTY and --json is not used)')
     .option('--no-interactive', 'Force plain output even in a TTY')
-    .option('--skills-dir <dir>', 'Additional skills directory (repeatable)', (value: string, previous: string[]) => [...previous, value], [] as string[])
+    .option('--skills-dir <dir>', 'Additional skills directory (repeatable; additive — user and project skills are still loaded)', (value: string, previous: string[]) => [...previous, value], [] as string[])
     .option('--add-dir <dir>', 'Add an additional workspace root the agent may read and edit (repeatable)', (value: string, previous: string[]) => [...previous, value], [] as string[])
+    .option('--agent <name>', 'Select a custom main agent by name (built-in, user, or project)')
+    .option('--agent-file <path>', 'Load a custom main agent definition from a JSON or Markdown file')
     .action(async (options) => {
       const c = getChalk();
       const explicitApproval = options.approval !== undefined
@@ -55,6 +59,32 @@ export function registerAgentCommand(program: Command): Command {
       // Project `.venice/config.json` supplies approval/validation/compaction
       // defaults below CLI flags but above global config (VCL-R3-010).
       const projectConfig = loadProjectConfig(workspaceRoot);
+
+      // Custom main agent (VCL-R3-031): --agent-file loads a file directly;
+      // --agent resolves a named definition (built-in, user, or project).
+      let agent: AgentDefinition | undefined;
+      if (options.agentFile) {
+        agent = resolveAgentFile(String(options.agentFile), { workspaceRoot });
+        if (!agent) {
+          console.error(formatError(`Agent file not found or invalid: ${options.agentFile}`));
+          process.exit(2);
+        }
+      } else if (options.agent) {
+        agent = resolveAgent(String(options.agent), { workspaceRoot });
+        if (!agent) {
+          console.error(formatError(`Unknown agent: ${options.agent}. Use --agent-file to load a custom definition.`));
+          process.exit(2);
+        }
+      }
+      // A project-sourced agent is high-authority prompt configuration the
+      // repo controls; surface that trust guidance explicitly (VCL-R3-031).
+      if (agent?.source === 'project') {
+        console.error(formatError(
+          `Selected agent '${agent.name}' from the project (${agent.sourcePath}). ` +
+          'Project agent definitions are high-authority prompt configuration: ' +
+          'the repository controls this agent\'s system prompt.'
+        ));
+      }
       const maxTurns = Number.parseInt(options.maxTurns, 10);
       if (!Number.isInteger(maxTurns) || maxTurns < 1) {
         console.error(formatError('--max-turns must be a positive integer'));
@@ -94,6 +124,8 @@ export function registerAgentCommand(program: Command): Command {
           session: options.session,
           outputFormat,
           json: options.json,
+          agent: options.agent,
+          agentFile: options.agentFile,
         },
         !process.stdin.isTTY
       );
@@ -142,6 +174,26 @@ export function registerAgentCommand(program: Command): Command {
         ? { ...defaultMode(approvalMode), operatingMode: 'plan' as const }
         : defaultMode(approvalMode);
 
+      // When resuming without an explicit --agent/--agent-file, re-resolve the
+      // persisted agent so its high-authority prompt is re-applied (VCL-R3-031).
+      let storedSession: { state: AgentState; events: import('../agent/events.js').AgentEvent[] } | undefined;
+      if (resumeSessionId) {
+        storedSession = new SessionManager().load(resumeSessionId, workspaceRoot);
+        if (!storedSession) {
+          console.error(formatError(`Session not found in this workspace: ${resumeSessionId}`));
+          process.exit(2);
+        }
+        if (!agent && storedSession.state.agent) {
+          agent = resolvePersistedAgent(storedSession.state.agent, { workspaceRoot });
+          if (agent?.source === 'project') {
+            console.error(formatError(
+              `Resumed agent '${agent.name}' from the project (${agent.sourcePath}). ` +
+              'Project agent definitions are high-authority prompt configuration.'
+            ));
+          }
+        }
+      }
+
       if (interactive) {
         const { runTui } = await import('../ui/tui.js');
         await runTui({
@@ -156,6 +208,7 @@ export function registerAgentCommand(program: Command): Command {
           skillsDirs: options.skillsDir,
           additionalRoots: options.addDir,
           projectConfig,
+          agent,
         });
         process.exit(0);
       }
@@ -176,6 +229,7 @@ export function registerAgentCommand(program: Command): Command {
         skillsDirs: options.skillsDir,
         additionalRoots: options.addDir,
         projectConfig,
+        agent,
       });
 
       // Broken skills must be visible during normal headless use, not only
@@ -187,15 +241,10 @@ export function registerAgentCommand(program: Command): Command {
         ));
       }
 
-      if (resumeSessionId) {
-        const stored = new SessionManager().load(resumeSessionId, workspaceRoot);
-        if (!stored) {
-          console.error(formatError(`Session not found in this workspace: ${resumeSessionId}`));
-          process.exit(2);
-        }
+      if (storedSession) {
         // Explicit CLI flags win over the persisted session mode
         // (VC-KIMI-004: stored suggest -> CLI auto override).
-        runtime.loadState(stored.state, { mode: { permissionMode: approvalMode } });
+        runtime.loadState(storedSession.state, { mode: { permissionMode: approvalMode } });
       }
 
       try {
@@ -259,11 +308,16 @@ export function validateStartupConflicts(
     session?: string | boolean;
     outputFormat: string;
     json?: boolean;
+    agent?: string;
+    agentFile?: string;
   },
   hasStdin: boolean
 ): string | null {
   if (options.continueFlag && options.session !== undefined) {
     return '--continue and --session are mutually exclusive';
+  }
+  if (options.agent && options.agentFile) {
+    return '--agent and --agent-file are mutually exclusive';
   }
   if (options.yolo && options.auto) {
     return '--yolo and --auto are mutually exclusive';

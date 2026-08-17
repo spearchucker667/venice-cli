@@ -26,6 +26,19 @@ describe('Composer', () => {
     assert.ok(submitted);
   });
 
+  it('contributes skill slash completions from skillNames (VCL-R3-032)', async () => {
+    const { stdin, lastFrame } = render(
+      <Composer workspaceRoot={process.cwd()} onSubmit={() => {}} skillNames={['release', 'review']} />
+    );
+    // Let the composer mount its input handler before typing (the leading `/`
+    // can otherwise be dropped during the first frame).
+    await new Promise((r) => setTimeout(r, 100));
+    stdin.write('/skill');
+    await new Promise((r) => setTimeout(r, 100));
+    assert.ok(lastFrame()?.includes('skill release'), 'skill completion must appear in the picker');
+    assert.ok(lastFrame()?.includes('skill review'), 'skill completion must appear in the picker');
+  });
+
   it('uses nested workspace-rooted autocomplete without ignored directories', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'venice-composer-'));
     try {

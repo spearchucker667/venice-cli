@@ -413,6 +413,14 @@ Skills are discovered from:
 .venice/skills/<name>/SKILL.md
 ```
 
+The `--skills-dir <dir>` flag (repeatable) is **additive**: extra directories are
+searched on top of the default user and project skills directories, never
+instead of them.
+
+```bash
+venice agent --skills-dir ./team-skills --prompt "Use the release skill"
+```
+
 Inspect them with:
 
 ```bash

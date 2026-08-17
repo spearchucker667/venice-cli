@@ -166,6 +166,44 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('loads a skill via /skill <name> (VCL-R3-032)', async () => {
+    const loaded: string[] = [];
+    const messages: TuiMessage[] = [];
+    const fakeRuntime = {
+      loadSkill: (name: string) => {
+        if (name === 'release') {
+          loaded.push(name);
+          return true;
+        }
+        return false;
+      },
+      getState: () => ({
+        activeSkills: ['release'],
+        skillSummaries: [{ name: 'release', description: 'Release skill', tools: [], source: 'x' }],
+      }),
+    };
+    const context = {
+      exit: () => {},
+      setMessages: (updater: (prev: TuiMessage[]) => TuiMessage[]) => {
+        const next = updater(messages);
+        messages.length = 0;
+        messages.push(...next);
+      },
+      status: 'idle' as const,
+      model: 'kimi-k2.5',
+      approvalMode: 'auto-edit',
+      workspaceRoot: '/tmp',
+      getRuntime: () => fakeRuntime as unknown as AgentRuntime,
+    };
+
+    await handleSlashCommand('skill', 'release', context);
+    assert.deepStrictEqual(loaded, ['release']);
+    assert.ok(messages.some((m) => m.content.includes("Skill 'release' loaded and active")));
+
+    await handleSlashCommand('skill', 'nope', context);
+    assert.ok(messages.some((m) => m.content.includes('Unknown skill: nope')));
+  });
+
   it('returns false for unknown commands so they can be sent to the model (VC-KIMI-047)', async () => {
     const { context, messages } = makeContext();
     const handled = await handleSlashCommand('frobnicate', '', context);

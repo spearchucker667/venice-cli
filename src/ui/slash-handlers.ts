@@ -291,14 +291,39 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
       if (skills.length === 0) {
         addEvent('No skills discovered or loaded.');
       } else {
-        const lines = ['Available Skills:'];
+        const lines = ['Available Skills (use /skill <name> to load):'];
         for (const s of skills) {
-          lines.push(`  • ${s.name} — ${s.description}`);
+          const active = runtime.getState().activeSkills.includes(s.name) ? ' (active)' : '';
+          lines.push(`  • ${s.name}${active} — ${s.description}`);
         }
         addEvent(lines.join('\n'));
       }
     } else {
       addEvent('No active runtime to query skills.');
+    }
+  },
+
+  async skill(args, { addEvent, getRuntime }) {
+    const name = args.trim();
+    const runtime = getRuntime?.();
+    if (!runtime) {
+      addEvent('No active runtime to load skills.');
+      return;
+    }
+    if (!name) {
+      const skills = runtime.getState().skillSummaries || [];
+      const lines = skills.length
+        ? ['Available Skills (use /skill <name> to load):', ...skills.map((s) => `  • ${s.name} — ${s.description}`)]
+        : ['No skills discovered.'];
+      addEvent(lines.join('\n'));
+      return;
+    }
+    // Activate the skill directly (VCL-R3-032) — its instructions enter
+    // context for subsequent turns, mirroring the skill_load tool.
+    if (runtime.loadSkill(name)) {
+      addEvent(`Skill '${name}' loaded and active.`);
+    } else {
+      addEvent(`Unknown skill: ${name}. Use /skills to list available skills.`);
     }
   },
 

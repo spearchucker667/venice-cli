@@ -21,6 +21,7 @@ import type { ModelCatalog } from './model-catalog.js';
 import { loadInstructions } from './instructions.js';
 import { WorkspaceManager, detectGitRoot } from './workspace.js';
 import { getDefaultModel, loadProjectConfig, type ProjectAgentConfig } from '../lib/config.js';
+import type { AgentDefinition } from './agents.js';
 import type { RuntimeModeState } from './mode.js';
 import { defaultMode } from './mode.js';
 import { McpManager } from '../mcp/manager.js';
@@ -52,6 +53,8 @@ export interface AgentRuntimeOptions {
   autoCompact?: boolean;
   /** Pre-loaded project config; defaults to <workspace>/.venice/config.json. */
   projectConfig?: ProjectAgentConfig;
+  /** Selected custom main agent (VCL-R3-031). */
+  agent?: AgentDefinition;
   modelClient?: VeniceModelClient;
   /** Injectable model catalog for offline/fast model discovery (VCL-R3-027). */
   modelCatalog?: ModelCatalog;
@@ -152,6 +155,15 @@ export class AgentRuntime {
       activeSkills: [],
       subagentReports: [],
     };
+    // Custom main agent: persist identity with the session and layer its
+    // system prompt into context above project instructions (VCL-R3-031).
+    if (options.agent && options.agent.name) {
+      this.state.agent = {
+        name: options.agent.name,
+        source: options.agent.source,
+        sourcePath: options.agent.sourcePath,
+      };
+    }
     this.modelClient = options.modelClient || new VeniceModelClient({
       model: this.state.model,
       catalog: options.modelCatalog,
@@ -162,6 +174,9 @@ export class AgentRuntime {
     // manager in lockstep from the start (VC-KIMI-004).
     this.permissions.setMode(this.state.mode.permissionMode);
     this.context = options.contextManager || new ContextManager();
+    if (options.agent?.systemPrompt) {
+      this.context.setAgentPrompt(options.agent.systemPrompt);
+    }
     this.sessions = options.sessionManager || new SessionManager();
     this.events = options.eventBus || new EventBus();
     this.maxTurns = options.maxTurns ?? 25;
@@ -199,6 +214,25 @@ export class AgentRuntime {
   /** Skill discovery errors, surfaced rather than swallowed (VC-KIMI-043). */
   getSkillErrors(): string[] {
     return this.skills.getErrors();
+  }
+
+  /**
+   * Activate a skill by name (used by the `/skill` slash command, VCL-R3-032).
+   * Mirrors the `skill_load` tool's activation side effect. Returns false when
+   * the skill is unknown.
+   */
+  loadSkill(name: string): boolean {
+    const trimmed = name.trim();
+    if (!trimmed || !this.skills.load(trimmed)) return false;
+    if (!this.state.activeSkills.includes(trimmed)) {
+      this.state.activeSkills.push(trimmed);
+      this.context.setActiveSkills(
+        this.state.activeSkills
+          .map((skillName) => this.skills.load(skillName))
+          .filter((skill): skill is Skill => skill !== undefined)
+      );
+    }
+    return true;
   }
 
   /**

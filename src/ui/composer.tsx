@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { isPathInside } from '../agent/workspace.js';
-import { findSlashCommands } from './slash-commands.js';
+import { findSlashCommands, skillSlashCommands } from './slash-commands.js';
 
 export interface ComposerProps {
   onSubmit: (text: string) => void;
@@ -19,6 +19,8 @@ export interface ComposerProps {
   disabled?: boolean;
   maxSuggestions?: number;
   columns?: number;
+  /** Available skill names, contributed as `/skill <name>` slash completions (VCL-R3-032). */
+  skillNames?: string[];
 }
 
 const IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', 'target', 'vendor']);
@@ -136,7 +138,7 @@ export async function findMentionCompletions(workspaceRoot: string, query: strin
   return results;
 }
 
-export function Composer({ onSubmit, onInject, workspaceRoot, inputMode = 'agent', operatingMode = 'agent', disabled, maxSuggestions = 8, columns = 80 }: ComposerProps): JSX.Element {
+export function Composer({ onSubmit, onInject, workspaceRoot, inputMode = 'agent', operatingMode = 'agent', disabled, maxSuggestions = 8, columns = 80, skillNames = [] }: ComposerProps): JSX.Element {
   const [value, setValue] = useState('');
   const [history, setHistory] = useState<string[]>(() => loadComposerHistory());
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -173,10 +175,10 @@ export function Composer({ onSubmit, onInject, workspaceRoot, inputMode = 'agent
   const slashOptions = useMemo(() => {
     const match = value.match(/^\/([^\s]*)$/);
     if (!match) return EMPTY_SLASH_OPTIONS;
-    return findSlashCommands(value)
+    return findSlashCommands(value, skillSlashCommands(skillNames ?? []))
       .slice(0, maxSuggestions)
       .map((cmd) => ({ name: cmd.name, description: cmd.description }));
-  }, [value, maxSuggestions]);
+  }, [value, maxSuggestions, skillNames]);
 
   useEffect(() => {
     if (value.match(/^\/([^\s]*)$/)) {

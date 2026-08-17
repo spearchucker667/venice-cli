@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import type { AgentRuntime } from '../agent/runtime.js';
 import { AgentRuntime as AgentRuntimeClass } from '../agent/runtime.js';
+import type { AgentDefinition } from '../agent/agents.js';
 import type { AgentStatus } from '../agent/types.js';
 import type { AgentEvent } from '../agent/events.js';
 import { EventBus } from '../agent/events.js';
@@ -46,6 +47,8 @@ export interface AppProps {
   additionalRoots?: string[];
   /** Project `.venice/config.json` defaults (VCL-R3-010). */
   projectConfig?: ProjectAgentConfig;
+  /** Selected custom main agent (VCL-R3-031). */
+  agent?: AgentDefinition;
   onExit: () => void;
 }
 
@@ -100,7 +103,7 @@ function getGitBranch(cwd: string): string | undefined {
   }
 }
 
-export function App({ workspaceRoot, model, approvalMode, mode: initialMode, maxTurns, mcpManager, initialObjective, resumeSessionId, skillsDirs, additionalRoots, projectConfig, onExit }: AppProps): JSX.Element {
+export function App({ workspaceRoot, model, approvalMode, mode: initialMode, maxTurns, mcpManager, initialObjective, resumeSessionId, skillsDirs, additionalRoots, projectConfig, agent, onExit }: AppProps): JSX.Element {
   const { exit } = useApp();
   const abortControllerRef = useRef<AbortController | null>(null);
   const runtimeRef = useRef<AgentRuntime | null>(null);
@@ -239,6 +242,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       skillsDirs,
       additionalRoots,
       projectConfig,
+      agent,
     });
     setInputMode(runtime.getMode().inputMode);
     setOperatingMode(runtime.getMode().operatingMode);
@@ -332,7 +336,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceRoot, model, approvalMode, maxTurns, mcpManager, skillsDirs, additionalRoots, projectConfig]);
+  }, [workspaceRoot, model, approvalMode, maxTurns, mcpManager, skillsDirs, additionalRoots, projectConfig, agent]);
 
   const addEvent = (content: string) => {
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'event', content }]);
@@ -612,6 +616,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
         disabled={pendingApproval !== null || pendingPlanApproval !== null || pendingUserQuestion !== null || pickerMode !== 'normal'}
         maxSuggestions={Math.max(3, Math.min(8, rows - 11))}
         columns={columns}
+        skillNames={runtimeRef.current?.getState().skillSummaries.map((s) => s.name) ?? []}
       />
       <StatusBar
         columns={columns}

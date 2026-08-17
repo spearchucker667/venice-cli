@@ -213,6 +213,9 @@ function normalizeImportedState(input: unknown): AgentState {
     checkpointCount: numberField(state.checkpointCount),
     canUndoCheckpoints: booleanField(state.canUndoCheckpoints),
     canRedoCheckpoints: booleanField(state.canRedoCheckpoints),
+    agent: objectField(state.agent, (v) =>
+      typeof v.name === 'string' && typeof v.source === 'string'
+    ) as AgentState['agent'],
     plan: objectField(state.plan, (v) =>
       typeof v.summary === 'string' &&
       typeof v.filePath === 'string' &&

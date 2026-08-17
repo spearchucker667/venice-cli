@@ -50,6 +50,19 @@ export function findSlashCommandDefinition(command: string): SlashCommandDefinit
 }
 
 /**
+ * Dynamically contribute slash definitions for available skills so active
+ * skills participate in composer completion (VCL-R3-032). Each skill maps to
+ * a `/skill <name>` invocation.
+ */
+export function skillSlashCommands(skillNames: string[]): SlashCommandDefinition[] {
+  return skillNames.map((name) => ({
+    name: `skill ${name}`,
+    description: `Load the '${name}' skill`,
+    availability: 'always' as const,
+  }));
+}
+
+/**
  * Enforce the `availability` metadata (VC-KIMI-046): an `idle`-only command
  * must be rejected while the agent is running a turn.
  */
@@ -79,6 +92,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: 'tools', description: 'List registered tools', availability: 'always' },
   { name: 'mcp', description: 'List MCP servers', availability: 'always' },
   { name: 'skills', description: 'List available skills', availability: 'always' },
+  { name: 'skill', description: 'Load a skill by name (e.g. /skill release)', availability: 'always' },
   { name: 'permissions', description: 'Show or change approval mode', availability: 'always' },
   { name: 'git', description: 'Show git status', availability: 'always' },
   { name: 'init', description: 'Initialize Venice workspace', availability: 'always' },
@@ -92,13 +106,19 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: 'import', description: 'Import a session file', availability: 'always' },
 ];
 
-export function findSlashCommands(query: string): SlashCommandDefinition[] {
+export function findSlashCommands(
+  query: string,
+  extra: SlashCommandDefinition[] = []
+): SlashCommandDefinition[] {
   if (!query.startsWith('/')) return [];
   const q = query.slice(1).toLowerCase();
-  return SLASH_COMMANDS.filter((cmd) => {
-    if (cmd.name.includes(q)) return true;
-    if (cmd.aliases?.some((a) => a.includes(q))) return true;
-    if (cmd.description.toLowerCase().includes(q)) return true;
-    return false;
-  }).slice(0, 8);
+  const all = [...SLASH_COMMANDS, ...extra];
+  return all
+    .filter((cmd) => {
+      if (cmd.name.includes(q)) return true;
+      if (cmd.aliases?.some((a) => a.includes(q))) return true;
+      if (cmd.description.toLowerCase().includes(q)) return true;
+      return false;
+    })
+    .slice(0, 8);
 }

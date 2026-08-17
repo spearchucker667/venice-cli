@@ -25,6 +25,7 @@ export class ContextManager {
   private readonly budget: ContextBudget;
   private systemContract: string;
   private projectInstructions: string;
+  private agentPrompt: string;
   private workingMemory: string;
   private conversation: AgentMessage[] = [];
   private fileContext: AgentMessage[] = [];
@@ -39,6 +40,7 @@ export class ContextManager {
     };
     this.systemContract = this.defaultSystemContract();
     this.projectInstructions = '';
+    this.agentPrompt = '';
     this.workingMemory = '';
   }
 
@@ -58,6 +60,14 @@ export class ContextManager {
 
   setProjectInstructions(instructions: string): void {
     this.projectInstructions = instructions;
+  }
+
+  /**
+   * Set the selected custom agent's system prompt (VCL-R3-031). It is layered
+   * directly above the base contract — high-authority prompt configuration.
+   */
+  setAgentPrompt(prompt: string): void {
+    this.agentPrompt = prompt;
   }
 
   setWorkingMemory(state: AgentState): void {
@@ -140,6 +150,7 @@ export class ContextManager {
   buildMessages(): Message[] {
     const systemParts: string[] = [];
     if (this.systemContract) systemParts.push(this.systemContract);
+    if (this.agentPrompt) systemParts.push(this.agentPrompt);
     if (this.projectInstructions) systemParts.push(this.projectInstructions);
     if (this.workingMemory) systemParts.push(this.workingMemory);
     if (this.activeSkills.length) {

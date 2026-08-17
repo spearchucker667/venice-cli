@@ -174,6 +174,11 @@ export interface AgentState {
   skillSummaries: SkillSummary[];
   activeSkills: string[];
   subagentReports?: SubagentResult[];
+  /**
+   * Selected custom main agent identity (VCL-R3-031). Persisted with the
+   * session so a resumed run re-applies the same high-authority prompt.
+   */
+  agent?: { name: string; source: string; sourcePath?: string };
   /** Current plan artifact (plan mode). Persisted with the session. */
   plan?: PlanArtifact;
   lastValidation?: {
