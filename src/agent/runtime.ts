@@ -15,6 +15,7 @@ import { PermissionManager } from './permissions.js';
 import type { ApprovalCallback, ApprovalMode, PlanApprovalCallback, UserQuestionCallback } from './permissions.js';
 import { ContextManager, buildStructuredSummary } from './context.js';
 import { interpretEffects, type ToolEffectServices } from './effects.js';
+import { TurnController } from './turn.js';
 import { SessionManager } from './sessions.js';
 import { VeniceModelClient, UNKNOWN_CONTEXT_LIMIT } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
@@ -128,13 +129,6 @@ export class AgentRuntime {
   private readonly autoValidate: boolean;
   private readonly autoCompact: boolean;
   private signal?: AbortSignal;
-  /**
-   * The abort signal frozen at the start of the in-flight turn. All turn work
-   * (model request, tool context, loop checks) reads this immutable capture,
-   * never the replaceable `signal` field, so a UI signal swap mid-turn cannot
-   * make a cancelled turn observe a fresh non-aborted signal (VCL-001).
-   */
-  private activeTurnSignal?: AbortSignal;
   private readonly mcpManager?: McpManager;
   private checkpointsField: CheckpointManager;
   private workspace: WorkspaceManager;
@@ -149,10 +143,7 @@ export class AgentRuntime {
   // runtime owns these — the UI must not mutate model context directly.
   private queuedMessages: PendingUserMessage[] = [];
   private injectedMessages: PendingUserMessage[] = [];
-  private turnInProgress = false;
-  private pendingTurnCount = 0;
-  private activeTurn?: { id: string; signal: AbortSignal; startedAt: number };
-  private turnLockPromise: Promise<void> = Promise.resolve();
+  private readonly turns = new TurnController();
 
   constructor(options: AgentRuntimeOptions) {
     // Merge CLI --add-dir roots with any persisted/explicit workspace roots,
@@ -248,8 +239,6 @@ export class AgentRuntime {
     );
     this.skills.discover();
     this.state.skillSummaries = this.skills.list();
-
-    this.context.setWorkingMemory(this.state);
   }
 
   getState(): Readonly<AgentState> {
@@ -313,25 +302,18 @@ export class AgentRuntime {
   }
 
   /**
-   * Acquire the serial turn lock. Ensures concurrent sendUserMessage or run
-   * invocations serialize cleanly without interleaving state or context (R2-001).
+   * The abort signal frozen at the start of the in-flight turn (VCL-001).
+   * Derived from the owning turn so it can never drift from ownership state.
    */
-  private async acquireTurnLock(): Promise<() => void> {
-    let releaseLock!: () => void;
-    const nextLock = new Promise<void>((resolve) => {
-      releaseLock = resolve;
-    });
-    const currentLock = this.turnLockPromise;
-    this.turnLockPromise = this.turnLockPromise.then(() => nextLock, () => nextLock);
-    await currentLock;
-    return releaseLock;
+  private get activeTurnSignal(): AbortSignal | undefined {
+    return this.turns.current()?.signal;
   }
 
   /**
    * True when a foreground turn is starting or actively executing (R2-001).
    */
   isBusy(): boolean {
-    return this.turnInProgress || this.activeTurn !== undefined || this.pendingTurnCount > 0;
+    return this.turns.isBusy();
   }
 
   /**
@@ -569,8 +551,7 @@ export class AgentRuntime {
     const permissionMode = this.state.mode.permissionMode;
     this.queuedMessages = [];
     this.injectedMessages = [];
-    this.activeTurn = undefined;
-    this.turnInProgress = false;
+    this.turns.reset();
     this.state = {
       sessionId: randomUUID(),
       workspaceRoot: this.workspace.workspaceRoot,
@@ -593,7 +574,6 @@ export class AgentRuntime {
       subagentReports: [],
     };
     this.context.resetSession();
-    this.context.setWorkingMemory(this.state);
     this.workspace.replaceChangedFiles([]);
     this.permissions.clearGrants();
     this.permissions.setMode(permissionMode);
@@ -773,8 +753,6 @@ export class AgentRuntime {
         .map((name) => this.skills.load(name))
         .filter((skill): skill is Skill => skill !== undefined)
     );
-
-    this.context.setWorkingMemory(this.state);
   }
 
   async start(): Promise<void> {
@@ -815,19 +793,10 @@ export class AgentRuntime {
   }
 
   async sendUserMessage(content: string, attachedContext?: string): Promise<string> {
-    this.pendingTurnCount++;
-    this.turnInProgress = true;
-    // Acquire the serial turn lock so concurrent entries queue/serialize cleanly (R2-001).
-    const release = await this.acquireTurnLock();
+    // Acquire the serial turn ownership so concurrent entries queue cleanly
+    // and at most one foreground turn owns the session at a time (R2-001).
+    const turn = await this.turns.begin(this.signal);
     try {
-      const turnSignal = this.signal;
-      this.activeTurnSignal = turnSignal;
-      this.turnInProgress = true;
-      this.activeTurn = {
-        id: randomUUID(),
-        signal: turnSignal ?? new AbortController().signal,
-        startedAt: Date.now(),
-      };
       this.state.status = 'thinking';
       await this.start();
 
@@ -862,13 +831,7 @@ export class AgentRuntime {
         this.context.setFileContext([]);
       }
     } finally {
-      this.pendingTurnCount--;
-      if (this.pendingTurnCount === 0) {
-        this.turnInProgress = false;
-      }
-      this.activeTurn = undefined;
-      this.activeTurnSignal = undefined;
-      release();
+      turn.finish();
     }
   }
 
@@ -909,18 +872,8 @@ export class AgentRuntime {
   }
 
   async run(): Promise<AgentRuntimeResult> {
-    this.pendingTurnCount++;
-    this.turnInProgress = true;
-    const release = await this.acquireTurnLock();
+    const turn = await this.turns.begin(this.signal);
     try {
-      const turnSignal = this.signal;
-      this.activeTurnSignal = turnSignal;
-      this.turnInProgress = true;
-      this.activeTurn = {
-        id: randomUUID(),
-        signal: turnSignal ?? new AbortController().signal,
-        startedAt: Date.now(),
-      };
       await this.start();
       this.addUserMessage(this.state.objective);
       let finalMessage = await this.processTurns();
@@ -940,13 +893,7 @@ export class AgentRuntime {
       return { state: this.state, events: this.events.events, finalMessage };
     } finally {
       this.context.setFileContext([]);
-      this.pendingTurnCount--;
-      if (this.pendingTurnCount === 0) {
-        this.turnInProgress = false;
-      }
-      this.activeTurn = undefined;
-      this.activeTurnSignal = undefined;
-      release();
+      turn.finish();
     }
   }
 
@@ -968,10 +915,6 @@ export class AgentRuntime {
   }
 
   private async processTurns(): Promise<string> {
-    this.turnInProgress = true;
-    if (!this.activeTurnSignal) {
-      this.activeTurnSignal = this.signal;
-    }
     let turns = 0;
     let finalMessage = '';
     let currentTurnId = randomUUID();
@@ -983,7 +926,7 @@ export class AgentRuntime {
           break;
         }
 
-        if (this.autoCompact && this.context.shouldCompact()) {
+        if (this.autoCompact && this.context.shouldCompact(this.state)) {
           const summary = buildStructuredSummary(this.state);
           this.context.compact(summary);
           this.emit({
@@ -1187,7 +1130,7 @@ export class AgentRuntime {
   }
 
   private async callModel(turnId: string): Promise<ModelResponse> {
-    const messages = this.context.buildMessages();
+    const messages = this.context.buildMessages(this.state);
     this.emit({
       type: 'model_request',
       timestamp: new Date().toISOString(),
@@ -1561,7 +1504,6 @@ export class AgentRuntime {
     }
 
     this.syncCheckpointState();
-    this.context.setWorkingMemory(this.state);
 
     const durationMs = Date.now() - start;
     if (options.deferRecording) {
@@ -1780,7 +1722,6 @@ export class AgentRuntime {
       overallSuccess,
       timestamp: new Date().toISOString(),
     };
-    this.context.setWorkingMemory(this.state);
   }
 
   private truncateForEvent(text: string, maxLength = 2000): string {

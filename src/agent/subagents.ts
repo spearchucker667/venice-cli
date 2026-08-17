@@ -79,33 +79,13 @@ export function parseSubagentReport(output: string): Pick<SubagentResult, 'summa
 export function collectSubagentFilesInspected(toolHistory: ToolInvocation[]): string[] {
   const files = new Set<string>();
 
+  // Read/search tools declare the files they inspected in their result
+  // metadata (the read-side analogue of `affectedFiles`), so collection needs
+  // no per-tool-name knowledge.
   for (const invocation of toolHistory) {
-    if (invocation.toolName === 'read_file') {
-      addMaybePath(files, (invocation.input as { path?: unknown })?.path);
-      continue;
-    }
-
-    if (invocation.toolName === 'read_many_files') {
-      const paths = (invocation.input as { paths?: unknown })?.paths;
-      if (Array.isArray(paths)) {
-        for (const p of paths) addMaybePath(files, p);
-      }
-      continue;
-    }
-
-    if (invocation.toolName === 'find' || invocation.toolName === 'glob') {
-      if (invocation.result.ok && Array.isArray(invocation.result.data)) {
-        for (const p of invocation.result.data) addMaybePath(files, p);
-      }
-      continue;
-    }
-
-    if (invocation.toolName === 'grep') {
-      if (invocation.result.ok && Array.isArray(invocation.result.data)) {
-        for (const row of invocation.result.data as Array<{ file?: unknown }>) {
-          addMaybePath(files, row.file);
-        }
-      }
+    const inspected = invocation.result.metadata?.inspectedFiles;
+    if (Array.isArray(inspected)) {
+      for (const p of inspected) addMaybePath(files, p);
     }
   }
 

@@ -554,7 +554,7 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
       `Subagent reports: ${state?.subagentReports?.length ?? 0}`,
     ];
     const manager = runtime?.getContextManager();
-    const used = manager?.estimateTokens() ?? 0;
+    const used = (manager && state) ? manager.estimateTokens(state) : 0;
     const limit = manager?.getMaxTokens() ?? 0;
     lines.push(`Context tokens: ${used}`);
     lines.push(`Context limit: ${limit || 'unknown'}`);

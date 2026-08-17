@@ -679,7 +679,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
           additionalRoots: runtimeRef.current?.getState().workspace.additionalRoots ?? additionalRoots ?? [],
           queuedCount,
           approvalMode: currentApprovalMode,
-          contextTokens: runtimeRef.current?.getContextManager().estimateTokens() ?? 0,
+          contextTokens: runtimeRef.current?.getContextManager().estimateTokens(runtimeRef.current.getState()) ?? 0,
           maxTokens: runtimeRef.current?.getContextManager().getMaxTokens() ?? 0,
           gitBranch,
         }}

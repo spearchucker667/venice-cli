@@ -20,6 +20,17 @@ terms rather than invent new ones.
 - **Subagent** — a bounded, permission-scoped child runtime (read-only or
   write) that returns a structured `SubagentResult`.
 
+## Agent context
+
+- **Config** — session-scoped, set-once context inputs (system contract,
+  project instructions, agent prompt, token budget).
+- **Projection** — mutable context held by `ContextManager` (file attachments,
+  active skill bodies, the compacted summary, the pruned conversation).
+  Projections are cleared only through `resetSession()`, never one-by-one.
+- **Working memory** — the context summary of `AgentState` (objective, todos,
+  changed files, validations, subagent reports, skills). It is *derived* at
+  message-assembly time from the canonical state, never stored or re-synced.
+
 ## Agent state
 
 - **Objective** — the user's high-level goal for a session.

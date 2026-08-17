@@ -216,6 +216,8 @@ export interface ToolResult<T = unknown> {
     truncated?: boolean;
     /** Root-aware file refs; bare strings are treated as primary-root-relative. */
     affectedFiles?: (WorkspaceFileRef | string)[];
+    /** Files a read/search tool actually inspected (the read-side analogue of affectedFiles). */
+    inspectedFiles?: string[];
   };
 }
 

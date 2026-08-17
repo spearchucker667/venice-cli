@@ -977,7 +977,7 @@ describe('AgentRuntime', () => {
     });
     runtime.forceCompact('keep the parser in mind');
     const manager = runtime.getContextManager();
-    const system = String(manager.buildMessages()[0].content);
+    const system = String(manager.buildMessages(runtime.getState())[0].content);
     assert.ok(system.includes('Continuation hint: keep the parser in mind'));
   });
 
@@ -1396,7 +1396,8 @@ describe('AgentRuntime', () => {
     // tokens-per-byte ratio from the reported usage, so its estimate must be
     // much bigger than the uncalibrated byte/4 heuristic.
     assert.ok(
-      calibrated.getContextManager().estimateTokens() > uncalibrated.getContextManager().estimateTokens(),
+      calibrated.getContextManager().estimateTokens(calibrated.getState()) >
+        uncalibrated.getContextManager().estimateTokens(uncalibrated.getState()),
       'model usage must calibrate the context estimate'
     );
   });

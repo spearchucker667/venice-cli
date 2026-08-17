@@ -196,7 +196,8 @@ describe('session resume lifecycle', () => {
     });
 
     // Seed state, context layers, queues, and grants
-    runtime.getContextManager().setSummary({
+    const systemText = () => String(runtime.getContextManager().buildMessages(runtime.getState())[0].content);
+    runtime.getContextManager().compact({
       objective: 'prior objective',
       completedWork: ['did things'],
       remainingWork: [],
@@ -213,16 +214,16 @@ describe('session resume lifecycle', () => {
     runtime.queueUserMessage('queued 1');
 
     assert.strictEqual(runtime.getQueuedMessageCount(), 1);
-    assert.ok(runtime.getContextManager().getSummary() !== undefined);
-    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), 'custom system prompt');
+    assert.ok(systemText().includes('did things'), 'summary must be seeded');
+    assert.ok(systemText().includes('custom system prompt'), 'agent prompt must be seeded');
     assert.strictEqual(await runtime.getPermissionManager().isApproved('edit_file', {}, 'write'), true);
 
     // Call resetSession
     runtime.resetSession();
 
     assert.strictEqual(runtime.getQueuedMessageCount(), 0, 'queued messages must be cleared');
-    assert.strictEqual(runtime.getContextManager().getSummary(), undefined, 'summary must be cleared');
-    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), '', 'agent prompt must be cleared');
+    assert.ok(!systemText().includes('did things'), 'summary must be cleared');
+    assert.ok(!systemText().includes('custom system prompt'), 'agent prompt must be cleared');
     assert.strictEqual(await runtime.getPermissionManager().isApproved('edit_file', {}, 'write'), false, 'grants must be cleared');
   });
 
@@ -235,9 +236,9 @@ describe('session resume lifecycle', () => {
       sessionManager: manager,
     });
 
-    runtime.getContextManager().setSummary({
+    runtime.getContextManager().compact({
       objective: 'old summary',
-      completedWork: [],
+      completedWork: ['old completed work'],
       remainingWork: [],
       decisions: [],
       discoveries: [],
@@ -274,8 +275,9 @@ describe('session resume lifecycle', () => {
 
     assert.strictEqual(runtime.getState().sessionId, 'fresh-id');
     assert.strictEqual(runtime.getQueuedMessageCount(), 0, 'queues must not bleed across loadState');
-    assert.strictEqual(runtime.getContextManager().getSummary(), undefined, 'summary must not bleed across loadState');
-    assert.strictEqual(runtime.getContextManager().getAgentPrompt(), '', 'agent prompt must not bleed across loadState');
+    const systemText = String(runtime.getContextManager().buildMessages(runtime.getState())[0].content);
+    assert.ok(!systemText.includes('old completed work'), 'summary must not bleed across loadState');
+    assert.ok(!systemText.includes('old agent prompt'), 'agent prompt must not bleed across loadState');
     assert.strictEqual(runtime.getState().messages.length, 1);
   });
 });

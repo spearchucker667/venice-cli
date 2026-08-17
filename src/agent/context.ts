@@ -2,6 +2,17 @@
  * Context manager for the agent runtime.
  *
  * Assembles messages for model requests and tracks estimated token usage.
+ *
+ * The manager keeps two kinds of state:
+ *  - **Config** (system contract, project instructions, agent prompt, budget),
+ *    set once per session.
+ *  - **Projections** (file attachments, active skill bodies, the compacted
+ *    summary, and the pruned conversation), which are mutated by the runtime as
+ *    the session advances.
+ *
+ * The working-memory summary is *not* stored: it is a pure derivation of the
+ * canonical `AgentState`, rendered at assembly time so it can never go stale
+ * between a state mutation and a subsequent model request.
  */
 
 import type { AgentMessage, AgentState, StructuredSummary } from './types.js';
@@ -26,7 +37,6 @@ export class ContextManager {
   private systemContract: string;
   private projectInstructions: string;
   private agentPrompt: string;
-  private workingMemory: string;
   private conversation: AgentMessage[] = [];
   private fileContext: AgentMessage[] = [];
   private summary?: StructuredSummary;
@@ -45,7 +55,6 @@ export class ContextManager {
     this.systemContract = this.defaultSystemContract();
     this.projectInstructions = '';
     this.agentPrompt = '';
-    this.workingMemory = '';
   }
 
   setModelContextLimit(limit: number): void {
@@ -56,10 +65,6 @@ export class ContextManager {
 
   getMaxTokens(): number {
     return this.budget.maxTokens;
-  }
-
-  setSystemContract(contract: string): void {
-    this.systemContract = contract;
   }
 
   setProjectInstructions(instructions: string): void {
@@ -74,7 +79,114 @@ export class ContextManager {
     this.agentPrompt = prompt;
   }
 
-  setWorkingMemory(state: AgentState): void {
+  setActiveSkills(skills: Skill[]): void {
+    this.activeSkills = skills;
+  }
+
+  setFileContext(messages: AgentMessage[]): void {
+    this.fileContext = messages;
+  }
+
+  addConversationMessage(message: AgentMessage): void {
+    this.conversation.push(message);
+  }
+
+  addToolResult(toolCallId: string, content: MessageContent): void {
+    this.conversation.push({ role: 'tool', content, tool_call_id: toolCallId });
+  }
+
+  /**
+   * Reset all session-owned context layers: conversation, file attachments,
+   * the compaction summary, active skills, and the custom agent prompt.
+   * Project instructions and system contract are retained. This is the single
+   * reset path — individual projections are cleared here, never one-by-one.
+   */
+  resetSession(): void {
+    this.conversation = [];
+    this.fileContext = [];
+    this.summary = undefined;
+    this.activeSkills = [];
+    this.agentPrompt = '';
+  }
+
+  /**
+   * Assemble the model request. `state` is the canonical agent state; the
+   * working-memory section is derived from it here so the context can never
+   * fall out of sync with a state mutation.
+   */
+  buildMessages(state: Readonly<AgentState>): Message[] {
+    const systemParts: string[] = [];
+    if (this.systemContract) systemParts.push(this.systemContract);
+    if (this.agentPrompt) systemParts.push(this.agentPrompt);
+    if (this.projectInstructions) systemParts.push(this.projectInstructions);
+    const workingMemory = this.renderWorkingMemory(state);
+    if (workingMemory) systemParts.push(workingMemory);
+    if (this.activeSkills.length) {
+      systemParts.push('Active skills:');
+      for (const skill of this.activeSkills) {
+        systemParts.push(`<!-- skill: ${skill.name} -->\n${skill.content.trim()}`);
+      }
+    }
+    if (this.summary) {
+      systemParts.push(this.renderSummary(this.summary));
+    }
+
+    const systemMessage: Message = { role: 'system', content: systemParts.join('\n\n') };
+    const messages: Message[] = [systemMessage];
+
+    for (const msg of this.fileContext) messages.push(this.toApiMessage(msg));
+    for (const msg of this.conversation) messages.push(this.toApiMessage(msg));
+
+    return messages;
+  }
+
+  /**
+   * Blend the observed tokens-per-byte ratio into the estimate factor using
+   * the model's actual `prompt_tokens` for the exact message set that was
+   * sent (P2). Code-heavy and CJK content drift far from the naive 1/4
+   * heuristic, so learning from real usage makes compaction and the status
+   * bar reflect actual consumption.
+   */
+  calibrate(bytes: number, promptTokens: number): void {
+    if (!Number.isFinite(promptTokens) || promptTokens <= 0) return;
+    const observed = promptTokens / Math.max(1, bytes);
+    // Smooth to avoid a single outlier turn swinging the estimate.
+    this.tokensPerByte = this.tokensPerByte * 0.7 + observed * 0.3;
+  }
+
+  estimateTokens(state: Readonly<AgentState>): number {
+    const text = JSON.stringify(this.buildMessages(state));
+    return Math.ceil(Buffer.byteLength(text, 'utf-8') * this.tokensPerByte);
+  }
+
+  shouldCompact(state: Readonly<AgentState>): boolean {
+    // A zero/unknown budget must never trigger destructive compaction — it is
+    // not a valid budget (VCL-008). Only a positively-known limit can make
+    // compaction eligible.
+    if (this.budget.maxTokens <= 0) return false;
+    const available = this.budget.maxTokens - this.budget.reservedCompletionTokens;
+    return this.estimateTokens(state) > available * this.budget.compactionThreshold;
+  }
+
+  compact(summary: StructuredSummary, preserveTurns: number = 5): void {
+    this.summary = summary;
+
+    // Preserve recent conversation turns to avoid complete context wipe
+    let startIndex = Math.max(0, this.conversation.length - (preserveTurns * 2));
+
+    // Ensure we don't start on a tool result without its preceding assistant call
+    while (startIndex < this.conversation.length && this.conversation[startIndex].role === 'tool') {
+      startIndex++;
+    }
+
+    this.conversation = this.conversation.slice(startIndex);
+    // The active turn's attachment (fileContext) is ephemeral turn payload,
+    // not durable history; compaction must not erase it (VCL-007). It is
+    // replaced explicitly at each turn boundary by the runtime.
+  }
+
+  /** Derive the working-memory summary from the canonical agent state. */
+  private renderWorkingMemory(state: Readonly<AgentState>): string {
     const lines: string[] = [];
     lines.push(`Objective: ${state.objective}`);
     if (state.todos.length) {
@@ -124,139 +236,7 @@ export class ContextManager {
         lines.push(`- ${skill.name}: ${skill.description}`);
       }
     }
-    this.workingMemory = lines.join('\n');
-  }
-
-  setSummary(summary: StructuredSummary): void {
-    this.summary = summary;
-  }
-
-  getSummary(): StructuredSummary | undefined {
-    return this.summary;
-  }
-
-  clearSummary(): void {
-    this.summary = undefined;
-  }
-
-  getAgentPrompt(): string {
-    return this.agentPrompt;
-  }
-
-  clearAgentPrompt(): void {
-    this.agentPrompt = '';
-  }
-
-  clearActiveSkills(): void {
-    this.activeSkills = [];
-  }
-
-  clearFileContext(): void {
-    this.fileContext = [];
-  }
-
-  setActiveSkills(skills: Skill[]): void {
-    this.activeSkills = skills;
-  }
-
-  addConversationMessage(message: AgentMessage): void {
-    this.conversation.push(message);
-  }
-
-  resetConversation(): void {
-    this.conversation = [];
-  }
-
-  /**
-   * Reset all session-owned context layers: conversation, file attachments,
-   * compaction summaries, active skills, custom agent prompts, and working memory.
-   * Project instructions and system contract are retained.
-   */
-  resetSession(): void {
-    this.conversation = [];
-    this.fileContext = [];
-    this.summary = undefined;
-    this.activeSkills = [];
-    this.agentPrompt = '';
-    this.workingMemory = '';
-  }
-
-  setFileContext(messages: AgentMessage[]): void {
-    this.fileContext = messages;
-  }
-
-  addToolResult(toolCallId: string, content: MessageContent): void {
-    this.conversation.push({ role: 'tool', content, tool_call_id: toolCallId });
-  }
-
-  buildMessages(): Message[] {
-    const systemParts: string[] = [];
-    if (this.systemContract) systemParts.push(this.systemContract);
-    if (this.agentPrompt) systemParts.push(this.agentPrompt);
-    if (this.projectInstructions) systemParts.push(this.projectInstructions);
-    if (this.workingMemory) systemParts.push(this.workingMemory);
-    if (this.activeSkills.length) {
-      systemParts.push('Active skills:');
-      for (const skill of this.activeSkills) {
-        systemParts.push(`<!-- skill: ${skill.name} -->\n${skill.content.trim()}`);
-      }
-    }
-    if (this.summary) {
-      systemParts.push(this.renderSummary(this.summary));
-    }
-
-    const systemMessage: Message = { role: 'system', content: systemParts.join('\n\n') };
-    const messages: Message[] = [systemMessage];
-
-    for (const msg of this.fileContext) messages.push(this.toApiMessage(msg));
-    for (const msg of this.conversation) messages.push(this.toApiMessage(msg));
-
-    return messages;
-  }
-
-  /**
-   * Blend the observed tokens-per-byte ratio into the estimate factor using
-   * the model's actual `prompt_tokens` for the exact message set that was
-   * sent (P2). Code-heavy and CJK content drift far from the naive 1/4
-   * heuristic, so learning from real usage makes compaction and the status
-   * bar reflect actual consumption.
-   */
-  calibrate(bytes: number, promptTokens: number): void {
-    if (!Number.isFinite(promptTokens) || promptTokens <= 0) return;
-    const observed = promptTokens / Math.max(1, bytes);
-    // Smooth to avoid a single outlier turn swinging the estimate.
-    this.tokensPerByte = this.tokensPerByte * 0.7 + observed * 0.3;
-  }
-
-  estimateTokens(): number {
-    const text = JSON.stringify(this.buildMessages());
-    return Math.ceil(Buffer.byteLength(text, 'utf-8') * this.tokensPerByte);
-  }
-
-  shouldCompact(): boolean {
-    // A zero/unknown budget must never trigger destructive compaction — it is
-    // not a valid budget (VCL-008). Only a positively-known limit can make
-    // compaction eligible.
-    if (this.budget.maxTokens <= 0) return false;
-    const available = this.budget.maxTokens - this.budget.reservedCompletionTokens;
-    return this.estimateTokens() > available * this.budget.compactionThreshold;
-  }
-
-  compact(summary: StructuredSummary, preserveTurns: number = 5): void {
-    this.summary = summary;
-    
-    // Preserve recent conversation turns to avoid complete context wipe
-    let startIndex = Math.max(0, this.conversation.length - (preserveTurns * 2));
-    
-    // Ensure we don't start on a tool result without its preceding assistant call
-    while (startIndex < this.conversation.length && this.conversation[startIndex].role === 'tool') {
-      startIndex++;
-    }
-
-    this.conversation = this.conversation.slice(startIndex);
-    // The active turn's attachment (fileContext) is ephemeral turn payload,
-    // not durable history; compaction must not erase it (VCL-007). It is
-    // replaced explicitly at each turn boundary by the runtime.
+    return lines.join('\n');
   }
 
   private renderSummary(summary: StructuredSummary): string {
@@ -297,7 +277,7 @@ export class ContextManager {
   }
 }
 
-export function buildStructuredSummary(state: AgentState): StructuredSummary {
+export function buildStructuredSummary(state: Readonly<AgentState>): StructuredSummary {
   const commandsRun = state.toolHistory
     .filter((t) => t.toolName === 'shell' && t.result.ok)
     .map((t) => ({

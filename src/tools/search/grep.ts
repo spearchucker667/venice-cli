@@ -74,7 +74,11 @@ export const grepTool: AgentTool<{ pattern: string; paths?: string[] }, Array<{ 
         }
       }
       const isTruncated = results.length > 100;
-      return success(isTruncated ? results.slice(0, 100) : results, { truncated: isTruncated });
+      const capped = isTruncated ? results.slice(0, 100) : results;
+      return success(capped, {
+        truncated: isTruncated,
+        inspectedFiles: [...new Set(capped.map((row) => row.file))],
+      });
     } catch (error) {
       return failure('GREP_ERROR', error instanceof Error ? error.message : String(error));
     }

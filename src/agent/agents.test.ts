@@ -154,7 +154,7 @@ describe('AgentRuntime agent integration (VCL-R3-031)', () => {
     });
 
     // The system prompt is layered into the model context.
-    const systemMessage = runtime.getContextManager().buildMessages()[0];
+    const systemMessage = runtime.getContextManager().buildMessages(runtime.getState())[0];
     assert.ok(String(systemMessage.content).includes('You are a senior staff engineer. Be concise.'));
     fs.rmSync(ws, { recursive: true, force: true });
   });

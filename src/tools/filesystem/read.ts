@@ -23,14 +23,14 @@ export const readFileTool: AgentTool<{ path: string }, string> = {
     try {
       const { absolute, relative } = workspace.resolve(input.path);
       if (workspace.isBinaryFile(absolute)) {
-        return failure('BINARY_FILE', `File is binary: ${relative}`);
+        return failure('BINARY_FILE', `File is binary: ${relative}`, undefined, { inspectedFiles: [relative] });
       }
       const stats = fs.statSync(absolute);
       if (stats.size > 1024 * 1024) {
-        return failure('FILE_TOO_LARGE', `File too large: ${relative}`);
+        return failure('FILE_TOO_LARGE', `File too large: ${relative}`, undefined, { inspectedFiles: [relative] });
       }
       const content = fs.readFileSync(absolute, 'utf-8');
-      return success(content);
+      return success(content, { inspectedFiles: [relative] });
     } catch (error) {
       return failure('READ_ERROR', error instanceof Error ? error.message : String(error));
     }

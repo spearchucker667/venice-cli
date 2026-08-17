@@ -21,9 +21,11 @@ export const readManyFilesTool: AgentTool<{ paths: string[] }, Record<string, st
   async execute(input, context) {
     const workspace = new WorkspaceManager(context.workspaceRoot, context.workspace?.additionalRoots ?? []);
     const contents: Record<string, string> = {};
+    const inspectedFiles: string[] = [];
     for (const p of input.paths) {
       try {
         const { absolute, relative } = workspace.resolve(p);
+        inspectedFiles.push(relative);
         if (workspace.isBinaryFile(absolute)) {
           contents[relative] = '<binary file>';
           continue;
@@ -33,6 +35,6 @@ export const readManyFilesTool: AgentTool<{ paths: string[] }, Record<string, st
         contents[p] = `Error: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
-    return success(contents);
+    return success(contents, { inspectedFiles });
   },
 };

@@ -64,7 +64,8 @@ export const globTool: AgentTool<{ pattern: string }, string[]> = {
           );
         }
       }
-      return success([...new Set(results)].sort());
+      const matches = [...new Set(results)].sort();
+      return success(matches, { inspectedFiles: matches });
     } catch (error) {
       return { ok: false, error: { code: 'GLOB_ERROR', message: error instanceof Error ? error.message : String(error) } };
     }

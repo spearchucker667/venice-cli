@@ -50,7 +50,8 @@ export const findTool: AgentTool<{ pattern?: string; path?: string }, string[]> 
         }
       }
       const isTruncated = results.length > 500;
-      return success(isTruncated ? results.slice(0, 500) : results, { truncated: isTruncated });
+      const capped = isTruncated ? results.slice(0, 500) : results;
+      return success(capped, { truncated: isTruncated, inspectedFiles: capped });
     } catch (error) {
       return failure('FIND_ERROR', error instanceof Error ? error.message : String(error));
     }
