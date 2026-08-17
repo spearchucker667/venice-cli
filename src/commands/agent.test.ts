@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import * as url from 'node:url';
 import { Command } from 'commander';
-import { registerAgentCommand, resolveApprovalMode, resolveInteractive } from './agent.js';
+import { registerAgentCommand, resolveApprovalMode, resolveInteractive, validateStartupConflicts } from './agent.js';
 
 describe('registerAgentCommand', () => {
   it('registers the agent command', () => {
@@ -121,6 +121,44 @@ describe('resolveInteractive (VCL-R3-007/008)', () => {
 
   it('a non-TTY stdin with no prompt stays headless', () => {
     assert.strictEqual(resolveInteractive({ outputFormat: 'text' }, { stdinTTY: false, stdoutTTY: true }), false);
+  });
+});
+
+describe('validateStartupConflicts (VCL-R3-029)', () => {
+  const ok = (options: Parameters<typeof validateStartupConflicts>[0], hasStdin = true) =>
+    validateStartupConflicts(options, hasStdin);
+
+  it('accepts a plain compatible combination', () => {
+    assert.strictEqual(ok({ outputFormat: 'text' }), null);
+    assert.strictEqual(ok({ prompt: 'x', outputFormat: 'text' }), null);
+    assert.strictEqual(ok({ prompt: 'x', outputFormat: 'json' }), null);
+  });
+
+  it('rejects --continue with --session', () => {
+    assert.match(ok({ continueFlag: true, session: 'abc', outputFormat: 'text' }) ?? '', /--continue and --session/);
+  });
+
+  it('rejects --yolo with --auto', () => {
+    assert.match(ok({ yolo: true, auto: true, outputFormat: 'text' }) ?? '', /--yolo and --auto/);
+  });
+
+  it('rejects --prompt with --yolo', () => {
+    assert.match(ok({ prompt: 'x', yolo: true, outputFormat: 'text' }) ?? '', /--prompt and --yolo/);
+  });
+
+  it('rejects --prompt with --auto', () => {
+    assert.match(ok({ prompt: 'x', auto: true, outputFormat: 'text' }) ?? '', /--prompt and --auto/);
+  });
+
+  it('rejects --prompt with --plan', () => {
+    assert.match(ok({ prompt: 'x', plan: true, outputFormat: 'text' }) ?? '', /--prompt and --plan/);
+  });
+
+  it('rejects --output-format json without --prompt or piped stdin', () => {
+    assert.match(ok({ outputFormat: 'json' }, false) ?? '', /--output-format requires --prompt/);
+    assert.match(ok({ outputFormat: 'stream-json' }, false) ?? '', /--output-format requires --prompt/);
+    // Piped stdin provides the prompt, so it is allowed.
+    assert.strictEqual(ok({ outputFormat: 'json' }, true), null);
   });
 });
 

@@ -19,6 +19,7 @@ import {
   WorkspaceTrustStore,
   hashMcpConfigBytes,
   summarizeServers,
+  fingerprintServerExecutables,
 } from '../mcp/trust.js';
 import { detectWorkspaceRoot } from '../agent/runtime.js';
 import {
@@ -283,7 +284,13 @@ function checkMcp(workspaceRoot: string): DoctorCheck[] {
     let trusted = false;
     try {
       const store = new WorkspaceTrustStore();
-      trusted = store.isApproved(workspaceRoot, hashMcpConfigBytes(fs.readFileSync(projectPath)));
+      const config = JSON.parse(fs.readFileSync(projectPath, 'utf-8')) as McpConfig;
+      const executables = fingerprintServerExecutables(summarizeServers(config), workspaceRoot);
+      trusted = store.isApproved(
+        workspaceRoot,
+        hashMcpConfigBytes(fs.readFileSync(projectPath)),
+        executables
+      );
     } catch {
       trusted = false;
     }
@@ -415,7 +422,8 @@ function checkSecurity(workspaceRoot: string): DoctorCheck[] {
         const store = new WorkspaceTrustStore();
         const approved = store.isApproved(
           workspaceRoot,
-          hashMcpConfigBytes(fs.readFileSync(projectPath))
+          hashMcpConfigBytes(fs.readFileSync(projectPath)),
+          fingerprintServerExecutables(servers, workspaceRoot)
         );
         if (approved) {
           checks.push({ id: 'security.mcp-trust', severity: 'ok', message: 'Project MCP config is trusted' });

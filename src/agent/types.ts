@@ -57,6 +57,8 @@ export interface ValidationResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** Realpath of the workspace root this command validated (VCL-R3-023). */
+  root?: string;
 }
 
 export type SubagentKind = 'explore' | 'review' | 'research' | 'test' | 'general';
@@ -116,6 +118,11 @@ export interface PlanArtifact {
   steps: PlanStep[];
   /** Absolute path of the plan file (defaults to <workspace>/PLAN.md). */
   filePath: string;
+  /**
+   * Root-aware identity of the plan file so a plan in an additional root is
+   * unambiguous in changed-file tracking and on restore (VCL-R3-024).
+   */
+  fileRef?: WorkspaceFileRef;
   updatedAt: string;
 }
 

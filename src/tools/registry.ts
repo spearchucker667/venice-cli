@@ -59,6 +59,23 @@ export class ToolRegistry {
     return this.tools.has(name);
   }
 
+  /**
+   * Remove every tool whose name starts with `prefix`, returning the removed
+   * names. Used to atomically replace an MCP server's namespace on a
+   * tools/list_changed notification (VCL-R3-014).
+   */
+  unregisterPrefix(prefix: string): string[] {
+    const removed: string[] = [];
+    for (const name of Array.from(this.tools.keys())) {
+      if (name.startsWith(prefix)) {
+        this.tools.delete(name);
+        this.validators.delete(name);
+        removed.push(name);
+      }
+    }
+    return removed;
+  }
+
   definitions(operatingMode?: 'agent' | 'plan'): ToolDefinition[] {
     // Plan mode uses explicit positive authorization: only tools marked
     // `planSafe: true` are exposed. An omitted flag is NOT treated as safe

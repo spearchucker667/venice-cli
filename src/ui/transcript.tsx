@@ -14,10 +14,21 @@ export interface TranscriptProps {
 export function Transcript({ messages, maxMessages }: TranscriptProps): JSX.Element {
   const visible = maxMessages && messages.length > maxMessages ? messages.slice(-maxMessages) : messages;
   const hidden = messages.length - visible.length;
+  // Streaming emits one assistant_delta per chunk; merge consecutive assistant
+  // messages so incremental content renders as a single bubble (VCL-R3-012).
+  const merged = visible.reduce<TuiMessage[]>((acc, message) => {
+    const previous = acc[acc.length - 1];
+    if (message.role === 'assistant' && previous?.role === 'assistant') {
+      acc[acc.length - 1] = { ...previous, content: previous.content + message.content };
+      return acc;
+    }
+    acc.push(message);
+    return acc;
+  }, []);
   return (
     <Box flexDirection="column" flexGrow={1}>
       {hidden > 0 && <Text dimColor>… {hidden} earlier entries hidden</Text>}
-      {visible.map((message) => {
+      {merged.map((message) => {
         switch (message.role) {
           case 'user':
             return (

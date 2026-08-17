@@ -11,7 +11,14 @@ import {
 import { McpManager } from '../mcp/manager.js';
 import { McpStdioClient } from '../mcp/client.js';
 import { isSupportedProtocolVersion } from '../mcp/protocol.js';
-import { WorkspaceTrustStore, hashMcpConfigBytes, resolveProjectMcpTrust, defaultConfirmTrust } from '../mcp/trust.js';
+import {
+  WorkspaceTrustStore,
+  hashMcpConfigBytes,
+  resolveProjectMcpTrust,
+  defaultConfirmTrust,
+  summarizeServers,
+  fingerprintServerExecutables,
+} from '../mcp/trust.js';
 import { detectWorkspaceRoot } from '../agent/runtime.js';
 import { formatError, getChalk } from '../lib/output.js';
 
@@ -182,7 +189,11 @@ export function registerMcpCommand(program: Command, configPath = getMcpConfigPa
 
       const configHash = hashMcpConfigBytes(fs.readFileSync(configPath));
       const record = store.getRecord(workspaceRoot);
-      const approved = record !== undefined && record.configHash === configHash;
+      const executables = fingerprintServerExecutables(
+        summarizeServers(JSON.parse(fs.readFileSync(configPath, 'utf-8')) as McpConfig),
+        workspaceRoot
+      );
+      const approved = store.isApproved(workspaceRoot, configHash, executables);
 
       if (options.revoke) {
         store.revoke(workspaceRoot);

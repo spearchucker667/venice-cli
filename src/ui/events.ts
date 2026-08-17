@@ -15,6 +15,8 @@ export function mapEventToMessage(event: AgentEvent): TuiMessage | undefined {
       return { id: event.eventId, role: 'event', content: 'thinking…' };
     case 'assistant_delta':
       return { id: event.eventId, role: 'assistant', content: event.content || '' };
+    case 'assistant_reasoning':
+      return { id: event.eventId, role: 'event', content: `⟳ ${event.content || ''}` };
     case 'tool_requested':
       return undefined;
     case 'tool_started':

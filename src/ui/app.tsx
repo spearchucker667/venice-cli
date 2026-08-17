@@ -12,6 +12,7 @@ import { EventBus } from '../agent/events.js';
 import type { McpManager } from '../mcp/manager.js';
 import { PermissionManager } from '../agent/permissions.js';
 import type { ApprovalMode } from '../agent/permissions.js';
+import type { ProjectAgentConfig } from '../lib/config.js';
 import { Composer } from './composer.js';
 import { Transcript } from './transcript.js';
 import { Greeting } from './greeting.js';
@@ -43,6 +44,8 @@ export interface AppProps {
   resumeSessionId?: string;
   skillsDirs?: string[];
   additionalRoots?: string[];
+  /** Project `.venice/config.json` defaults (VCL-R3-010). */
+  projectConfig?: ProjectAgentConfig;
   onExit: () => void;
 }
 
@@ -97,7 +100,7 @@ function getGitBranch(cwd: string): string | undefined {
   }
 }
 
-export function App({ workspaceRoot, model, approvalMode, mode: initialMode, maxTurns, mcpManager, initialObjective, resumeSessionId, skillsDirs, additionalRoots, onExit }: AppProps): JSX.Element {
+export function App({ workspaceRoot, model, approvalMode, mode: initialMode, maxTurns, mcpManager, initialObjective, resumeSessionId, skillsDirs, additionalRoots, projectConfig, onExit }: AppProps): JSX.Element {
   const { exit } = useApp();
   const abortControllerRef = useRef<AbortController | null>(null);
   const runtimeRef = useRef<AgentRuntime | null>(null);
@@ -235,6 +238,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       permissionManager: permissionsRef.current,
       skillsDirs,
       additionalRoots,
+      projectConfig,
     });
     setInputMode(runtime.getMode().inputMode);
     setOperatingMode(runtime.getMode().operatingMode);
@@ -328,7 +332,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceRoot, model, approvalMode, maxTurns, mcpManager, skillsDirs, additionalRoots]);
+  }, [workspaceRoot, model, approvalMode, maxTurns, mcpManager, skillsDirs, additionalRoots, projectConfig]);
 
   const addEvent = (content: string) => {
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'event', content }]);

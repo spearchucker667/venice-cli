@@ -116,7 +116,7 @@ describe('McpStdioClient', () => {
     await client.stop();
   });
 
-  it('accepts a server that omits its protocol version', async () => {
+  it('rejects a server that omits its protocol version (VCL-R3-015)', async () => {
     const script = `
       process.stdin.once('data',(chunk)=>{
         const req=JSON.parse(chunk.toString().trim());
@@ -129,7 +129,24 @@ describe('McpStdioClient', () => {
       { command: 'node', args: ['-e', script] },
       { startTimeoutMs: 1000, requestTimeoutMs: 1000, stopGraceMs: 20 }
     );
-    await client.start();
+    await assert.rejects(() => client.start(), /did not include a protocolVersion/);
+    await client.stop();
+  });
+
+  it('rejects an empty protocol version (VCL-R3-015)', async () => {
+    const script = `
+      process.stdin.once('data',(chunk)=>{
+        const req=JSON.parse(chunk.toString().trim());
+        const result={protocolVersion:'',capabilities:{},serverInfo:{name:'t',version:'1'}};
+        process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:req.id,result})+'\\n');
+      });
+      setInterval(()=>{},1000);
+    `;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 1000, requestTimeoutMs: 1000, stopGraceMs: 20 }
+    );
+    await assert.rejects(() => client.start(), /did not include a protocolVersion/);
     await client.stop();
   });
 
@@ -175,6 +192,94 @@ describe('McpStdioClient', () => {
     );
     await client.start();
     assert.strictEqual(client.getNegotiatedProtocolVersion(), '2024-11-05');
+    await client.stop();
+  });
+
+  it('paginates tools/list with cursors and assembles all pages (VCL-R3-013)', async () => {
+    const script = `
+      let buffer='';
+      const send=(v)=>process.stdout.write(JSON.stringify(v)+'\\n');
+      process.stdin.on('data',(chunk)=>{
+        buffer+=chunk.toString();
+        let i;
+        while((i=buffer.indexOf('\\n'))!==-1){
+          const line=buffer.slice(0,i).trim(); buffer=buffer.slice(i+1);
+          if(!line) continue;
+          const req=JSON.parse(line);
+          if(req.method==='initialize') send({jsonrpc:'2.0',id:req.id,result:{protocolVersion:'2025-06-18',capabilities:{},serverInfo:{name:'t',version:'1'}}});
+          if(req.method==='tools/list'){
+            const cursor=req.params && req.params.cursor;
+            if(!cursor) send({jsonrpc:'2.0',id:req.id,result:{tools:[{name:'a'},{name:'b'}],nextCursor:'page-2'}});
+            else if(cursor==='page-2') send({jsonrpc:'2.0',id:req.id,result:{tools:[{name:'c'}],nextCursor:''}});
+            else send({jsonrpc:'2.0',id:req.id,error:{code:-1,message:'bad cursor'}});
+          }
+        }
+      });
+      setInterval(()=>{},1000);
+    `;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 1000, requestTimeoutMs: 1000, stopGraceMs: 20 }
+    );
+    await client.start();
+    const tools = await client.listTools();
+    assert.deepStrictEqual(tools.map((t) => t.name), ['a', 'b', 'c']);
+    await client.stop();
+  });
+
+  it('rejects a repeated tools/list cursor (VCL-R3-013)', async () => {
+    const script = `
+      let buffer='';
+      const send=(v)=>process.stdout.write(JSON.stringify(v)+'\\n');
+      process.stdin.on('data',(chunk)=>{
+        buffer+=chunk.toString();
+        let i;
+        while((i=buffer.indexOf('\\n'))!==-1){
+          const line=buffer.slice(0,i).trim(); buffer=buffer.slice(i+1);
+          if(!line) continue;
+          const req=JSON.parse(line);
+          if(req.method==='initialize') send({jsonrpc:'2.0',id:req.id,result:{protocolVersion:'2025-06-18',capabilities:{},serverInfo:{name:'t',version:'1'}}});
+          if(req.method==='tools/list') send({jsonrpc:'2.0',id:req.id,result:{tools:[{name:'a'}],nextCursor:'loop'}});
+        }
+      });
+      setInterval(()=>{},1000);
+    `;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 1000, requestTimeoutMs: 1000, stopGraceMs: 20 }
+    );
+    await client.start();
+    await assert.rejects(() => client.listTools(), /repeated tools\/list cursor/);
+    await client.stop();
+  });
+
+  it('delivers tools/list_changed notifications to the registered handler (VCL-R3-014)', async () => {
+    const script = `
+      let buffer='';
+      const send=(v)=>process.stdout.write(JSON.stringify(v)+'\\n');
+      process.stdin.on('data',(chunk)=>{
+        buffer+=chunk.toString();
+        let i;
+        while((i=buffer.indexOf('\\n'))!==-1){
+          const line=buffer.slice(0,i).trim(); buffer=buffer.slice(i+1);
+          if(!line) continue;
+          const req=JSON.parse(line);
+          if(req.method==='initialize') send({jsonrpc:'2.0',id:req.id,result:{protocolVersion:'2025-06-18',capabilities:{},serverInfo:{name:'t',version:'1'}}});
+          if(req.method==='tools/list') send({jsonrpc:'2.0',id:req.id,result:{tools:[{name:'a'}]}});
+          if(req.method==='initialized') send({jsonrpc:'2.0',method:'notifications/tools/list_changed',params:{}});
+        }
+      });
+      setInterval(()=>{},1000);
+    `;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 1000, requestTimeoutMs: 1000, stopGraceMs: 20 }
+    );
+    const notifications: string[] = [];
+    client.onNotification((method) => notifications.push(method));
+    await client.start();
+    await new Promise((r) => setTimeout(r, 200));
+    assert.ok(notifications.includes('notifications/tools/list_changed'));
     await client.stop();
   });
 });

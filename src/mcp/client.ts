@@ -7,8 +7,18 @@ import { terminateProcessTree, forceKillProcessTree } from '../lib/process-tree.
 
 export interface McpTool {
   name: string;
+  /** Human-friendly display title (MCP 2025-06-18). */
+  title?: string;
   description?: string;
   inputSchema?: unknown;
+  /** JSON Schema describing the tool's return value (MCP 2025-06-18). */
+  outputSchema?: unknown;
+  /**
+   * Tool annotations (readOnly/destructiveTitleHint/idempotentHint…) from the
+   * server. These are UNTRUSTED metadata: they are surfaced read-only and
+   * never used to make security/permission decisions (VCL-R3-021).
+   */
+  annotations?: unknown;
 }
 
 interface PendingRequest {
@@ -28,6 +38,10 @@ export interface McpClientOptions {
 export class McpStdioClient {
   /** Bounds a single newline-delimited frame (VC-KIMI-020). */
   static readonly MAX_FRAME_BYTES = 8 * 1024 * 1024;
+  /** tools/list cursor-loop caps (VCL-R3-013). */
+  static readonly MAX_TOOLS_PAGES = 20;
+  static readonly MAX_TOOLS = 1000;
+  static readonly MAX_TOOLS_METADATA_BYTES = 1024 * 1024;
 
   private readonly config: McpServerConfig;
   private process?: ChildProcess;
@@ -41,6 +55,7 @@ export class McpStdioClient {
   private readonly requestTimeoutMs: number;
   private readonly stopGraceMs: number;
   private stderrBuffer = '';
+  private notificationHandler?: (method: string, params: unknown) => void;
 
   constructor(config: McpServerConfig, options: McpClientOptions = {}) {
     this.config = config;
@@ -127,16 +142,23 @@ export class McpStdioClient {
         clientInfo: { name: 'venice-cli', version: getVersion() },
       }, undefined, this.startTimeoutMs)
         .then(async (result) => {
-          // The server responds with the protocol version it will use; it must
-          // be one we support (VC-KIMI-041).
+          // The server responds with the protocol version it will use. A
+          // missing/empty protocolVersion is rejected outright — the client
+          // never silently substitutes its own preference (VCL-R3-015) — and
+          // an unsupported revision fails loudly (VC-KIMI-041).
           const response = result as
             | { protocolVersion?: string; capabilities?: unknown; serverInfo?: unknown }
             | undefined;
           const negotiated = response?.protocolVersion;
-          if (negotiated && !isSupportedProtocolVersion(negotiated)) {
+          if (typeof negotiated !== 'string' || !negotiated.trim()) {
+            throw new Error(
+              'MCP server initialize response did not include a protocolVersion'
+            );
+          }
+          if (!isSupportedProtocolVersion(negotiated)) {
             throw new Error(`MCP server selected unsupported protocol version: ${negotiated}`);
           }
-          this.negotiatedProtocolVersion = negotiated ?? MCP_PROTOCOL_VERSION;
+          this.negotiatedProtocolVersion = negotiated;
           this.serverCapabilities = response?.capabilities;
           this.initialized = true;
           clearTimeout(startupTimer);
@@ -169,9 +191,58 @@ export class McpStdioClient {
     this.buffer = '';
   }
 
+  /**
+   * Register a handler for server-initiated JSON-RPC notifications (e.g.
+   * `notifications/tools/list_changed`). Only one handler is supported.
+   */
+  onNotification(handler: (method: string, params: unknown) => void): void {
+    this.notificationHandler = handler;
+  }
+
+  /**
+   * List tools with cursor pagination and hard caps (VCL-R3-013): repeated
+   * cursors, excessive pages, tool counts, and cumulative metadata bytes all
+   * fail loudly rather than looping or exhausting memory.
+   */
   async listTools(): Promise<McpTool[]> {
-    const response = (await this.sendRequest('tools/list', {})) as { tools?: McpTool[] };
-    return response.tools || [];
+    const tools: McpTool[] = [];
+    let cursor: string | undefined;
+    let previousCursor: string | undefined;
+    let pages = 0;
+    let cumulativeBytes = 0;
+
+    while (true) {
+      pages++;
+      if (pages > McpStdioClient.MAX_TOOLS_PAGES) {
+        throw new Error(`MCP server exceeded the ${McpStdioClient.MAX_TOOLS_PAGES}-page tools/list limit`);
+      }
+      const response = (await this.sendRequest('tools/list', cursor ? { cursor } : {})) as {
+        tools?: McpTool[];
+        nextCursor?: string;
+      };
+      for (const tool of response.tools || []) {
+        cumulativeBytes += Buffer.byteLength(JSON.stringify(tool));
+        if (
+          tools.length >= McpStdioClient.MAX_TOOLS ||
+          cumulativeBytes > McpStdioClient.MAX_TOOLS_METADATA_BYTES
+        ) {
+          throw new Error(
+            `MCP server exposed too many tools (limit ${McpStdioClient.MAX_TOOLS} / ${McpStdioClient.MAX_TOOLS_METADATA_BYTES} bytes)`
+          );
+        }
+        tools.push(tool);
+      }
+
+      const next = response.nextCursor;
+      if (!next) break;
+      if (next === cursor || next === previousCursor) {
+        throw new Error('MCP server returned a repeated tools/list cursor');
+      }
+      previousCursor = cursor;
+      cursor = next;
+    }
+
+    return tools;
   }
 
   async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
@@ -212,6 +283,7 @@ export class McpStdioClient {
         const message = JSON.parse(line) as {
           id?: string | number;
           method?: string;
+          params?: unknown;
           result?: unknown;
           error?: { code: number; message: string };
         };
@@ -224,6 +296,10 @@ export class McpStdioClient {
           } else {
             pending.resolve(message.result);
           }
+        } else if (message.method) {
+          // Server-initiated notification (no id), e.g.
+          // notifications/tools/list_changed (VCL-R3-014).
+          this.notificationHandler?.(message.method, message.params);
         }
       } catch {
         const error = new Error('MCP server sent malformed JSON-RPC');

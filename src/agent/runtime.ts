@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentState, AgentMessage, PlanArtifact, SubagentResult, ToolResult, UserQuestionRequest } from './types.js';
+import type { AgentState, AgentMessage, PlanArtifact, SubagentResult, ToolResult, UserQuestionRequest, ValidationResult } from './types.js';
 import type { AgentEvent } from './events.js';
 import { EventBus } from './events.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -15,11 +15,12 @@ import { PermissionManager } from './permissions.js';
 import type { ApprovalCallback, ApprovalMode, PlanApprovalCallback, UserQuestionCallback } from './permissions.js';
 import { ContextManager, buildStructuredSummary } from './context.js';
 import { SessionManager } from './sessions.js';
-import { VeniceModelClient } from './model-client.js';
+import { VeniceModelClient, UNKNOWN_CONTEXT_LIMIT } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
+import type { ModelCatalog } from './model-catalog.js';
 import { loadInstructions } from './instructions.js';
 import { WorkspaceManager, detectGitRoot } from './workspace.js';
-import { getDefaultModel } from '../lib/config.js';
+import { getDefaultModel, loadProjectConfig, type ProjectAgentConfig } from '../lib/config.js';
 import type { RuntimeModeState } from './mode.js';
 import { defaultMode } from './mode.js';
 import { McpManager } from '../mcp/manager.js';
@@ -47,7 +48,13 @@ export interface AgentRuntimeOptions {
   maxTurns?: number;
   sessionId?: string;
   autoValidate?: boolean;
+  /** Auto-compact the conversation at the context limit (default true). */
+  autoCompact?: boolean;
+  /** Pre-loaded project config; defaults to <workspace>/.venice/config.json. */
+  projectConfig?: ProjectAgentConfig;
   modelClient?: VeniceModelClient;
+  /** Injectable model catalog for offline/fast model discovery (VCL-R3-027). */
+  modelCatalog?: ModelCatalog;
   toolRegistry?: ToolRegistry;
   permissionManager?: PermissionManager;
   checkpointManager?: CheckpointManager;
@@ -96,6 +103,7 @@ export class AgentRuntime {
   private readonly events: EventBus;
   private readonly maxTurns: number;
   private readonly autoValidate: boolean;
+  private readonly autoCompact: boolean;
   private signal?: AbortSignal;
   private readonly mcpManager?: McpManager;
   private checkpointsField: CheckpointManager;
@@ -118,6 +126,11 @@ export class AgentRuntime {
       ...(options.workspace?.additionalRoots ?? []),
       ...(options.additionalRoots ?? []),
     ]));
+    // Project `.venice/config.json` supplies defaults below CLI flags and env
+    // but above global config/built-ins (VCL-R3-010). Auth secrets are never
+    // read from it.
+    const projectConfig = options.projectConfig ?? loadProjectConfig(options.workspaceRoot);
+    const approvalMode = options.approvalMode ?? projectConfig.agent?.approvalMode ?? 'suggest';
     this.state = {
       sessionId: options.sessionId || randomUUID(),
       workspaceRoot: options.workspaceRoot,
@@ -129,7 +142,7 @@ export class AgentRuntime {
       agentMode: 'agent',
       objective: options.objective,
       status: 'idle',
-      mode: options.mode ?? defaultMode(options.approvalMode || 'suggest'),
+      mode: options.mode ?? defaultMode(approvalMode),
       messages: [],
       todos: [],
       relevantFiles: [],
@@ -139,9 +152,12 @@ export class AgentRuntime {
       activeSkills: [],
       subagentReports: [],
     };
-    this.modelClient = options.modelClient || new VeniceModelClient({ model: this.state.model });
+    this.modelClient = options.modelClient || new VeniceModelClient({
+      model: this.state.model,
+      catalog: options.modelCatalog,
+    });
     this.registry = options.toolRegistry || createDefaultRegistry();
-    this.permissions = options.permissionManager || new PermissionManager(options.approvalMode || 'suggest');
+    this.permissions = options.permissionManager || new PermissionManager(approvalMode);
     // The persisted mode is the single authority; keep the permission
     // manager in lockstep from the start (VC-KIMI-004).
     this.permissions.setMode(this.state.mode.permissionMode);
@@ -149,7 +165,8 @@ export class AgentRuntime {
     this.sessions = options.sessionManager || new SessionManager();
     this.events = options.eventBus || new EventBus();
     this.maxTurns = options.maxTurns ?? 25;
-    this.autoValidate = options.autoValidate ?? true;
+    this.autoValidate = options.autoValidate ?? projectConfig.agent?.autoValidate ?? true;
+    this.autoCompact = options.autoCompact ?? projectConfig.context?.autoCompact ?? true;
     this.signal = options.signal;
     this.mcpManager = options.mcpManager;
     this.workspace = new WorkspaceManager(this.state.workspaceRoot, this.state.workspace.additionalRoots);
@@ -391,8 +408,11 @@ export class AgentRuntime {
       this.setModelProfile(profile);
     } else {
       // Unknown model IDs fail closed into chat-only: tools are only granted
-      // on positive capability evidence (VCL-R3-006).
+      // on positive capability evidence (VCL-R3-006). Their context budget is
+      // a conservative explicit unknown rather than an optimistic 128K
+      // (VCL-R3-028).
       this.state.agentMode = 'chat-only';
+      this.context.setModelContextLimit(UNKNOWN_CONTEXT_LIMIT);
     }
     return profile;
   }
@@ -678,7 +698,7 @@ export class AgentRuntime {
           break;
         }
 
-        if (this.context.shouldCompact()) {
+        if (this.autoCompact && this.context.shouldCompact()) {
           const summary = buildStructuredSummary(this.state);
           this.context.compact(summary);
           this.emit({
@@ -707,7 +727,10 @@ export class AgentRuntime {
         if (response.toolCalls?.length) {
           assistantMessage.tool_calls = response.toolCalls;
         }
-        this.addAssistantMessage(assistantMessage);
+        // When the response was streamed, incremental assistant_delta events
+        // were already emitted; persist the canonical message without a
+        // duplicate final delta (VCL-R3-012).
+        this.addAssistantMessage(assistantMessage, { emitDelta: !response.streamed });
 
         if (!response.toolCalls?.length) {
           this.state.status = 'complete';
@@ -754,24 +777,12 @@ export class AgentRuntime {
     if (!this.mcpManager) return;
     try {
       await this.mcpManager.start();
-      for (const { serverName, tool } of this.mcpManager.getTools()) {
-        try {
-          this.registry.register(
-            createMcpToolAdapter(serverName, tool, (name, args) => {
-              const server = this.mcpManager!.getServerStates().find((s) => s.name === serverName);
-              if (!server) throw new Error(`MCP server '${serverName}' is not running`);
-              return server.client.callTool(name, args, this.signal);
-            })
-          );
-        } catch (error) {
-          this.emit({
-            type: 'mcp_failed',
-            timestamp: new Date().toISOString(),
-            eventId: randomUUID(),
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
+      await this.registerMcpTools();
+      // Live tool-list refresh: when a server announces tools/list_changed,
+      // atomically replace its namespace in the registry (VCL-R3-014).
+      this.mcpManager.setToolsChangedHandler((serverName, tools) => {
+        this.replaceMcpTools(serverName, tools);
+      });
       const servers = this.mcpManager.getServerStates().map((s) => ({
         name: s.name,
         toolCount: s.tools.length,
@@ -795,6 +806,64 @@ export class AgentRuntime {
     }
   }
 
+  private async registerMcpTools(): Promise<void> {
+    if (!this.mcpManager) return;
+    for (const { serverName, tool } of this.mcpManager.getTools()) {
+      try {
+        this.registry.register(
+          createMcpToolAdapter(serverName, tool, (name, args) => {
+            const server = this.mcpManager!.getServerStates().find((s) => s.name === serverName);
+            if (!server) throw new Error(`MCP server '${serverName}' is not running`);
+            return server.client.callTool(name, args, this.signal);
+          })
+        );
+      } catch (error) {
+        this.emit({
+          type: 'mcp_failed',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  /**
+   * Atomically replace an MCP server's tools after a tools/list_changed
+   * notification: all `mcp:<server>:*` entries are removed before the new set
+   * is registered, so the namespace never exposes a stale/mixed tool list
+   * (VCL-R3-014).
+   */
+  private replaceMcpTools(serverName: string, tools: import('../mcp/client.js').McpTool[]): void {
+    const prefix = `mcp:${serverName}:`;
+    this.registry.unregisterPrefix(prefix);
+    for (const tool of tools) {
+      try {
+        this.registry.register(
+          createMcpToolAdapter(serverName, tool, (name, args) => {
+            const server = this.mcpManager?.getServerStates().find((s) => s.name === serverName);
+            if (!server) throw new Error(`MCP server '${serverName}' is not running`);
+            return server.client.callTool(name, args, this.signal);
+          })
+        );
+      } catch (error) {
+        this.emit({
+          type: 'mcp_failed',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    this.emit({
+      type: 'mcp_tools_changed',
+      timestamp: new Date().toISOString(),
+      eventId: randomUUID(),
+      serverName,
+      toolCount: tools.length,
+    });
+  }
+
   private async callModel(): Promise<ModelResponse> {
     const messages = this.context.buildMessages();
     this.emit({
@@ -806,7 +875,27 @@ export class AgentRuntime {
     const tools = this.state.agentMode === 'chat-only'
       ? []
       : this.registry.definitions(this.state.mode.operatingMode);
-    return await this.modelClient.complete(messages, tools);
+    // The model client streams; surface incremental content and reasoning as
+    // events so consumers can render progressively (VCL-R3-012). The canonical
+    // assistant message is still persisted once after the stream finishes.
+    return await this.modelClient.complete(messages, tools, (chunk) => {
+      if (chunk.content) {
+        this.emit({
+          type: 'assistant_delta',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          content: chunk.content,
+        });
+      }
+      if (chunk.reasoningContent) {
+        this.emit({
+          type: 'assistant_reasoning',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          content: chunk.reasoningContent,
+        });
+      }
+    });
   }
 
   /**
@@ -1283,99 +1372,118 @@ export class AgentRuntime {
   }
 
   private async runValidation(): Promise<void> {
-    const commands = await detectValidationCommands(this.state.workspaceRoot);
-    if (!commands.length) return;
+    // Group changed files by owning root so validation runs independently in
+    // every root that has changes — an additional-root edit no longer triggers
+    // only primary-root validation (VCL-R3-023).
+    const roots = new Set<string>();
+    for (const ref of this.state.changedFiles) {
+      if (ref.rootId) roots.add(ref.rootId);
+    }
+    if (roots.size === 0) return;
 
-    const results: { command: string; exitCode: number; stdout: string; stderr: string }[] = [];
+    const results: ValidationResult[] = [];
     let overallSuccess = true;
 
     this.state.status = 'verifying';
 
-    for (const validationCommand of commands) {
-      const { command } = validationCommand;
-      if (this.signal?.aborted) break;
+    for (const root of roots) {
+      // A root may have left the workspace scope (e.g. --add-dir removed);
+      // skip it rather than failing on a missing cwd.
+      if (!fs.existsSync(root)) continue;
+      const commands = await detectValidationCommands(root);
+      if (!commands.length) continue;
 
-      // Provenance distinguishes repo-defined package scripts from
-      // deterministic toolchain-convention commands so the permission layer
-      // can enforce workspace execution trust (VCL-R3-001).
-      const validationInput = {
-        command,
-        sourcePath: validationCommand.sourcePath,
-        sourceKind: validationCommand.sourceKind,
-        requiresWorkspaceExecutionTrust: validationCommand.requiresWorkspaceExecutionTrust,
-      };
+      for (const validationCommand of commands) {
+        const { command } = validationCommand;
+        if (this.signal?.aborted) break;
 
-      this.emit({
-        type: 'validation_started',
-        timestamp: new Date().toISOString(),
-        eventId: randomUUID(),
-        command,
-      });
+        // Provenance distinguishes repo-defined package scripts from
+        // deterministic toolchain-convention commands so the permission layer
+        // can enforce workspace execution trust (VCL-R3-001).
+        const validationInput = {
+          command,
+          sourcePath: validationCommand.sourcePath,
+          sourceKind: validationCommand.sourceKind,
+          requiresWorkspaceExecutionTrust: validationCommand.requiresWorkspaceExecutionTrust,
+        };
 
-      let approved = await this.permissions.isApproved('run_validation', validationInput, 'execute');
-      if (!approved) {
         this.emit({
-          type: 'approval_requested',
+          type: 'validation_started',
           timestamp: new Date().toISOString(),
           eventId: randomUUID(),
-          toolName: 'run_validation',
-          risk: 'execute',
+          command,
+          root,
         });
-        const decision = await this.permissions.requestApproval('run_validation', validationInput, 'execute');
-        if (!decision.approved) {
+
+        let approved = await this.permissions.isApproved('run_validation', validationInput, 'execute');
+        if (!approved) {
+          this.emit({
+            type: 'approval_requested',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            toolName: 'run_validation',
+            risk: 'execute',
+          });
+          const decision = await this.permissions.requestApproval('run_validation', validationInput, 'execute');
+          if (!decision.approved) {
+            this.emit({
+              type: 'validation_completed',
+              timestamp: new Date().toISOString(),
+              eventId: randomUUID(),
+              command,
+              root,
+              exitCode: -1,
+              stdout: '',
+              stderr: 'Approval denied for validation command',
+            });
+            overallSuccess = false;
+            results.push({ command, root, exitCode: -1, stdout: '', stderr: 'Approval denied for validation command' });
+            continue;
+          }
+          if (decision.scope) {
+            this.permissions.grant(decision.scope, 'run_validation', undefined, 'execute');
+          }
+        }
+
+        const result = await runValidationTool.execute(
+          { command, cwd: root, timeoutMs: 120000 },
+          this.buildToolContext()
+        );
+
+        if (result.ok) {
+          const data = result.data as { exitCode: number; stdout: string; stderr: string };
+          results.push({ command, root, exitCode: data.exitCode, stdout: data.stdout, stderr: data.stderr });
+          if (data.exitCode !== 0) overallSuccess = false;
           this.emit({
             type: 'validation_completed',
             timestamp: new Date().toISOString(),
             eventId: randomUUID(),
             command,
+            root,
+            exitCode: data.exitCode,
+            stdout: this.truncateForEvent(data.stdout),
+            stderr: this.truncateForEvent(data.stderr),
+          });
+        } else {
+          overallSuccess = false;
+          results.push({
+            command,
+            root,
             exitCode: -1,
             stdout: '',
-            stderr: 'Approval denied for validation command',
+            stderr: result.error?.message || 'Validation execution failed',
           });
-          overallSuccess = false;
-          results.push({ command, exitCode: -1, stdout: '', stderr: 'Approval denied for validation command' });
-          continue;
+          this.emit({
+            type: 'validation_completed',
+            timestamp: new Date().toISOString(),
+            eventId: randomUUID(),
+            command,
+            root,
+            exitCode: -1,
+            stdout: '',
+            stderr: result.error?.message || 'Validation execution failed',
+          });
         }
-        if (decision.scope) {
-          this.permissions.grant(decision.scope, 'run_validation', undefined, 'execute');
-        }
-      }
-
-      const result = await runValidationTool.execute(
-        { command, cwd: this.state.workspaceRoot, timeoutMs: 120000 },
-        this.buildToolContext()
-      );
-
-      if (result.ok) {
-        const data = result.data as { exitCode: number; stdout: string; stderr: string };
-        results.push({ command, exitCode: data.exitCode, stdout: data.stdout, stderr: data.stderr });
-        if (data.exitCode !== 0) overallSuccess = false;
-        this.emit({
-          type: 'validation_completed',
-          timestamp: new Date().toISOString(),
-          eventId: randomUUID(),
-          command,
-          exitCode: data.exitCode,
-          stdout: this.truncateForEvent(data.stdout),
-          stderr: this.truncateForEvent(data.stderr),
-        });
-      } else {
-        overallSuccess = false;
-        results.push({
-          command,
-          exitCode: -1,
-          stdout: '',
-          stderr: result.error?.message || 'Validation execution failed',
-        });
-        this.emit({
-          type: 'validation_completed',
-          timestamp: new Date().toISOString(),
-          eventId: randomUUID(),
-          command,
-          exitCode: -1,
-          stdout: '',
-          stderr: result.error?.message || 'Validation execution failed',
-        });
       }
     }
 
@@ -1456,10 +1564,10 @@ export class AgentRuntime {
     });
   }
 
-  private addAssistantMessage(message: AgentMessage): void {
+  private addAssistantMessage(message: AgentMessage, options: { emitDelta?: boolean } = {}): void {
     this.state.messages.push(message);
     this.context.addConversationMessage(message);
-    if (typeof message.content === 'string' && message.content) {
+    if (options.emitDelta !== false && typeof message.content === 'string' && message.content) {
       this.emit({
         type: 'assistant_delta',
         timestamp: new Date().toISOString(),

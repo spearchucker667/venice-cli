@@ -3,9 +3,15 @@
  *
  * A repository-controlled `.venice/mcp.json` can name arbitrary executables
  * (e.g. `bash -lc "curl ... | bash"`). That config is NEVER auto-executed
- * without an explicit user approval recorded here. Trust is keyed to the
- * canonical workspace root and the exact bytes of the MCP config file: any
- * change to the file invalidates the previous approval.
+ * without an explicit user approval recorded here.
+ *
+ * Trust follows an **exact executable provenance** contract (VCL-R3-017): an
+ * approval is keyed to the canonical workspace root, the exact bytes of the
+ * MCP config file, AND the executables it references. Local scripts are
+ * content-hashed at approval time, so changing a referenced script
+ * invalidates the approval. Mutable package commands (e.g. `npx pkg@latest`)
+ * are fingerprinted as mutable and flagged in the prompt so the user knows
+ * they may resolve to different code over time.
  */
 
 import * as crypto from 'node:crypto';
@@ -20,6 +26,29 @@ export interface WorkspaceTrustRecord {
   canonicalWorkspaceRoot: string;
   configHash: string;
   approvedAt: string;
+  /**
+   * Exact-executable-provenance fingerprints recorded at approval time. A
+   * local script whose content changed, or a command line that changed,
+   * invalidates the approval (VCL-R3-017).
+   */
+  executables: ExecutableFingerprint[];
+}
+
+/** How an MCP server's executable is fingerprinted. */
+export type ExecutableFingerprintKind = 'file' | 'mutable' | 'system';
+
+export interface ExecutableFingerprint {
+  /** Server name this fingerprint belongs to. */
+  server: string;
+  /** The full command line (command + args joined). */
+  commandLine: string;
+  kind: ExecutableFingerprintKind;
+  /** sha256 of the local file bytes (kind === 'file'). */
+  fileHash?: string;
+  /** Realpath of the hashed local file (kind === 'file'). */
+  filePath?: string;
+  /** True when a package command may resolve to different code (kind === 'mutable'). */
+  mutable?: boolean;
 }
 
 export function getMcpTrustStorePath(): string {
@@ -55,22 +84,31 @@ export class WorkspaceTrustStore {
     }
   }
 
-  isApproved(root: string, configHash: string): boolean {
+  /**
+   * True when a recorded approval matches the config hash AND — when
+   * `executables` is supplied — the exact executable fingerprints (VCL-R3-017).
+   * Callers that only have the config hash (legacy checks) omit the
+   * fingerprints and get the config-hash-only answer.
+   */
+  isApproved(root: string, configHash: string, executables?: ExecutableFingerprint[]): boolean {
     const record = this.load().get(canonicalWorkspaceRoot(root));
-    return record !== undefined && record.configHash === configHash;
+    if (!record || record.configHash !== configHash) return false;
+    if (executables === undefined) return true;
+    return executablesMatch(record.executables, executables);
   }
 
   getRecord(root: string): WorkspaceTrustRecord | undefined {
     return this.load().get(canonicalWorkspaceRoot(root));
   }
 
-  approve(root: string, configHash: string): void {
+  approve(root: string, configHash: string, executables: ExecutableFingerprint[] = []): void {
     const records = this.load();
     const key = canonicalWorkspaceRoot(root);
     records.set(key, {
       canonicalWorkspaceRoot: key,
       configHash,
       approvedAt: new Date().toISOString(),
+      executables,
     });
     this.save(records);
   }
@@ -123,8 +161,12 @@ export interface ProjectMcpTrustInfo {
   workspaceRoot: string;
   configPath: string;
   configHash: string;
-  /** 'new' = never approved; 'changed' = approved before, but the file changed. */
+  /** 'new' = never approved; 'changed' = approved before, but something changed. */
   status: 'new' | 'changed';
+  /** What invalidated a prior approval: the config bytes or a referenced executable. */
+  drift?: 'config' | 'executable';
+  /** Exact-executable-provenance fingerprints shown in the prompt (VCL-R3-017). */
+  executables?: ExecutableFingerprint[];
   servers: McpServerSummary[];
 }
 
@@ -151,6 +193,128 @@ export function summarizeServers(config: McpConfig): McpServerSummary[] {
       args: server.args,
       envKeys: Object.keys(server.env ?? {}),
     }));
+}
+
+/** Package runners whose first package spec may resolve to different code. */
+const PACKAGE_RUNNERS = new Set(['npx', 'npmx', 'bunx', 'npm', 'yarn', 'pnpm']);
+
+/** True when a package spec is not pinned to a concrete version. */
+export function isMutablePackageSpec(spec: string): boolean {
+  const trimmed = spec.trim();
+  if (!trimmed) return true;
+  // @latest / @* / trailing @ are always mutable.
+  if (trimmed.includes('@latest') || trimmed.includes('@*') || trimmed.endsWith('@')) return true;
+  // A scoped or unscoped name with an explicit @version is pinned.
+  // @scope/pkg@1.2.3 or pkg@1.2.3
+  if (trimmed.startsWith('@')) {
+    const secondAt = trimmed.indexOf('@', 1);
+    return secondAt === -1; // bare @scope/pkg without version
+  }
+  const at = trimmed.indexOf('@');
+  return at === -1; // bare name resolves to latest
+}
+
+/**
+ * Fingerprint the executables a server references (VCL-R3-017).
+ *
+ * - A local script (relative to the workspace or absolute) is content-hashed:
+ *   changing its bytes invalidates trust.
+ * - A package runner with a mutable spec (`npx pkg@latest`) is flagged as
+ *   mutable so the prompt is honest about drift.
+ * - Everything else (a system binary like bash/node) is treated as
+ *   OS-managed and not content-hashed.
+ */
+export function fingerprintServerExecutables(
+  servers: McpServerSummary[],
+  workspaceRoot: string
+): ExecutableFingerprint[] {
+  return servers.map((server) => {
+    const commandLine = [server.command, ...(server.args ?? [])].join(' ');
+    // A direct local script, or a script passed to a known interpreter
+    // (e.g. `node ./server.js`), is content-hashed.
+    const localPath =
+      resolveLocalExecutable(server.command, workspaceRoot) ??
+      resolveInterpreterScript(server.command, server.args ?? [], workspaceRoot);
+    if (localPath) {
+      try {
+        const fileHash = hashMcpConfigBytes(fs.readFileSync(localPath));
+        return {
+          server: server.name,
+          commandLine,
+          kind: 'file',
+          fileHash,
+          filePath: localPath,
+        };
+      } catch {
+        // Unreadable/nonexistent referenced file: fall through to system.
+      }
+    }
+    const spec = packageSpec(server.command, server.args ?? []);
+    if (spec !== undefined) {
+      return {
+        server: server.name,
+        commandLine,
+        kind: 'mutable',
+        mutable: isMutablePackageSpec(spec),
+      };
+    }
+    return { server: server.name, commandLine, kind: 'system' };
+  });
+}
+
+/** Interpreters whose first positional arg is commonly a local script. */
+const INTERPRETERS = new Set(['node', 'python', 'python3', 'bash', 'sh', 'zsh', 'tsx', 'deno', 'bun']);
+
+/** Resolve a script passed to a known interpreter, if it exists locally. */
+function resolveInterpreterScript(
+  command: string,
+  args: string[],
+  workspaceRoot: string
+): string | undefined {
+  if (!INTERPRETERS.has(command) || !args.length) return undefined;
+  return resolveLocalExecutable(args[0], workspaceRoot);
+}
+
+/** Resolve a command to a local file path, if it looks like one and exists. */
+function resolveLocalExecutable(command: string, workspaceRoot: string): string | undefined {
+  if (!command) return undefined;
+  const looksLikePath =
+    command.includes('/') ||
+    command.includes('\\') ||
+    command.startsWith('.') ||
+    command.startsWith('~');
+  if (!looksLikePath) return undefined;
+  const candidate = path.isAbsolute(command)
+    ? command
+    : path.resolve(workspaceRoot, command);
+  if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+    return fs.realpathSync(candidate);
+  }
+  return undefined;
+}
+
+/** Extract the package spec from a package-runner command, if any. */
+function packageSpec(command: string, args: string[]): string | undefined {
+  if (!PACKAGE_RUNNERS.has(command)) return undefined;
+  const rest = args.filter((a) => !a.startsWith('-'));
+  if (command === 'npm' || command === 'yarn' || command === 'pnpm') {
+    // npm exec <pkg>, yarn dlx <pkg>, pnpm dlx <pkg>
+    if (rest[0] === 'exec' || rest[0] === 'dlx') return rest[1];
+    return undefined;
+  }
+  // npx / npmx / bunx <pkg>
+  return rest[0];
+}
+
+/** Compare two fingerprint lists for exact equality (order-insensitive). */
+export function executablesMatch(
+  recorded: ExecutableFingerprint[] | undefined,
+  current: ExecutableFingerprint[] | undefined
+): boolean {
+  if (!recorded || !current) return recorded === current;
+  if (recorded.length !== current.length) return false;
+  const recordedJson = new Set(recorded.map((e) => JSON.stringify(e)));
+  return current.every((e) => recordedJson.has(JSON.stringify(e)));
 }
 
 /**
@@ -202,10 +366,17 @@ export async function resolveProjectMcpTrust(
   }
 
   const configHash = hashMcpConfigBytes(rawBytes);
+  // Exact executable provenance: fingerprint the referenced executables so a
+  // changed local script invalidates a prior approval (VCL-R3-017).
+  const executables = fingerprintServerExecutables(servers, workspaceRoot);
   const store = options.store ?? new WorkspaceTrustStore();
   const record = store.getRecord(workspaceRoot);
 
-  if (record && record.configHash === configHash) {
+  if (
+    record &&
+    record.configHash === configHash &&
+    executablesMatch(record.executables, executables)
+  ) {
     return { status: 'approved', config: parsed };
   }
 
@@ -213,7 +384,13 @@ export async function resolveProjectMcpTrust(
     workspaceRoot,
     configPath,
     configHash,
+    executables,
     status: record ? 'changed' : 'new',
+    drift: record
+      ? record.configHash !== configHash
+        ? 'config'
+        : 'executable'
+      : undefined,
     servers,
   };
 
@@ -232,7 +409,7 @@ export async function resolveProjectMcpTrust(
   const confirm = options.confirm ?? defaultConfirmTrust;
   const approved = await confirm(info);
   if (approved) {
-    store.approve(workspaceRoot, configHash);
+    store.approve(workspaceRoot, configHash, executables);
     return { status: 'approved', config: parsed };
   }
 
@@ -251,7 +428,9 @@ export function formatTrustPrompt(info: ProjectMcpTrustInfo): string {
   lines.push(
     `  Hash:      ${info.configHash.slice(0, 12)}… (${
       info.status === 'changed'
-        ? 'config changed since last approval'
+        ? info.drift === 'executable'
+          ? 'a referenced executable changed since last approval'
+          : 'config changed since last approval'
         : 'not previously approved'
     })`
   );
@@ -267,15 +446,32 @@ export function formatTrustPrompt(info: ProjectMcpTrustInfo): string {
     } else {
       lines.push(`    env keys: (none)`);
     }
+    const exec = info.executables?.find((e) => e.server === server.name);
+    if (exec) {
+      if (exec.kind === 'file' && exec.filePath && exec.fileHash) {
+        lines.push(`    executable: local script ${exec.filePath} (sha256 ${exec.fileHash.slice(0, 12)}…)`);
+      } else if (exec.kind === 'mutable') {
+        lines.push(
+          `    executable: package command ${exec.commandLine}${exec.mutable
+            ? ' (MUTABLE: may resolve to different code; pin a version to lock it)'
+            : ''}`
+        );
+      } else {
+        lines.push(`    executable: system binary ${exec.commandLine}`);
+      }
+    }
   }
   lines.push('');
   lines.push(
-    `Approving grants ${c.bold('workspace execution trust')}: the servers above may run ${c.bold('executable code')} in this workspace.`
+    `Approving grants ${c.bold('exact executable provenance trust')}: the servers above may run ${c.bold('executable code')} in this workspace.`
   );
   lines.push(
-    'The executables they reference (scripts, npx packages, commands) may change after approval and remain trusted;'
+    'Local scripts referenced by the config are content-hashed at approval time; changing a referenced script invalidates this approval.'
   );
-  lines.push('only a change to this MCP config file invalidates this approval.');
+  lines.push(
+    'Mutable package commands (e.g. npx package@latest) are flagged and may resolve to different code over time; pin a version to lock them.'
+  );
+  lines.push('Only a change to this MCP config file or a referenced local script invalidates this approval.');
   return lines.join('\n');
 }
 

@@ -12,7 +12,7 @@ import { writeFileTool } from '../tools/filesystem/write.js';
 import { editFileTool } from '../tools/filesystem/edit.js';
 import { shellTool } from '../tools/shell/execute.js';
 import type { AgentTool } from '../tools/types.js';
-import { VeniceModelClient } from './model-client.js';
+import { VeniceModelClient, UNKNOWN_CONTEXT_LIMIT } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
 import type { AgentMessage } from './types.js';
 import { McpManager } from '../mcp/manager.js';
@@ -528,6 +528,73 @@ describe('AgentRuntime', () => {
     assert.ok(result.state.lastValidation);
     assert.strictEqual(result.state.lastValidation!.overallSuccess, false);
     assert.ok(result.finalMessage.includes('Validation: FAIL'));
+  });
+
+  it('validates the additional root that owns the edit (VCL-R3-023)', async () => {
+    const primary = fs.mkdtempSync(path.join(os.tmpdir(), 'venice-runtime-primary-validate-'));
+    // realpath: WorkspaceManager canonicalizes roots (e.g. /var -> /private/var).
+    const shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-runtime-shared-validate-')));
+    // The additional root is the one with a package.json build script.
+    fs.writeFileSync(
+      path.join(shared, 'package.json'),
+      JSON.stringify({ name: 'shared', scripts: { build: 'echo shared-build-ok' } })
+    );
+    fs.mkdirSync(path.join(shared, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(shared, 'src', 'a.ts'), 'shared-original');
+
+    const registry = new ToolRegistry();
+    registry.register(editFileTool);
+
+    const responses: ModelResponse[] = [
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: {
+              name: 'edit_file',
+              arguments: JSON.stringify({
+                path: path.join(shared, 'src', 'a.ts'),
+                oldString: 'shared-original',
+                newString: 'shared-edited',
+              }),
+            },
+          },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'Edited.', finishReason: 'stop' },
+    ];
+
+    const permissions = new PermissionManager('auto-edit');
+    const runtime = new AgentRuntime({
+      workspaceRoot: primary,
+      objective: 'Edit shared file',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: new MockModelClient(responses),
+      toolRegistry: registry,
+      permissionManager: permissions,
+      additionalRoots: [shared],
+    });
+    permissions.grant('session', 'run_validation', undefined, 'execute');
+
+    const result = await runtime.run();
+    assert.strictEqual(result.state.status, 'complete');
+    assert.ok(result.state.lastValidation, 'validation must run for the additional root');
+    const started = result.events.filter((e) => e.type === 'validation_started');
+    assert.ok(started.length > 0, 'validation must be triggered by the additional-root edit');
+    // Every validation command ran in the additional root, not the primary.
+    for (const event of started) {
+      if (event.type === 'validation_started') {
+        assert.strictEqual(event.root, shared);
+      }
+    }
+    assert.ok(result.state.lastValidation.commands.some((c) => c.command === 'npm run build' && c.root === shared));
+
+    fs.rmSync(primary, { recursive: true, force: true });
+    fs.rmSync(shared, { recursive: true, force: true });
   });
 
   it('skips validation when no edit occurs', async () => {
@@ -1170,5 +1237,135 @@ describe('AgentRuntime', () => {
       ['shell', 'read_file'],
       'shell (not parallelSafe) must run before the following read, in order'
     );
+  });
+
+  it('honors project config approval mode and autoValidate (VCL-R3-010)', async () => {
+    const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-project-config-')));
+    fs.mkdirSync(path.join(workspace, '.venice'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.venice', 'config.json'),
+      JSON.stringify({ agent: { approvalMode: 'auto', autoValidate: false } })
+    );
+    fs.writeFileSync(
+      path.join(workspace, 'package.json'),
+      JSON.stringify({ name: 'test', scripts: { build: 'echo ok' } })
+    );
+    fs.writeFileSync(path.join(workspace, 'hello.txt'), 'hello');
+
+    const registry = new ToolRegistry();
+    registry.register(editFileTool);
+    const responses: ModelResponse[] = [
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: {
+              name: 'edit_file',
+              arguments: JSON.stringify({ path: 'hello.txt', oldString: 'hello', newString: 'hello world' }),
+            },
+          },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'Edit applied.', finishReason: 'stop' },
+    ];
+
+    // No approvalMode / autoValidate options: the runtime must read the
+    // project config from the workspace root.
+    const runtime = new AgentRuntime({
+      workspaceRoot: workspace,
+      objective: 'Edit',
+      maxTurns: 5,
+      modelClient: new MockModelClient(responses),
+      toolRegistry: registry,
+    });
+
+    assert.strictEqual(runtime.getMode().permissionMode, 'auto', 'project approvalMode must be the default');
+    const result = await runtime.run();
+    assert.strictEqual(result.state.lastValidation, undefined, 'project autoValidate=false must disable validation');
+    assert.strictEqual(result.state.changedFiles.some((f) => f.relativePath === 'hello.txt'), true);
+
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it('lets explicit options override project config (VCL-R3-010)', () => {
+    const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-project-config-override-')));
+    fs.mkdirSync(path.join(workspace, '.venice'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.venice', 'config.json'),
+      JSON.stringify({ agent: { approvalMode: 'auto' } })
+    );
+    const runtime = new AgentRuntime({
+      workspaceRoot: workspace,
+      objective: 'Override',
+      approvalMode: 'suggest',
+      modelClient: new MockModelClient([]),
+    });
+    assert.strictEqual(runtime.getMode().permissionMode, 'suggest', 'explicit option must win over project config');
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it('streams incremental deltas and persists one canonical assistant message (VCL-R3-012)', async () => {
+    class StreamingMockClient extends VeniceModelClient {
+      async complete(
+        _messages: AgentMessage[],
+        _tools: ToolDefinition[] = [],
+        onDelta?: (chunk: { content?: string; reasoningContent?: string }) => void
+      ): Promise<ModelResponse> {
+        onDelta?.({ reasoningContent: 'thinking…' });
+        onDelta?.({ content: 'Hello' });
+        onDelta?.({ content: ' world' });
+        return { content: 'Hello world', reasoningContent: 'thinking…', finishReason: 'stop', streamed: true };
+      }
+      async getModelContextLimit(): Promise<number> {
+        return 128000;
+      }
+      async getModelProfile() {
+        return undefined;
+      }
+    }
+
+    const client = new StreamingMockClient({ model: 'mock' });
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Stream',
+      approvalMode: 'auto-edit',
+      maxTurns: 3,
+      modelClient: client,
+    });
+    runtime.setModelProfile({ id: runtime.getState().model, mode: 'chat-only' });
+
+    const result = await runtime.run();
+
+    // Incremental content + reasoning surfaced as events.
+    const deltas = result.events.filter((e) => e.type === 'assistant_delta').map((e) => (e as { content?: string }).content);
+    assert.deepStrictEqual(deltas, ['Hello', ' world']);
+    assert.ok(result.events.some((e) => e.type === 'assistant_reasoning'));
+
+    // Exactly one canonical assistant message is persisted (no duplicate).
+    const assistantMessages = runtime.getState().messages.filter((m) => m.role === 'assistant');
+    assert.strictEqual(assistantMessages.length, 1);
+    assert.strictEqual(assistantMessages[0].content, 'Hello world');
+  });
+
+  it('applies a conservative context limit for unknown models (VCL-R3-028)', async () => {
+    class UnknownModelClient extends VeniceModelClient {
+      async getModelProfile() {
+        return undefined; // model not in the catalog
+      }
+    }
+    const client = new UnknownModelClient({ model: 'mystery-model' });
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Discover',
+      approvalMode: 'auto-edit',
+      modelClient: client,
+    });
+    await runtime.refreshModelProfile();
+    // Fails closed to chat-only and uses a conservative budget, not 128K.
+    assert.strictEqual(runtime.getState().agentMode, 'chat-only');
+    assert.strictEqual(runtime.getContextManager().getMaxTokens(), UNKNOWN_CONTEXT_LIMIT);
   });
 });

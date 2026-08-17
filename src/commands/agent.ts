@@ -4,7 +4,7 @@
 
 import { Command } from 'commander';
 import { AgentRuntime, detectWorkspaceRoot } from '../agent/runtime.js';
-import { getDefaultModel } from '../lib/config.js';
+import { getDefaultModel, loadProjectConfig } from '../lib/config.js';
 import { formatError, getChalk } from '../lib/output.js';
 import { EventBus } from '../agent/events.js';
 import { AgentRenderer } from '../ui/renderer.js';
@@ -52,6 +52,9 @@ export function registerAgentCommand(program: Command): Command {
 
       const cwd = options.cwd ? String(options.cwd) : process.cwd();
       const workspaceRoot = detectWorkspaceRoot(cwd);
+      // Project `.venice/config.json` supplies approval/validation/compaction
+      // defaults below CLI flags but above global config (VCL-R3-010).
+      const projectConfig = loadProjectConfig(workspaceRoot);
       const maxTurns = Number.parseInt(options.maxTurns, 10);
       if (!Number.isInteger(maxTurns) || maxTurns < 1) {
         console.error(formatError('--max-turns must be a positive integer'));
@@ -67,15 +70,35 @@ export function registerAgentCommand(program: Command): Command {
       // Headless `-p` defaults to auto-edit so normal workspace edits can
       // proceed without a human approver; shell/network still prompt (and fail
       // closed with no approver). Interactive keeps `suggest` (VC-KIMI-017).
-      const approvalMode = resolveApprovalMode(requestedApproval, interactive);
+      // An explicit CLI flag wins; otherwise the project config's approvalMode
+      // applies (yolo stays CLI-only so a shared repo cannot force autonomy).
+      const approvalMode =
+        requestedApproval ??
+        (projectConfig.agent?.approvalMode && projectConfig.agent.approvalMode !== 'yolo'
+          ? projectConfig.agent.approvalMode
+          : resolveApprovalMode(undefined, interactive));
 
       if (!['text', 'stream-json', 'json'].includes(outputFormat)) {
         console.error(formatError(`Invalid output format: ${outputFormat}`));
         process.exit(2);
       }
 
-      if (options.continue && options.session !== undefined) {
-        console.error(formatError('--continue and --session are mutually exclusive'));
+      // One Kimi-compatible startup conflict validator (VCL-R3-029).
+      const conflict = validateStartupConflicts(
+        {
+          prompt: options.prompt,
+          plan: options.plan,
+          yolo: options.yolo,
+          auto: options.auto,
+          continueFlag: options.continue,
+          session: options.session,
+          outputFormat,
+          json: options.json,
+        },
+        !process.stdin.isTTY
+      );
+      if (conflict) {
+        console.error(formatError(conflict));
         process.exit(2);
       }
 
@@ -132,6 +155,7 @@ export function registerAgentCommand(program: Command): Command {
           resumeSessionId,
           skillsDirs: options.skillsDir,
           additionalRoots: options.addDir,
+          projectConfig,
         });
         process.exit(0);
       }
@@ -151,6 +175,7 @@ export function registerAgentCommand(program: Command): Command {
         mcpManager,
         skillsDirs: options.skillsDir,
         additionalRoots: options.addDir,
+        projectConfig,
       });
 
       // Broken skills must be visible during normal headless use, not only
@@ -215,6 +240,50 @@ function validateApprovalMode(mode: string): 'suggest' | 'auto-edit' | 'auto' | 
     return mode as 'suggest' | 'auto-edit' | 'auto' | 'yolo';
   }
   return undefined;
+}
+
+/**
+ * Enforce Kimi-compatible startup flag conflicts (VCL-R3-029).
+ *
+ * Returns an error message for an invalid combination, or null when the flags
+ * are compatible. `hasStdin` is true when stdin is a pipe (so a non-text
+ * output format can read a prompt from it instead of requiring --prompt).
+ */
+export function validateStartupConflicts(
+  options: {
+    prompt?: string;
+    plan?: boolean;
+    yolo?: boolean;
+    auto?: boolean;
+    continueFlag?: boolean;
+    session?: string | boolean;
+    outputFormat: string;
+    json?: boolean;
+  },
+  hasStdin: boolean
+): string | null {
+  if (options.continueFlag && options.session !== undefined) {
+    return '--continue and --session are mutually exclusive';
+  }
+  if (options.yolo && options.auto) {
+    return '--yolo and --auto are mutually exclusive';
+  }
+  if (options.prompt && options.yolo) {
+    return '--prompt and --yolo are mutually exclusive';
+  }
+  if (options.prompt && options.auto) {
+    return '--prompt and --auto are mutually exclusive';
+  }
+  if (options.prompt && options.plan) {
+    return '--prompt and --plan are mutually exclusive';
+  }
+  // Non-text output is for a single deterministic prompt; without one (and no
+  // piped stdin to read), there is nothing to render.
+  const resolvedFormat = options.json ? 'json' : options.outputFormat;
+  if (resolvedFormat !== 'text' && !options.prompt && !hasStdin) {
+    return '--output-format requires --prompt (or piped stdin)';
+  }
+  return null;
 }
 
 /**

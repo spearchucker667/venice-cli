@@ -12,7 +12,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTool } from '../types.js';
 import { success, failure } from '../result.js';
-import { WorkspaceManager, toWorkspacePath } from '../../agent/workspace.js';
+import { WorkspaceManager, toFileRef, toWorkspacePath } from '../../agent/workspace.js';
 import type { AgentState, PlanArtifact, PlanStep } from '../../agent/types.js';
 
 export const DEFAULT_PLAN_FILE = 'PLAN.md';
@@ -98,6 +98,17 @@ export const writePlanTool: AgentTool<WritePlanInput, { plan: PlanArtifact }> = 
 
     let absolute: string;
     if (existing?.filePath) {
+      // Revalidate the existing plan path before writing: a plan file whose
+      // root left the workspace scope, or whose path escapes its root, must
+      // not be silently rewritten (VCL-R3-025).
+      try {
+        workspace.assertInsideWorkspace(existing.filePath);
+      } catch {
+        return failure(
+          'PLAN_FILE_OUTSIDE_WORKSPACE',
+          `The existing plan file is no longer inside the workspace: ${existing.filePath}`
+        );
+      }
       // The plan artifact path is fixed once created: the model cannot
       // redirect the plan file to arbitrary workspace paths.
       absolute = existing.filePath;
@@ -133,10 +144,27 @@ export const writePlanTool: AgentTool<WritePlanInput, { plan: PlanArtifact }> = 
       return failure('INVALID_PLAN', 'write_plan requires a summary or at least one step');
     }
 
+    // Resolve the owning root so the plan file keeps unambiguous identity
+    // across additional roots (VCL-R3-024).
+    let fileRef: PlanArtifact['fileRef'];
+    let affectedFile: string | ReturnType<typeof toFileRef>;
+    try {
+      const resolved = workspace.resolve(absolute);
+      fileRef = toFileRef(resolved.root, resolved.relative);
+      affectedFile = resolved.root === workspace.workspaceRoot
+        ? resolved.relative
+        : fileRef;
+    } catch {
+      // Fall back to a primary-root-relative path if resolution fails.
+      fileRef = undefined;
+      affectedFile = toWorkspacePath(path.relative(workspace.workspaceRoot, absolute));
+    }
+
     const plan: PlanArtifact = {
       summary,
       steps,
       filePath: absolute,
+      fileRef,
       updatedAt: new Date().toISOString(),
     };
 
@@ -150,8 +178,7 @@ export const writePlanTool: AgentTool<WritePlanInput, { plan: PlanArtifact }> = 
       );
     }
 
-    const relative = toWorkspacePath(path.relative(workspace.workspaceRoot, absolute));
-    return success({ plan }, { affectedFiles: [relative] });
+    return success({ plan }, { affectedFiles: [affectedFile] });
   },
 };
 

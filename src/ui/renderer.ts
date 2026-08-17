@@ -23,6 +23,11 @@ export class AgentRenderer {
   private readonly interactive: boolean;
   private readonly outputFormat: 'text' | 'stream-json' | 'json';
   private unsubscribe?: () => void;
+  // Envelope correlation state (VCL-R3-011): every emitted line carries a
+  // monotonic sequence, the session id, and the id of the active turn.
+  private sequence = 0;
+  private sessionId = '';
+  private turnId: string | undefined;
 
   constructor(options: RendererOptions) {
     this.eventBus = options.eventBus;
@@ -42,7 +47,13 @@ export class AgentRenderer {
   private render(event: AgentEvent): void {
     const c = getChalk();
     if (this.outputFormat === 'stream-json') {
-      const streamEvent = toStreamJson(event);
+      if (event.type === 'session_started') this.sessionId = event.sessionId;
+      if (event.type === 'model_request') this.turnId = event.eventId;
+      const streamEvent = toStreamJson(event, {
+        sessionId: this.sessionId,
+        sequence: this.sequence++,
+        turnId: this.turnId,
+      });
       if (streamEvent) {
         console.log(serializeStreamJson(streamEvent));
       }

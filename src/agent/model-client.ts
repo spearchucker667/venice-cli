@@ -8,16 +8,31 @@
 import type { AgentMessage, TokenUsage } from './types.js';
 import type { Message } from '../types/index.js';
 import type { ToolDefinition } from '../types/index.js';
-import { chatCompletion, chatCompletionStream, listModels, type VeniceApiError } from '../lib/api.js';
+import { chatCompletionStream, type VeniceApiError } from '../lib/api.js';
 import { getDefaultModel } from '../lib/config.js';
 import { profileModel, type ModelProfile } from './model-profile.js';
+import { ModelCatalog } from './model-catalog.js';
 
 export interface ModelClientOptions {
   model?: string;
+  /**
+   * Injectable model source with caching. Defaults to the live Venice API;
+   * tests inject a fake catalog so discovery runs offline (VCL-R3-027).
+   */
+  catalog?: ModelCatalog;
 }
+
+/**
+ * Conservative context budget for a model whose capacity is unknown
+ * (VCL-R3-028). The previous optimistic 128K default could exceed a smaller
+ * model's real window; 32K is safe for the supported text models and keeps
+ * compaction conservative when discovery is unavailable.
+ */
+export const UNKNOWN_CONTEXT_LIMIT = 32_000;
 
 export interface ModelResponse {
   content: string;
+  reasoningContent?: string;
   toolCalls?: Array<{
     id: string;
     type: 'function';
@@ -25,6 +40,8 @@ export interface ModelResponse {
   }>;
   usage?: TokenUsage;
   finishReason: string;
+  /** True when the response was assembled from a streaming request (VCL-R3-012). */
+  streamed?: boolean;
 }
 
 export interface StreamingDelta {
@@ -36,27 +53,88 @@ export interface StreamingDelta {
   done: boolean;
 }
 
+/** Incremental chunks surfaced to callers while a stream is in flight. */
+export interface StreamChunk {
+  content?: string;
+  reasoningContent?: string;
+}
+
 export class VeniceModelClient {
-  constructor(private readonly options: ModelClientOptions = {}) {}
+  private readonly catalog: ModelCatalog;
+
+  constructor(private readonly options: ModelClientOptions = {}) {
+    this.catalog = options.catalog ?? new ModelCatalog();
+  }
 
   setModel(model: string): void {
     this.options.model = model;
   }
 
-  async complete(messages: AgentMessage[], tools: ToolDefinition[] = []): Promise<ModelResponse> {
-    const apiMessages = messages.map((m) => this.toApiMessage(m));
-    const result = await chatCompletion(apiMessages, {
-      model: this.options.model || getDefaultModel(),
-      tools,
-      tool_choice: tools.length ? 'auto' : 'none',
-      showSpinner: false,
-    });
+  /**
+   * Complete a turn by consuming the streaming endpoint (VCL-R3-012).
+   *
+   * Incremental content, reasoning, fragmented tool-call ids/names/arguments,
+   * finish reason, and usage are accumulated into one canonical response.
+   * `onDelta` (optional) receives each content/reasoning chunk as it arrives.
+   */
+  async complete(
+    messages: AgentMessage[],
+    tools: ToolDefinition[] = [],
+    onDelta?: (chunk: StreamChunk) => void
+  ): Promise<ModelResponse> {
+    let content = '';
+    let reasoningContent = '';
+    let finishReason = 'stop';
+    let usage: TokenUsage | undefined;
+    let sawToolCalls = false;
+    // OpenAI-style streaming tool-call deltas are keyed by index with
+    // fragmented name/arguments strings that must be concatenated.
+    const toolCalls = new Map<number, { id?: string; type?: string; name?: string; arguments?: string }>();
+
+    for await (const delta of this.stream(messages, tools)) {
+      if (delta.content) {
+        content += delta.content;
+        onDelta?.({ content: delta.content });
+      }
+      if (delta.reasoningContent) {
+        reasoningContent += delta.reasoningContent;
+        onDelta?.({ reasoningContent: delta.reasoningContent });
+      }
+      if (delta.toolCalls) {
+        sawToolCalls = true;
+        for (const raw of delta.toolCalls) {
+          if (!raw || typeof raw !== 'object') continue;
+          const tc = raw as { index?: number; id?: string; type?: string; function?: { name?: string; arguments?: string } };
+          const index = typeof tc.index === 'number' ? tc.index : 0;
+          const entry = toolCalls.get(index) ?? {};
+          if (tc.id) entry.id = tc.id;
+          if (tc.type) entry.type = tc.type;
+          if (tc.function?.name) entry.name = (entry.name ?? '') + tc.function.name;
+          if (tc.function?.arguments) entry.arguments = (entry.arguments ?? '') + tc.function.arguments;
+          toolCalls.set(index, entry);
+        }
+      }
+      if (delta.finishReason) finishReason = delta.finishReason;
+      if (delta.usage) usage = delta.usage;
+    }
+
+    const assembledToolCalls: ModelResponse['toolCalls'] = sawToolCalls && toolCalls.size > 0
+      ? Array.from(toolCalls.entries())
+          .sort(([a], [b]) => a - b)
+          .map(([, value]) => ({
+            id: value.id || `call_${Math.random().toString(36).slice(2, 10)}`,
+            type: 'function',
+            function: { name: value.name || '', arguments: value.arguments || '{}' },
+          }))
+      : undefined;
 
     return {
-      content: result.content || '',
-      toolCalls: result.tool_calls,
-      usage: result.usage,
-      finishReason: result.finish_reason,
+      content,
+      ...(reasoningContent ? { reasoningContent } : {}),
+      toolCalls: assembledToolCalls,
+      usage,
+      finishReason,
+      streamed: true,
     };
   }
 
@@ -82,8 +160,7 @@ export class VeniceModelClient {
   async getModelContextLimit(modelId?: string): Promise<number> {
     const targetId = modelId || this.options.model || getDefaultModel();
     try {
-      const models = await listModels({ showSpinner: false });
-      const model = models.find((m) => m.id === targetId);
+      const model = await this.catalog.find(targetId);
       if (model?.model_spec) {
         if (typeof model.model_spec.availableContextTokens === 'number') {
           return model.model_spec.availableContextTokens;
@@ -93,18 +170,18 @@ export class VeniceModelClient {
       // fall back to heuristic/default
     }
 
-    // Conservative heuristics based on common model naming.
+    // Deterministic heuristics based on common model naming; anything else is
+    // explicitly UNKNOWN and gets a conservative budget (VCL-R3-028).
     const lower = targetId.toLowerCase();
     if (lower.includes('128k') || lower.includes('kimi-k2-5') || lower.includes('kimi-k2.5')) return 128000;
     if (lower.includes('32k')) return 32000;
     if (lower.includes('8k')) return 8192;
-    return 128000;
+    return UNKNOWN_CONTEXT_LIMIT;
   }
 
   async getModelProfile(modelId?: string): Promise<ModelProfile | undefined> {
     const targetId = modelId || this.options.model || getDefaultModel();
-    const models = await listModels({ showSpinner: false });
-    const model = models.find((candidate) => candidate.id === targetId);
+    const model = await this.catalog.find(targetId);
     return model ? profileModel(model) : undefined;
   }
 

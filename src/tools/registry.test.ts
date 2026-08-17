@@ -83,4 +83,17 @@ describe('ToolRegistry', () => {
     const wrongType = registry.validateInput('echo', { text: 42 });
     assert.ok(wrongType.some((m) => /text/.test(m)));
   });
+
+  it('unregisters a namespace prefix for atomic MCP refresh (VCL-R3-014)', () => {
+    const registry = new ToolRegistry();
+    registry.register({ ...echoTool, name: 'mcp:server:a' });
+    registry.register({ ...echoTool, name: 'mcp:server:b' });
+    registry.register({ ...echoTool, name: 'local' });
+
+    const removed = registry.unregisterPrefix('mcp:server:');
+    assert.deepStrictEqual(removed.sort(), ['mcp:server:a', 'mcp:server:b']);
+    assert.strictEqual(registry.has('mcp:server:a'), false);
+    assert.strictEqual(registry.has('mcp:server:b'), false);
+    assert.strictEqual(registry.has('local'), true);
+  });
 });

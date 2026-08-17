@@ -11,6 +11,8 @@ import { VeniceModelClient } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
 import type { AgentMessage } from './types.js';
 import type { ToolDefinition } from '../types/index.js';
+import { writePlanTool } from '../tools/agent-meta/plan.js';
+import type { ToolContext } from '../tools/types.js';
 
 class NoopModelClient extends VeniceModelClient {
   async complete(_messages: AgentMessage[], _tools: ToolDefinition[] = []): Promise<ModelResponse> {
@@ -227,5 +229,69 @@ describe('plan artifact lifecycle', () => {
     const stored = manager.load(runtime.getState().sessionId, tmp);
     assert.ok(stored?.state.plan, 'plan must survive save/load');
     assert.strictEqual(stored!.state.plan!.summary, 'Persisted plan');
+  });
+
+  it('plan in an additional root keeps root-aware identity (VCL-R3-024)', async () => {
+    const shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-plan-shared-')));
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'plan test',
+      mode: { ...defaultMode('yolo'), operatingMode: 'plan' },
+      modelClient: new NoopModelClient(),
+      additionalRoots: [shared],
+    });
+    const result = await runtime.executeDirectTool('write_plan', {
+      summary: 'Shared plan',
+      steps: ['a'],
+      filePath: path.join(shared, 'PLAN.md'),
+    });
+    assert.strictEqual(result.ok, true);
+
+    const plan = runtime.getState().plan!;
+    assert.strictEqual(plan.fileRef?.rootId, shared);
+    assert.strictEqual(plan.fileRef?.relativePath, 'PLAN.md');
+    // Changed-file tracking retains the additional root instead of collapsing
+    // to a ../shared/PLAN.md primary-relative string.
+    const changed = runtime.getState().changedFiles.find((f) => f.relativePath === 'PLAN.md');
+    assert.ok(changed, 'plan file must be tracked');
+    assert.strictEqual(changed!.rootId, shared, 'changed identity must retain the additional root');
+
+    fs.rmSync(shared, { recursive: true, force: true });
+  });
+
+  it('revalidates an existing plan path before writing (VCL-R3-025)', async () => {
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-plan-outside-')));
+    const context: ToolContext = {
+      workspaceRoot: tmp,
+      workspace: { primaryRoot: tmp, additionalRoots: [] },
+      sessionId: 's',
+      objective: 'o',
+      runtimeState: {
+        sessionId: 's',
+        workspaceRoot: tmp,
+        workspace: { primaryRoot: tmp, additionalRoots: [] },
+        model: 'm',
+        objective: 'o',
+        status: 'idle',
+        mode: defaultMode(),
+        messages: [],
+        todos: [],
+        relevantFiles: [],
+        changedFiles: [],
+        toolHistory: [],
+        skillSummaries: [],
+        activeSkills: [],
+        plan: {
+          summary: 'S',
+          steps: [],
+          filePath: path.join(outside, 'PLAN.md'),
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    };
+    const result = await writePlanTool.execute({ summary: 'S2', steps: ['b'] }, context);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error?.code, 'PLAN_FILE_OUTSIDE_WORKSPACE');
+    fs.rmSync(outside, { recursive: true, force: true });
   });
 });

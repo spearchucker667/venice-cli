@@ -13,6 +13,7 @@ export type AgentEvent =
   | { type: 'model_request'; timestamp: string; eventId: string; messageCount: number }
   | { type: 'model_profile_updated'; timestamp: string; eventId: string; profile: import('./model-profile.js').ModelProfile }
   | { type: 'assistant_delta'; timestamp: string; eventId: string; content?: string; toolCalls?: unknown[] }
+  | { type: 'assistant_reasoning'; timestamp: string; eventId: string; content?: string }
   | { type: 'tool_requested'; timestamp: string; eventId: string; toolName: string; input: unknown }
   | { type: 'approval_requested'; timestamp: string; eventId: string; toolName: string; risk: string }
   | { type: 'approval_granted'; timestamp: string; eventId: string; toolName: string; scope: string }
@@ -21,11 +22,12 @@ export type AgentEvent =
   | { type: 'subagent_started'; timestamp: string; eventId: string; kind: string; mode: string; task: string; maxTurns: number }
   | { type: 'subagent_completed'; timestamp: string; eventId: string; kind: string; mode: string; status: string; findings: number; filesInspected: number; changedFiles: number }
   | { type: 'file_changed'; timestamp: string; eventId: string; path: string; rootId?: string; operation: string }
-  | { type: 'validation_started'; timestamp: string; eventId: string; command: string }
-  | { type: 'validation_completed'; timestamp: string; eventId: string; command: string; exitCode: number; stdout?: string; stderr?: string }
+  | { type: 'validation_started'; timestamp: string; eventId: string; command: string; root?: string }
+  | { type: 'validation_completed'; timestamp: string; eventId: string; command: string; root?: string; exitCode: number; stdout?: string; stderr?: string }
   | { type: 'context_compacted'; timestamp: string; eventId: string; summary: unknown }
   | { type: 'mcp_ready'; timestamp: string; eventId: string; servers: Array<{ name: string; toolCount: number; error?: string }> }
   | { type: 'mcp_failed'; timestamp: string; eventId: string; message: string }
+  | { type: 'mcp_tools_changed'; timestamp: string; eventId: string; serverName: string; toolCount: number }
   | { type: 'mode_changed'; timestamp: string; eventId: string; mode: RuntimeModeState }
   | { type: 'title_changed'; timestamp: string; eventId: string; title: string }
   | { type: 'session_forked'; timestamp: string; eventId: string; parentSessionId: string; newSessionId: string }

@@ -55,6 +55,64 @@ describe('createMcpToolAdapter', () => {
     const adapter = createMcpToolAdapter('server', { name: 't', inputSchema: bigSchema }, async () => ({}));
     assert.deepStrictEqual(adapter.inputSchema, { type: 'object', properties: {} });
   });
+
+  it('normalizes isError:true results into explicit failures (VCL-R3-016)', async () => {
+    const context: ToolContext = {
+      workspaceRoot: '/tmp',
+      sessionId: 's',
+      objective: 'o',
+      runtimeState: { sessionId: 's', workspaceRoot: '/tmp', workspace: { primaryRoot: '/tmp', additionalRoots: [] }, model: 'm', objective: 'o', status: 'idle', mode: defaultMode(), messages: [], todos: [], relevantFiles: [], changedFiles: [], toolHistory: [], skillSummaries: [], activeSkills: [] },
+    };
+    const structured = {
+      isError: true,
+      content: [{ type: 'text', text: 'division by zero' }],
+      structuredContent: { ok: false, reason: 'div0' },
+    };
+    const adapter = createMcpToolAdapter('calc', { name: 'divide' }, async () => structured);
+    const result = await adapter.execute({}, context);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error?.code, 'MCP_TOOL_REPORTED_ERROR');
+    assert.strictEqual(result.error?.message, 'division by zero');
+    // The structured payload stays available to the model.
+    assert.deepStrictEqual(result.error?.details, structured);
+  });
+
+  it('keeps structuredContent on successful results (VCL-R3-021)', async () => {
+    const context: ToolContext = {
+      workspaceRoot: '/tmp',
+      sessionId: 's',
+      objective: 'o',
+      runtimeState: { sessionId: 's', workspaceRoot: '/tmp', workspace: { primaryRoot: '/tmp', additionalRoots: [] }, model: 'm', objective: 'o', status: 'idle', mode: defaultMode(), messages: [], todos: [], relevantFiles: [], changedFiles: [], toolHistory: [], skillSummaries: [], activeSkills: [] },
+    };
+    const structured = { content: [], structuredContent: { rows: [1, 2, 3] } };
+    const adapter = createMcpToolAdapter('db', { name: 'query' }, async () => structured);
+    const result = await adapter.execute({}, context);
+    assert.strictEqual(result.ok, true);
+    assert.deepStrictEqual(result.data, structured);
+  });
+
+  it('models title, outputSchema, and annotations as untrusted metadata (VCL-R3-021)', async () => {
+    const annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
+    const adapter = createMcpToolAdapter(
+      'server',
+      {
+        name: 't',
+        title: 'My Tool',
+        inputSchema: { type: 'object', properties: {} },
+        outputSchema: { type: 'object', properties: { id: { type: 'string' } } },
+        annotations,
+      },
+      async () => ({})
+    );
+    assert.strictEqual(adapter.title, 'My Tool');
+    assert.deepStrictEqual(adapter.outputSchema, {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+    });
+    // Annotations are surfaced read-only and never influence risk.
+    assert.deepStrictEqual(adapter.untrustedMetadata, annotations);
+    assert.strictEqual(adapter.risk, 'external_side_effect');
+  });
 });
 
 describe('compileToolSchema hardening (VCL-R3-005)', () => {

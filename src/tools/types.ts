@@ -22,12 +22,21 @@ export interface ToolContext {
 
 export interface AgentTool<TInput = unknown, TOutput = unknown> {
   name: string;
+  /** Optional human-friendly display title (e.g. an MCP tool title). */
+  title?: string;
   description: string;
   inputSchema: {
     type: 'object';
     properties: Record<string, unknown>;
     required?: string[];
   };
+  /** Optional JSON Schema describing the tool's return value. */
+  outputSchema?: unknown;
+  /**
+   * Untrusted metadata surfaced read-only (e.g. MCP tool annotations). It is
+   * never used to make security or permission decisions (VCL-R3-021).
+   */
+  untrustedMetadata?: unknown;
   risk: RiskLevel | ((input: unknown) => RiskLevel);
   planSafe?: boolean;
   parallelSafe?: boolean;

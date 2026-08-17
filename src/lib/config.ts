@@ -199,6 +199,71 @@ export function getDefaultModel(): string {
   return config.default_model || DEFAULT_MODELS.chat;
 }
 
+/**
+ * Project-level agent config from `<workspace>/.venice/config.json` (VCL-R3-010).
+ *
+ * `venice init` scaffolds this file with agent approval/validation and context
+ * compaction settings. The runtime honors it at the documented precedence
+ * (CLI > env > project > global > defaults). Auth secrets are never read from
+ * a project config: the file is repo-committable and must not carry
+ * credentials, so only the `agent`/`context` sections are recognized.
+ */
+export interface ProjectAgentConfig {
+  agent?: {
+    approvalMode?: 'suggest' | 'auto-edit' | 'auto' | 'yolo';
+    autoValidate?: boolean;
+  };
+  context?: {
+    autoCompact?: boolean;
+  };
+}
+
+const PROJECT_APPROVAL_MODES = ['suggest', 'auto-edit', 'auto', 'yolo'] as const;
+
+/** Read and validate the project config. Returns {} when absent/malformed. */
+export function loadProjectConfig(workspaceRoot: string): ProjectAgentConfig {
+  const file = path.join(workspaceRoot, '.venice', 'config.json');
+  if (!fs.existsSync(file)) return {};
+  try {
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink() || !stat.isFile()) return {};
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return normalizeProjectConfig(parsed);
+  } catch {
+    return {};
+  }
+}
+
+function normalizeProjectConfig(input: unknown): ProjectAgentConfig {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const obj = input as Record<string, unknown>;
+  const result: ProjectAgentConfig = {};
+
+  const agent = obj.agent;
+  if (agent && typeof agent === 'object' && !Array.isArray(agent)) {
+    const a = agent as Record<string, unknown>;
+    if (typeof a.approvalMode === 'string' && (PROJECT_APPROVAL_MODES as readonly string[]).includes(a.approvalMode)) {
+      result.agent = {
+        ...(result.agent ?? {}),
+        approvalMode: a.approvalMode as 'suggest' | 'auto-edit' | 'auto' | 'yolo',
+      };
+    }
+    if (typeof a.autoValidate === 'boolean') {
+      result.agent = { ...(result.agent ?? {}), autoValidate: a.autoValidate };
+    }
+  }
+
+  const context = obj.context;
+  if (context && typeof context === 'object' && !Array.isArray(context)) {
+    const c = context as Record<string, unknown>;
+    if (typeof c.autoCompact === 'boolean') {
+      result.context = { autoCompact: c.autoCompact };
+    }
+  }
+
+  return result;
+}
+
 export function getDefaultImageModel(): string {
   const config = loadConfig();
   return config.default_image_model || DEFAULT_MODELS.image;
