@@ -22,8 +22,10 @@ The approval mode is set at startup via `--approval <mode>` or `.venice/config.j
 |---|---|---|---|---|---|
 | **`suggest`** (Default) | Allowed | Prompt | Prompt | Prompt | Prompt |
 | **`auto-edit`** | Allowed | Allowed | Prompt | Prompt | Prompt |
-| **`auto`** | Allowed | Allowed | Allowed (Safe) | Allowed | Prompt |
+| **`auto`** | Allowed | Allowed | Prompt | Prompt | Prompt |
 | **`yolo`** | Allowed | Allowed | Allowed | Allowed | Prompt |
+
+`auto` auto-approves only positively-known-safe capabilities (read-only and structured write/execute tools). Raw shell is a high-power capability whose "safety" is only regex-estimated, so it is never auto-approved in `auto` — it requires a grant or explicit approval, with `yolo` as the explicit bypass (VCL-057).
 
 ## Safety Constraints
 

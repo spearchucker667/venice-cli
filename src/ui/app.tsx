@@ -139,11 +139,12 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     if (key.ctrl && input === 'c') {
       if (isRunning && runtimeRef.current) {
         addEvent('Operation cancelled by user.');
-        setIsRunning(false);
+        // Abort only the in-flight turn's signal. Do NOT replace the runtime
+        // signal mid-turn: the runtime froze its own capture when the turn
+        // started (VCL-001). A fresh controller is created lazily right before
+        // the next turn begins, and isRunning stays true until the cancelled
+        // turn's promise actually resolves so a new turn cannot overlap it.
         abortControllerRef.current?.abort(new Error('Cancelled by user'));
-        const newController = new AbortController();
-        abortControllerRef.current = newController;
-        runtimeRef.current.updateSignal(newController.signal);
         setStatus('cancelled');
       } else {
         runtimeRef.current?.complete().catch(() => {});
@@ -454,6 +455,13 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'user', content: resolvedText }]);
     setIsRunning(true);
     setError(undefined);
+
+    // Each foreground turn owns a fresh, non-aborted controller. The previous
+    // signal may be aborted from an earlier cancellation; the runtime adopts
+    // this new signal for the turn that is about to start (VCL-001).
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    runtimeRef.current?.updateSignal(controller.signal);
 
     runtimeRef.current
       ?.sendUserMessage(resolvedText, attachedContext)

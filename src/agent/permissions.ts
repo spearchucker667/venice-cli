@@ -153,7 +153,19 @@ export class PermissionManager {
       return true;
     }
 
-    if (this.mode === 'auto' && risk !== 'destructive' && risk !== 'network' && risk !== 'external_side_effect' && risk !== 'outside_workspace') {
+    // `auto` may only automate capabilities that are *positively* known to be
+    // safe under a documented policy. Raw shell is a high-power capability
+    // whose "safety" is only regex-estimated; a classifier false negative must
+    // never become an auto-grant (VCL-057). The shell tool therefore always
+    // falls through to grants/approval in `auto` — yolo is the explicit bypass.
+    if (
+      this.mode === 'auto' &&
+      toolName !== 'shell' &&
+      risk !== 'destructive' &&
+      risk !== 'network' &&
+      risk !== 'external_side_effect' &&
+      risk !== 'outside_workspace'
+    ) {
       return true;
     }
 

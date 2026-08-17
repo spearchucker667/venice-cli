@@ -279,6 +279,14 @@ type ApiRequestOptions = {
   authenticated?: boolean;
   onHeaders?: (headers: Headers) => void;
   /**
+   * External cancellation signal (e.g. a foreground turn abort). Composed with
+   * the per-attempt idle/timeout controller so an abort also terminates the
+   * in-flight fetch, not just the response reader (VCL-002). An external abort
+   * propagates as an AbortError and is never retried or misreported as a
+   * timeout.
+   */
+  signal?: AbortSignal;
+  /**
    * HTTP statuses that are parsed as a normal JSON body instead of throwing
    * (e.g. the x402 top-up probe expects a 402 with payment requirements).
    * Only meaningful for JSON responses; binary paths always throw.
@@ -323,6 +331,7 @@ export async function apiRequest<T>(
     additionalHeaders = {},
     onHeaders,
     authenticated = true,
+    signal,
   } = options;
 
   const binaryOptions = options.responseType === 'arrayBuffer' ? options : undefined;
@@ -346,6 +355,11 @@ export async function apiRequest<T>(
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    // Compose the external cancellation signal with the per-attempt timeout
+    // controller so an aborted turn also terminates the in-flight request
+    // during the header phase (VCL-002).
+    const onExternalAbort = () => controller.abort();
+    signal?.addEventListener('abort', onExternalAbort);
 
     try {
       const response = await fetch(`${VENICE_API}${endpoint}`, {
@@ -437,6 +451,11 @@ export async function apiRequest<T>(
       clearTimeout(timeoutId);
 
       if (error instanceof Error && error.name === 'AbortError') {
+        // A foreground turn abort must propagate immediately and never be
+        // retried or misreported as an idle timeout (VCL-002).
+        if (signal?.aborted) {
+          throw error;
+        }
         if (spinner) stopSpinner(false, 'Request timed out');
         throw new Error(
           `Request timed out after ${timeoutMs / 1000} seconds.\n` +
@@ -498,6 +517,8 @@ export async function apiRequest<T>(
 
       if (spinner) stopSpinner(false);
       throw lastError || error;
+    } finally {
+      signal?.removeEventListener('abort', onExternalAbort);
     }
   }
 
@@ -635,6 +656,7 @@ export async function chatCompletion(
     spinnerText: 'Thinking...',
     showSpinner: options.showSpinner,
     additionalHeaders: options.additionalHeaders,
+    signal: options.abortSignal,
     onHeaders: (headers) => {
       capturedHeaders = parseUsageHeaders(headers);
     },
@@ -699,6 +721,7 @@ export async function* chatCompletionStream(
     stream: true,
     showSpinner: false,
     additionalHeaders: options.additionalHeaders,
+    signal: options.abortSignal,
   });
 
   const contentType = response.headers.get('content-type');

@@ -22,7 +22,7 @@ export function registerAgentCommand(program: Command): Command {
     .option('-p, --prompt <prompt>', 'Single noninteractive prompt')
     .option('-m, --model <model>', 'Model to use')
     .option('-a, --approval <mode>', 'Approval mode (suggest|auto-edit|auto|yolo; default: suggest interactive, auto-edit noninteractive)')
-    .option('--auto', 'Shorthand for --approval auto (auto-approves workspace edits and ordinary dev commands, incl. headless shell)')
+    .option('--auto', 'Shorthand for --approval auto (auto-approves workspace edits and known-safe tools; raw shell still prompts)')
     .option('--yolo', 'Shorthand for --approval yolo (autonomous execution; still prompts for destructive commands)')
     .option('--plan', 'Start in plan mode (read-only)', false)
     .option('--continue', 'Resume the most recent session in this workspace', false)

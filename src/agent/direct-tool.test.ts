@@ -160,4 +160,41 @@ describe('executeDirectTool (VC-KIMI-008)', () => {
     assert.strictEqual(result.ok, false);
     assert.strictEqual(result.error?.code, 'UNKNOWN_TOOL');
   });
+
+  it('refuses direct tools while a turn is running (VCL-004)', async () => {
+    const controller = new AbortController();
+    let modelCalls = 0;
+
+    class BlockingModelClient extends NoopModelClient {
+      async complete(): Promise<ModelResponse> {
+        modelCalls++;
+        await new Promise<void>((resolve) => {
+          if (controller.signal.aborted) return resolve();
+          controller.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return { content: 'done', finishReason: 'stop' };
+      }
+    }
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'test',
+      approvalMode: 'yolo',
+      modelClient: new BlockingModelClient(),
+      signal: controller.signal,
+    });
+
+    const runPromise = runtime.sendUserMessage('hello');
+    for (let i = 0; i < 100 && modelCalls === 0; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.strictEqual(modelCalls, 1, 'the turn must be in flight');
+
+    const result = await runtime.executeDirectTool('shell', { command: 'echo hi' });
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error?.code, 'TURN_IN_PROGRESS');
+
+    controller.abort();
+    await runPromise;
+  });
 });

@@ -84,7 +84,7 @@ export class VeniceModelClient {
     messages: AgentMessage[],
     tools: ToolDefinition[] = [],
     onDelta?: (chunk: StreamChunk) => void,
-    options?: { reasoningEffort?: string }
+    options?: { reasoningEffort?: string; signal?: AbortSignal }
   ): Promise<ModelResponse> {
     let content = '';
     let reasoningContent = '';
@@ -147,7 +147,7 @@ export class VeniceModelClient {
     };
   }
 
-  async *stream(messages: AgentMessage[], tools: ToolDefinition[] = [], options?: { reasoningEffort?: string }): AsyncGenerator<StreamingDelta> {
+  async *stream(messages: AgentMessage[], tools: ToolDefinition[] = [], options?: { reasoningEffort?: string; signal?: AbortSignal }): AsyncGenerator<StreamingDelta> {
     const apiMessages = messages.map((m) => this.toApiMessage(m));
     for await (const delta of chatCompletionStream(apiMessages, {
       model: this.options.model || getDefaultModel(),
@@ -155,6 +155,7 @@ export class VeniceModelClient {
       tool_choice: tools.length ? 'auto' : 'none',
       showSpinner: false,
       reasoning_effort: options?.reasoningEffort as any,
+      abortSignal: options?.signal,
     })) {
       yield {
         content: delta.content,

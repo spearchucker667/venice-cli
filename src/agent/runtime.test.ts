@@ -100,6 +100,50 @@ describe('AgentRuntime', () => {
     assert.ok(result.events.some((event) => event.type === 'assistant_complete' && event.content?.includes('successfully')));
   });
 
+  it('a cancelled turn cannot observe a replacement signal (VCL-001)', async () => {
+    const controller = new AbortController();
+    let modelCalls = 0;
+    let abortedInFlight = false;
+
+    // Blocks each model call until the turn signal aborts, simulating an
+    // in-flight stream that only resolves once cancelled.
+    class CancellableModelClient extends MockModelClient {
+      async complete(): Promise<ModelResponse> {
+        modelCalls++;
+        await new Promise<void>((resolve) => {
+          if (controller.signal.aborted) return resolve();
+          controller.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        abortedInFlight = controller.signal.aborted;
+        return { content: 'partial', finishReason: 'stop' };
+      }
+    }
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'test',
+      modelClient: new CancellableModelClient([{ content: 'done', finishReason: 'stop' }]),
+      signal: controller.signal,
+    });
+
+    const runPromise = runtime.sendUserMessage('hello');
+
+    // Wait until the model call is in flight, then cancel and — as the old UI
+    // did — swap in a fresh, non-aborted signal mid-turn.
+    for (let i = 0; i < 100 && modelCalls === 0; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.strictEqual(modelCalls, 1, 'the model call must have started');
+    controller.abort();
+    runtime.updateSignal(new AbortController().signal);
+
+    await runPromise;
+
+    assert.strictEqual(runtime.getState().status, 'cancelled');
+    assert.strictEqual(abortedInFlight, true, 'the in-flight call observed the abort');
+    assert.strictEqual(modelCalls, 1, 'no model call may start after cancellation');
+  });
+
   it('sends the live tool registry to agent-capable models', async () => {
     const registry = new ToolRegistry();
     registry.register(readFileTool);
@@ -144,7 +188,7 @@ describe('AgentRuntime', () => {
     assert.equal(runtime.getState().agentMode, 'chat-only');
   });
 
-  it('runs shell command with auto approval', async () => {
+  it('blocks raw shell in auto mode without a grant (VCL-057)', async () => {
     const registry = new ToolRegistry();
     registry.register(shellTool);
 
@@ -174,7 +218,11 @@ describe('AgentRuntime', () => {
 
     const result = await runtime.run();
     assert.strictEqual(result.state.status, 'complete');
-    assert.strictEqual(result.state.toolHistory[0].toolName, 'shell');
+    const call = result.state.toolHistory[0];
+    assert.strictEqual(call.toolName, 'shell');
+    assert.strictEqual(call.approved, false, 'raw shell must not be auto-approved in auto mode');
+    assert.strictEqual(call.result.ok, false);
+    assert.strictEqual(call.result.error?.code, 'PERMISSION_DENIED');
   });
 
   it('blocks shell in suggest mode without approver', async () => {

@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import type { AgentState, AgentStatus } from '../agent/types.js';
 import { formatFileRef } from '../agent/workspace.js';
 import { defaultMode } from '../agent/mode.js';
-import { SLASH_COMMANDS, findSlashCommandDefinition, getSlashCommandBase, isSlashCommandAvailable, findNearestSlashCommand } from './slash-commands.js';
+import { SLASH_COMMANDS, findSlashCommandDefinition, getSlashCommandBase, isBusyStatus, findNearestSlashCommand } from './slash-commands.js';
 import type { TuiMessage } from './types.js';
 import { SessionManager, type StoredSession } from '../agent/sessions.js';
 import { SessionImportService } from '../agent/session-import.js';
@@ -677,7 +677,11 @@ export async function handleSlashCommand(command: string, args: string, context:
     return false; // Not handled locally — forward to the agent (VC-KIMI-047)
   }
 
-  if (!isSlashCommandAvailable(definition, context.status)) {
+  // Busy state is derived from the runtime's authoritative turn state (with a
+  // fallback to the UI status), never a UI boolean, so a mutating command can't
+  // slip through during a stale render (VCL-003).
+  const busy = context.getRuntime?.()?.isBusy?.() ?? isBusyStatus(context.status);
+  if (definition.availability === 'idle' && busy) {
     const { setMessages } = context;
     setMessages((prev) => [...prev, {
       id: `cmd-${prev.length + 1}`,

@@ -263,3 +263,45 @@ test('SSE parser: aborting the request signal cancels the reader cleanly (P1 str
     }
   }
 });
+
+test('an external abort during the header phase propagates as AbortError and is not retried (VCL-002)', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+
+  try {
+    process.env.VENICE_API_KEY = 'test-key';
+
+    let requestCount = 0;
+    let fetchObservedAbort = false;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      requestCount++;
+      init?.signal?.addEventListener('abort', () => { fetchObservedAbort = true; });
+      // Simulate a server that has not yet sent headers: block until the
+      // request is aborted.
+      await new Promise<void>((resolve) => {
+        if (init?.signal?.aborted) return resolve();
+        init?.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      throw new DOMException('The operation was aborted', 'AbortError');
+    }) as typeof fetch;
+
+    const controller = new AbortController();
+    const stream = chatCompletionStream([{ role: 'user', content: 'test' }], { abortSignal: controller.signal });
+    const next = stream[Symbol.asyncIterator]().next();
+
+    // Give the fetch a moment to start, then abort the turn signal.
+    await new Promise((r) => setTimeout(r, 10));
+    controller.abort();
+
+    await assert.rejects(next, (err: unknown) => err instanceof Error && err.name === 'AbortError');
+    assert.strictEqual(fetchObservedAbort, true, 'the in-flight fetch must observe the abort');
+    assert.strictEqual(requestCount, 1, 'an external abort must never be retried');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});

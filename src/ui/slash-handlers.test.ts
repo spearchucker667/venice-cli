@@ -264,6 +264,26 @@ describe('handleSlashCommand', () => {
     assert.ok(messages().some((m) => m.content.includes('only available while the agent is idle')));
   });
 
+  it('gates mutating commands on the runtime busy state even with a stale UI status (VCL-003)', async () => {
+    const { context, messages } = makeContext();
+    const busyRuntime = { isBusy: () => true } as unknown as AgentRuntime;
+    const running = { ...context, status: 'idle' as const, getRuntime: () => busyRuntime };
+
+    for (const name of ['model', 'new', 'resume', 'fork', 'plan', 'permissions', 'reload', 'import', 'delete', 'theme', 'skill', 'auto', 'yolo', 'effort', 'compact']) {
+      const handled = await handleSlashCommand(name, '', running);
+      assert.strictEqual(handled, true, `/${name} must be intercepted while the runtime is busy`);
+      assert.ok(
+        messages().some((m) => m.content.includes('only available while the agent is idle')),
+        `/${name} must report the idle-only rejection`
+      );
+    }
+
+    // Read-only commands stay available even while the runtime is busy.
+    const before = messages().length;
+    await handleSlashCommand('help', '', running);
+    assert.ok(messages().length > before, '/help must remain available while busy');
+  });
+
   it('passes a /compact hint to the runtime (VC-KIMI-049)', async () => {
     let captured: string | undefined;
     const { context, messages } = makeContext();

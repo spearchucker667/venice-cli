@@ -171,11 +171,10 @@ describe('headless -p under a pseudo-TTY (VCL-R3-007)', () => {
     { skip: process.platform === 'win32' || scriptUnavailable() },
     async () => {
       const output = await new Promise<string>((resolve, reject) => {
-        const child = spawn(
-          'script',
-          ['-q', '/dev/null', process.execPath, cli, 'agent', '-p', 'hi', '--session'],
-          { stdio: ['ignore', 'pipe', 'pipe'] }
-        );
+        const invocation = pseudoTtyScript([process.execPath, cli, 'agent', '-p', 'hi', '--session']);
+        const child = spawn(invocation.cmd, invocation.args, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
         let stdout = '';
         let stderr = '';
         child.stdout.on('data', (d) => { stdout += d; });
@@ -209,4 +208,20 @@ function scriptUnavailable(): boolean {
   } catch {
     return true;
   }
+}
+
+/**
+ * Build a `script`(1) invocation that runs `command` under a pseudo-TTY.
+ *
+ * BSD/macOS `script` accepts the command as positional args
+ * (`script -q /dev/null cmd ...`), while util-linux `script` (Linux CI)
+ * requires the command to be passed through `-c`. The command args are
+ * shell-quoted so the util-linux `-c` string survives `/bin/sh -c`.
+ */
+function pseudoTtyScript(command: string[]): { cmd: string; args: string[] } {
+  if (process.platform === 'darwin') {
+    return { cmd: 'script', args: ['-q', '/dev/null', ...command] };
+  }
+  const quoted = command.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(' ');
+  return { cmd: 'script', args: ['-q', '-c', quoted, '/dev/null'] };
 }

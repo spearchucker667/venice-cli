@@ -133,8 +133,10 @@ Defined in `src/agent/permissions.ts`:
 |------|-------|-----------------|-------|-------------|-------------|
 | `suggest` (default) | allow | prompt | prompt | prompt | prompt |
 | `auto-edit` | allow | allow | prompt | prompt | prompt |
-| `auto` | allow | allow | allow (safe) | allow | prompt |
+| `auto` | allow | allow | prompt | prompt | prompt |
 | `yolo` | allow | allow | allow | allow | prompt |
+
+`auto` auto-approves only positively-known-safe capabilities (read-only and structured write/execute tools). Raw shell is a high-power capability whose "safety" is only regex-estimated, so it is never auto-approved in `auto` — it requires a grant or explicit approval, with `yolo` as the explicit bypass (VCL-057).
 
 `outside_workspace` risk is always denied without explicit approval, and destructive commands are always intercepted.
 

@@ -95,4 +95,31 @@ describe('parseSlashCommand', () => {
     const status = findSlashCommandDefinition('status')!;
     assert.ok(isSlashCommandAvailable(status, 'thinking'));
   });
+
+  it('classifies state-mutating commands as idle-only (VCL-003)', () => {
+    const mutating = [
+      'clear', 'model', 'resume', 'delete',
+      'plan', 'plan on', 'plan off', 'plan clear',
+      'auto', 'yolo', 'effort', 'reload', 'theme',
+      'skill', 'permissions', 'new', 'fork', 'import', 'compact',
+    ];
+    for (const name of mutating) {
+      const def = findSlashCommandDefinition(name);
+      assert.ok(def, `missing metadata for /${name}`);
+      assert.strictEqual(def!.availability, 'idle', `/${name} must be idle-only`);
+    }
+
+    const readOnly = [
+      'help', 'quit', 'status', 'sessions', 'diff', 'review',
+      'plan view', 'config', 'tools', 'mcp', 'skills', 'git', 'context',
+      'clear-ui', 'title', 'export',
+    ];
+    for (const name of readOnly) {
+      assert.strictEqual(
+        findSlashCommandDefinition(name)?.availability,
+        'always',
+        `/${name} must remain available while busy`
+      );
+    }
+  });
 });

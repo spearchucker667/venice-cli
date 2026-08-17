@@ -38,6 +38,42 @@ describe('shell tool', () => {
     const result = await shellTool.execute({ command: 'sleep 10', timeoutMs: 100 }, context(os.tmpdir()));
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.data?.timedOut, true);
+    assert.strictEqual(result.data?.cancelled, false);
+  });
+
+  it('cancels the process tree when the abort signal fires (VCL-058)', { skip: process.platform === 'win32' }, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'venice-shell-abort-'));
+    const pidFile = path.join(root, 'grandchild.pid');
+    const controller = new AbortController();
+    try {
+      const run = shellTool.execute({
+        command: `bash -c '(sleep 30) & echo $! > ${pidFile}; sleep 30'`,
+        timeoutMs: 60000,
+      }, { ...context(root), signal: controller.signal });
+
+      // Let the grandchild spawn, then abort the turn signal.
+      await new Promise((r) => setTimeout(r, 200));
+      controller.abort();
+
+      const result = await run;
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.data?.cancelled, true);
+      assert.strictEqual(result.data?.timedOut, false);
+
+      // Give the SIGTERM -> SIGKILL escalation time to reap the grandchild.
+      await new Promise((r) => setTimeout(r, 400));
+      const pid = Number.parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+      assert.ok(Number.isInteger(pid) && pid > 0, 'grandchild pid was captured');
+      let alive = true;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        alive = false;
+      }
+      assert.strictEqual(alive, false, 'backgrounded grandchild must be killed on abort');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('kills the whole descendant tree on timeout (VC-KIMI-055)', { skip: process.platform === 'win32' }, async () => {

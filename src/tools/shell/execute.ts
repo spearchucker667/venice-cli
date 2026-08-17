@@ -25,6 +25,8 @@ export interface ShellOutput {
   stderr: string;
   durationMs: number;
   timedOut: boolean;
+  /** True when the runtime/turn abort signal cancelled the process tree (VCL-058). */
+  cancelled: boolean;
 }
 
 /**
@@ -126,11 +128,11 @@ export const shellTool: AgentTool<ShellInput, ShellOutput> = {
     ) {
       return 'external_side_effect';
     }
-    // Ordinary local development commands (build, test, ls, git status...)
-    // are 'execute' so `auto` mode can auto-approve them consistently with
-    // its documented semantics (VC-KIMI-057). This heuristic cannot
-    // perfectly determine safety; destructive/external patterns above are
-    // the conservative carve-outs.
+    // Ordinary local development commands are labeled 'execute' for UI risk
+    // display only. The regex heuristic cannot establish safety, so `auto`
+    // mode never auto-approves raw shell on this label (VCL-057): it requires
+    // an explicit grant, approval, or yolo. Destructive/external patterns
+    // above remain the conservative UI carve-outs.
     return 'execute';
   },
   async execute(input, context) {
@@ -148,19 +150,43 @@ export const shellTool: AgentTool<ShellInput, ShellOutput> = {
       const stdoutBuffer = new BoundedTextBuffer();
       const stderrBuffer = new BoundedTextBuffer();
       let timedOut = false;
+      let cancelled = false;
+
+      // Kill the whole descendant tree on every platform (VC-KIMI-055).
+      const killTree = () => {
+        terminateProcessTree(child);
+        setTimeout(() => forceKillProcessTree(child), 5000);
+      };
 
       const timeout = setTimeout(() => {
         timedOut = true;
-        // Kill the whole descendant tree on every platform (VC-KIMI-055).
-        terminateProcessTree(child);
-        setTimeout(() => forceKillProcessTree(child), 5000);
+        killTree();
       }, timeoutMs);
+
+      // Cancellation must terminate the subprocess tree, not just abandon it:
+      // a turn abort stops any side effects the child is still producing
+      // (VCL-058). `cancelled` is kept separate from `timedOut` so callers can
+      // tell the two terminal states apart.
+      const onAbort = () => {
+        cancelled = true;
+        killTree();
+      };
+      context.signal?.addEventListener('abort', onAbort);
+      if (context.signal?.aborted) {
+        cancelled = true;
+        killTree();
+      }
 
       child.stdout.on('data', (data) => { stdoutBuffer.append(data.toString()); });
       child.stderr.on('data', (data) => { stderrBuffer.append(data.toString()); });
 
-      child.on('close', (exitCode) => {
+      const cleanup = () => {
         clearTimeout(timeout);
+        context.signal?.removeEventListener('abort', onAbort);
+      };
+
+      child.on('close', (exitCode) => {
+        cleanup();
         const output: ShellOutput = {
           command: input.command,
           cwd,
@@ -169,12 +195,13 @@ export const shellTool: AgentTool<ShellInput, ShellOutput> = {
           stderr: stderrBuffer.toString(),
           durationMs: Date.now() - start,
           timedOut,
+          cancelled,
         };
         resolve(success(output));
       });
 
       child.on('error', (error) => {
-        clearTimeout(timeout);
+        cleanup();
         resolve(failure('SHELL_ERROR', error.message));
       });
     });
