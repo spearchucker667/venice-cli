@@ -253,6 +253,9 @@ venice chat --video https://example.com/clip.mp4 "describe this clip"
 
 # Piped context
 cat error.log | venice chat "find the root cause"
+
+# Interactive REPL on a TTY (no prompt): type exit, quit, or Ctrl-C to leave
+venice chat
 ```
 
 Capability-sensitive options fail closed: the selected model must advertise support for features such as structured output, reasoning controls, X search, TEE, or E2EE.
