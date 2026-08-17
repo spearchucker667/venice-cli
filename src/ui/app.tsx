@@ -440,8 +440,15 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     if (isRunning) {
       // Queue instead of rejecting (VC-KIMI-053): Enter while busy appends
       // the next user message, which runs after the current turn completes.
+      // The queued message carries its own resolved attachment so a queued
+      // @file mention survives the queue boundary (VCL-005/006).
       setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'user', content: resolvedText }]);
-      runtimeRef.current?.queueUserMessage(resolvedText);
+      let attachment: string | undefined;
+      if (mentions.length) {
+        addEvent(`Attached files: ${mentions.join(', ')}`);
+        attachment = await readMentionedFiles(workspaceRoot, mentions);
+      }
+      runtimeRef.current?.queueUserMessage(resolvedText, attachment);
       return;
     }
 
@@ -480,9 +487,18 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     const trimmed = rawText.trim();
     if (!trimmed || !isRunning) return false;
     // Inject into the current turn after the next tool boundary (VC-KIMI-053).
-    const { text } = resolveMentions(trimmed);
+    const { text, mentions } = resolveMentions(trimmed);
     setMessages((prev) => [...prev, { id: String(prev.length + 1), role: 'user', content: `↳ ${text}` }]);
-    runtimeRef.current?.injectUserMessage(text);
+    // Resolve the injected message's own attachment before handing it to the
+    // runtime; the runtime drains injected messages at the next tool boundary,
+    // so a short async read completes well before then (VCL-005/006).
+    void (async () => {
+      let attachment: string | undefined;
+      if (mentions.length) {
+        attachment = await readMentionedFiles(workspaceRoot, mentions);
+      }
+      runtimeRef.current?.injectUserMessage(text, attachment);
+    })();
     return true;
   };
 

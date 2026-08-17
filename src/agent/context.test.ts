@@ -150,6 +150,28 @@ describe('ContextManager', () => {
     assert.strictEqual(messages.length, 1);
     assert.strictEqual(messages[0].role, 'system');
   });
+
+  it('compaction preserves the active turn file context (VCL-007)', () => {
+    const ctx = new ContextManager();
+    ctx.addConversationMessage({ role: 'user', content: 'review this' });
+    ctx.setFileContext([{ role: 'user', content: 'UNTRUSTED ATTACHED SOURCE DATA\nMARKER_FROM_ATTACHED_FILE' }]);
+    ctx.compact({
+      objective: 'test',
+      completedWork: ['old work'],
+      remainingWork: [],
+      decisions: [],
+      discoveries: [],
+      filesRead: [],
+      filesChanged: [],
+      commandsRun: [],
+      failures: [],
+      importantConstraints: [],
+    });
+    const messages = ctx.buildMessages();
+    // The attachment message (index 1, after the system message) survives.
+    const fileContext = messages.filter((m) => String(m.content).includes('MARKER_FROM_ATTACHED_FILE'));
+    assert.strictEqual(fileContext.length, 1, 'active turn attachment must survive compaction');
+  });
 });
 
 describe('buildStructuredSummary', () => {

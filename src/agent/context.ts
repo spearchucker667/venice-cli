@@ -196,6 +196,10 @@ export class ContextManager {
   }
 
   shouldCompact(): boolean {
+    // A zero/unknown budget must never trigger destructive compaction — it is
+    // not a valid budget (VCL-008). Only a positively-known limit can make
+    // compaction eligible.
+    if (this.budget.maxTokens <= 0) return false;
     const available = this.budget.maxTokens - this.budget.reservedCompletionTokens;
     return this.estimateTokens() > available * this.budget.compactionThreshold;
   }
@@ -212,7 +216,9 @@ export class ContextManager {
     }
 
     this.conversation = this.conversation.slice(startIndex);
-    this.fileContext = [];
+    // The active turn's attachment (fileContext) is ephemeral turn payload,
+    // not durable history; compaction must not erase it (VCL-007). It is
+    // replaced explicitly at each turn boundary by the runtime.
   }
 
   private renderSummary(summary: StructuredSummary): string {

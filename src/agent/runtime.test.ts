@@ -14,7 +14,7 @@ import { shellTool } from '../tools/shell/execute.js';
 import type { AgentTool } from '../tools/types.js';
 import { VeniceModelClient, UNKNOWN_CONTEXT_LIMIT } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
-import type { AgentMessage } from './types.js';
+import type { AgentMessage, AgentState } from './types.js';
 import { McpManager } from '../mcp/manager.js';
 import { ModelCatalog } from './model-catalog.js';
 import { EventBus } from './events.js';
@@ -1014,6 +1014,79 @@ describe('AgentRuntime', () => {
     });
     runtime.injectUserMessage('idle note');
     assert.strictEqual(runtime.getQueuedMessageCount(), 1, 'idle injection falls back to the queue');
+  });
+
+  it('carries a queued @file attachment across the queue boundary (VCL-005)', async () => {
+    const client = new RecordingModelClient([
+      { content: 'first', finishReason: 'stop' },
+      { content: 'queued', finishReason: 'stop' },
+    ]);
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Queue attachment',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: client,
+    });
+    runtime.queueUserMessage('review the file', 'MARKER_FROM_QUEUED_ATTACHMENT');
+    await runtime.sendUserMessage('first');
+    // The queued turn (second model request) must carry its own attachment.
+    const secondRequest = (client.seenMessages[1] ?? []).map((m) => String(m.content)).join('\n');
+    assert.ok(secondRequest.includes('MARKER_FROM_QUEUED_ATTACHMENT'), 'queued attachment must reach its own turn');
+  });
+
+  it('does not leak a prior turn attachment into an attachment-less queued turn (VCL-006)', async () => {
+    const client = new RecordingModelClient([
+      { content: 'first', finishReason: 'stop' },
+      { content: 'queued', finishReason: 'stop' },
+    ]);
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'No leak',
+      approvalMode: 'auto-edit',
+      maxTurns: 5,
+      modelClient: client,
+    });
+    runtime.queueUserMessage('plain follow-up'); // no attachment
+    await runtime.sendUserMessage('first', 'MARKER_FROM_TURN_A');
+    // The second (queued) turn must not observe the first turn's attachment.
+    const secondRequest = (client.seenMessages[1] ?? []).map((m) => String(m.content)).join('\n');
+    assert.ok(!secondRequest.includes('MARKER_FROM_TURN_A'), 'attachment must not leak into the next turn');
+  });
+
+  it('re-applies the restored model profile context budget on resume (VCL-008)', () => {
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Resume budget',
+      modelClient: new MockModelClient([]),
+    });
+    assert.strictEqual(runtime.getContextManager().getMaxTokens(), 0, 'fresh context has no limit');
+    const persisted = runtime.getState();
+    const state: AgentState = {
+      ...persisted,
+      modelProfile: { id: persisted.model, mode: 'agent', contextLimit: 64000 },
+    };
+    runtime.loadState(state);
+    assert.strictEqual(runtime.getContextManager().getMaxTokens(), 64000, 'resume must re-apply the persisted budget');
+  });
+
+  it('fails closed to chat-only when profile discovery throws (VCL-009)', async () => {
+    class ThrowingProfileClient extends VeniceModelClient {
+      async getModelProfile(): Promise<ModelProfile | undefined> {
+        throw new Error('catalog unavailable');
+      }
+    }
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Discovery failure',
+      approvalMode: 'auto-edit',
+      modelClient: new ThrowingProfileClient({ model: 'unknown' }),
+    });
+    await runtime.refreshModelProfile();
+    // A network failure during discovery is indistinguishable from an unknown
+    // ID and must not fail open to a tool-enabled path.
+    assert.strictEqual(runtime.getState().agentMode, 'chat-only');
+    assert.strictEqual(runtime.getContextManager().getMaxTokens(), UNKNOWN_CONTEXT_LIMIT);
   });
 
   it('collects a real answer for ask_user (VC-KIMI-058)', async () => {
