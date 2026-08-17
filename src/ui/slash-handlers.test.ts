@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { handleSlashCommand, SLASH_HANDLERS } from './slash-handlers.js';
+import { handleSlashCommand, SLASH_HANDLERS, type SlashHandlerContext } from './slash-handlers.js';
 import { SLASH_COMMANDS, getSlashCommandBase } from './slash-commands.js';
 import type { TuiMessage } from './types.js';
 import type { AgentRuntime } from '../agent/runtime.js';
@@ -79,6 +79,7 @@ describe('handleSlashCommand', () => {
     assert.ok(messages().some((m) => m.content.includes('kimi-k2.5')));
     assert.ok(messages().some((m) => m.content.includes('/tmp')));
   });
+
 
   it('handles /model with argument', async () => {
     const { context, messages, currentModel } = makeContext();
@@ -294,5 +295,114 @@ describe('handleSlashCommand', () => {
     await handleSlashCommand('compact', 'focus on the parser', withRuntime);
     assert.strictEqual(captured, 'focus on the parser');
     assert.ok(messages().some((m) => m.content.includes('Context compacted with hint: focus on the parser')));
+  });
+
+  it('sets the primary API key via /config api-key without echoing the secret', async () => {
+    const writes: Array<[string, string]> = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).setConfigKey = (key, value) => { writes.push([key, value]); };
+
+    await handleSlashCommand('config', 'api-key sk-super-secret-1234567890', context);
+    assert.deepStrictEqual(writes, [['api_key', 'sk-super-secret-1234567890']]);
+    const content = messages().map((m) => m.content).join('\n');
+    assert.ok(content.includes('Primary API key set'), 'confirms the update');
+    assert.ok(!content.includes('sk-super-secret-1234567890'), 'the raw key must never be echoed');
+  });
+
+  it('sets the fallback API key via /config fallback-api-key without echoing the secret', async () => {
+    const writes: Array<[string, string]> = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).setConfigKey = (key, value) => { writes.push([key, value]); };
+
+    await handleSlashCommand('config', 'fallback-api-key sk-fallback-0987654321', context);
+    assert.deepStrictEqual(writes, [['fallback_api_key', 'sk-fallback-0987654321']]);
+    const content = messages().map((m) => m.content).join('\n');
+    assert.ok(content.includes('Fallback API key set'), 'confirms the update');
+    assert.ok(!content.includes('sk-fallback-0987654321'), 'the raw key must never be echoed');
+  });
+
+  it('clears API keys via /config clear-* subcommands', async () => {
+    const deletes: string[] = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).deleteConfigKey = (key) => { deletes.push(key); };
+
+    await handleSlashCommand('config', 'clear-api-key', context);
+    assert.deepStrictEqual(deletes, ['api_key']);
+    await handleSlashCommand('config', 'clear-fallback-api-key', context);
+    assert.deepStrictEqual(deletes, ['api_key', 'fallback_api_key']);
+    assert.ok(messages().some((m) => m.content.includes('Primary API key removed')));
+    assert.ok(messages().some((m) => m.content.includes('Fallback API key removed')));
+  });
+
+  it('shows the /config hub with authentication status', async () => {
+    const { context, messages } = makeContext();
+    await handleSlashCommand('config', '', context);
+    const content = messages().map((m) => m.content).join('\n');
+    assert.ok(content.includes('Configuration Hub:'));
+    assert.ok(content.includes('Authentication:'));
+    assert.ok(content.includes('/config api-key <key>'));
+  });
+
+  it('collects the primary key via the hidden prompt when /config api-key has no value', async () => {
+    const writes: Array<[string, string]> = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).setConfigKey = (key, value) => { writes.push([key, value]); };
+    (context as SlashHandlerContext).requestSecret = async ({ title }) => {
+      assert.ok(/primary/i.test(title), 'labels the primary-key prompt');
+      return 'sk-from-prompt-1234567890';
+    };
+
+    await handleSlashCommand('config', 'api-key', context);
+    assert.deepStrictEqual(writes, [['api_key', 'sk-from-prompt-1234567890']]);
+    const content = messages().map((m) => m.content).join('\n');
+    assert.ok(content.includes('Primary API key set'), 'confirms the update');
+    assert.ok(!content.includes('sk-from-prompt-1234567890'), 'the raw key must never be echoed');
+  });
+
+  it('collects the fallback key via the hidden prompt when no value is given', async () => {
+    const writes: Array<[string, string]> = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).setConfigKey = (key, value) => { writes.push([key, value]); };
+    (context as SlashHandlerContext).requestSecret = async ({ title }) => {
+      assert.ok(/fallback/i.test(title), 'labels the fallback-key prompt');
+      return 'sk-fallback-from-prompt-54321';
+    };
+
+    await handleSlashCommand('config', 'fallback-api-key', context);
+    assert.deepStrictEqual(writes, [['fallback_api_key', 'sk-fallback-from-prompt-54321']]);
+    const content = messages().map((m) => m.content).join('\n');
+    assert.ok(content.includes('Fallback API key set'));
+    assert.ok(!content.includes('sk-fallback-from-prompt-54321'), 'the raw key must never be echoed');
+  });
+
+  it('cancelling the secret prompt leaves the key unchanged', async () => {
+    const writes: Array<[string, string]> = [];
+    const { context, messages } = makeContext();
+    (context as SlashHandlerContext).setConfigKey = (key, value) => { writes.push([key, value]); };
+    (context as SlashHandlerContext).requestSecret = async () => undefined;
+
+    await handleSlashCommand('config', 'fallback-api-key', context);
+    assert.deepStrictEqual(writes, []);
+    assert.ok(messages().some((m) => m.content.includes('Cancelled — fallback API key unchanged')));
+  });
+
+  it('shows usage for /config api-key when no secret prompt is available', async () => {
+    const { context, messages } = makeContext();
+    await handleSlashCommand('config', 'api-key', context);
+    assert.ok(messages().some((m) => m.content.includes('Usage: /config api-key')));
+  });
+
+  it('rejects unknown /config subcommands with usage', async () => {
+    const { context, messages } = makeContext();
+    await handleSlashCommand('config', 'bogus', context);
+    assert.ok(messages().some((m) => m.content.includes('Unknown /config subcommand: bogus')));
+  });
+
+  it('shows the active credential and fallback status in /status', async () => {
+    const { context, messages } = makeContext();
+    await handleSlashCommand('status', '', context);
+    const content = messages().map((m) => m.content).join('\n');
+    assert.ok(content.includes('Auth:'), 'reports the active credential');
+    assert.ok(content.includes('Approval Mode:'), 'keeps the existing status fields');
   });
 });

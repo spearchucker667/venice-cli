@@ -62,12 +62,14 @@ export class SecretRedactor {
 export function collectKnownSecrets(): string[] {
   const secrets: string[] = [];
   if (process.env.VENICE_API_KEY) secrets.push(process.env.VENICE_API_KEY);
+  if (process.env.VENICE_API_KEY_FALLBACK) secrets.push(process.env.VENICE_API_KEY_FALLBACK);
   if (process.env.GITHUB_TOKEN) secrets.push(process.env.GITHUB_TOKEN);
   if (process.env.NPM_TOKEN) secrets.push(process.env.NPM_TOKEN);
   
   try {
     const config = loadConfig();
     if (config.api_key) secrets.push(config.api_key);
+    if (config.fallback_api_key) secrets.push(config.fallback_api_key);
   } catch {
     // Ignore config loading errors to prevent breaking redactor
   }

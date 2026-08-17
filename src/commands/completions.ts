@@ -148,6 +148,10 @@ _venice_completion() {
             COMPREPLY=( \$(compgen -W "\${config_cmds}" -- "\${cur}") )
             return 0
             ;;
+        set|get|unset)
+            COMPREPLY=( \$(compgen -W "api_key fallback_api_key signInWithX default_model default_image_model default_voice output_format no_color show_usage media_safe_mode theme" -- "\${cur}") )
+            return 0
+            ;;
         history)
             COMPREPLY=( \$(compgen -W "\${history_cmds}" -- "\${cur}") )
             return 0
@@ -630,6 +634,24 @@ ${program.commands
                         'init:Initialize config'
                     )
                     _describe -t config_cmds 'config commands' config_cmds
+                    case "\${words[3]}" in
+                        set|get|unset)
+                            local -a config_keys=(
+                                'api_key:Primary API key'
+                                'fallback_api_key:Secondary fallback API key'
+                                'signInWithX:Wallet token'
+                                'default_model:Default chat model'
+                                'default_image_model:Default image model'
+                                'default_voice:Default voice'
+                                'output_format:Output format'
+                                'no_color:Disable color'
+                                'show_usage:Show usage stats'
+                                'media_safe_mode:Media safe mode'
+                                'theme:UI theme'
+                            )
+                            _describe -t config_keys 'config keys' config_keys
+                            ;;
+                    esac
                     ;;
                 history)
                     local -a history_cmds=(
@@ -873,6 +895,7 @@ complete -c venice -n "__fish_seen_subcommand_from config" -a get -d "Get value"
 complete -c venice -n "__fish_seen_subcommand_from config" -a unset -d "Remove value"
 complete -c venice -n "__fish_seen_subcommand_from config" -a path -d "Config path"
 complete -c venice -n "__fish_seen_subcommand_from config" -a init -d "Initialize"
+complete -c venice -n "__fish_seen_subcommand_from config; and __fish_seen_subcommand_from set get unset" -a "api_key fallback_api_key signInWithX default_model default_image_model default_voice output_format no_color show_usage media_safe_mode theme" -d "Config key"
 
 # History subcommands
 complete -c venice -n "__fish_seen_subcommand_from history" -a list -d "List history"

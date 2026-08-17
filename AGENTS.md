@@ -153,6 +153,7 @@ Configuration precedence (highest first):
 Useful environment variables:
 
 - `VENICE_API_KEY` — overrides any stored API key.
+- `VENICE_API_KEY_FALLBACK` — secondary key; used automatically when the primary key is missing or rejected (401/403).
 - `NO_COLOR` / `venice --no-color` — disables colored output.
 - `X_SIGN_IN_WITH_X` — wallet-token alternative to API key.
 - `VENICE_API_BASE_URL` — redirected to only in `NODE_ENV=test` (used by tests).

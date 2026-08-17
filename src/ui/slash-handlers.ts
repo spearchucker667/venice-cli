@@ -15,6 +15,7 @@ import { gitStatusTool } from '../tools/git/status.js';
 import type { ToolContext } from '../tools/types.js';
 import type { ApprovalMode } from '../agent/permissions.js';
 import type { ModelProfile } from '../agent/model-profile.js';
+import type { ConfigKey } from '../lib/config.js';
 
 function formatSessionAsMarkdown(state: AgentState): string {
   const lines: string[] = [];
@@ -59,6 +60,12 @@ export interface SlashHandlerContext {
   listSessions?: () => StoredSession[];
   /** Delete a saved session (defaults to SessionManager.delete). */
   deleteSession?: (sessionId: string, expectedWorkspace?: string) => boolean;
+  /** Write a config value (defaults to setConfigValue). Injectable for tests. */
+  setConfigKey?: (key: ConfigKey, value: string) => void;
+  /** Remove a config value (defaults to deleteConfigValue). Injectable for tests. */
+  deleteConfigKey?: (key: ConfigKey) => void;
+  /** Prompt for a secret with masked input (resolves undefined when cancelled). */
+  requestSecret?: (options: { title: string; prompt: string }) => Promise<string | undefined>;
   mcpManager?: McpManager;
   getRuntime?: () => AgentRuntime | undefined;
 }
@@ -108,14 +115,29 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
   },
 
   async status(_args, { addEvent, getRuntime, model, workspaceRoot, status, approvalMode }) {
+    const m = await import('../lib/config.js');
     const runtime = getRuntime?.();
     const state = runtime?.getState();
+    const envKey = process.env.VENICE_API_KEY;
+    const config = m.loadConfig();
+    const activeKey = envKey ?? config.api_key ?? config.fallback_api_key;
+    const source = envKey
+      ? 'environment'
+      : config.api_key
+        ? 'config'
+        : config.fallback_api_key
+          ? 'config (fallback)'
+          : undefined;
     const lines = [
       `Model: ${model}`,
       `Workspace: ${workspaceRoot}`,
       `Status: ${status}`,
       `Approval Mode: ${approvalMode}`,
+      `Auth: ${activeKey ? `${m.maskSecretValue(activeKey)} (${source})` : 'not set'}`,
     ];
+    if (config.fallback_api_key && config.fallback_api_key !== activeKey) {
+      lines.push(`Fallback Key: ${m.maskSecretValue(config.fallback_api_key)} (config)`);
+    }
     if (state) {
       lines.push(`Session ID: ${state.sessionId}`);
       lines.push(`Changed Files: ${state.changedFiles.length}`);
@@ -388,24 +410,117 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
     await SLASH_HANDLERS.permissions('yolo', context);
   },
 
-  async config(_args, { addEvent, workspaceRoot }) {
-    await import('../lib/config.js').then((m) => {
-      const config = m.loadConfig();
-      addEvent(
-        `Configuration Hub:\n` +
-        `  • Global CLI config: ~/.venice/config.json\n` +
-        `  • Workspace config: ${workspaceRoot}/.venice/config.json\n` +
-        `  • MCP servers: ~/.venice/mcp.json and ${workspaceRoot}/.venice/mcp.json\n` +
-        `  • Skills: ~/.venice/skills/ and ${workspaceRoot}/.venice/skills/\n\n` +
-        `Current Configuration:\n` +
-        `  Model: ${config.default_model || 'not set'}\n` +
-        `  Image Model: ${config.default_image_model || 'not set'}\n` +
-        `  Output Format: ${config.output_format || 'pretty'}\n` +
-        `  Theme: ${config.theme || 'default'}\n` +
-        `  Media Safe Mode: ${config.media_safe_mode === false ? 'disabled' : 'enabled'}\n` +
-        `Use 'venice config' command to manage base CLI settings.`
-      );
-    });
+  async config(args, { addEvent, workspaceRoot, setConfigKey, deleteConfigKey, requestSecret }) {
+    const m = await import('../lib/config.js');
+    const writeKey = setConfigKey ?? m.setConfigValue;
+    const removeKey = deleteConfigKey ?? m.deleteConfigValue;
+
+    const parts = args.trim().split(/\s+/);
+    const sub = parts[0]?.toLowerCase() ?? '';
+    const value = parts.slice(1).join(' ').trim();
+
+    switch (sub) {
+      case 'api-key':
+      case 'apikey':
+      case 'key': {
+        let key = value;
+        if (!key) {
+          if (!requestSecret) {
+            addEvent(
+              'Usage: /config api-key <value> — set the primary Venice API key\n' +
+              'Get one at https://venice.ai/settings/api. Stored in ~/.venice/config.json; used from the next request.'
+            );
+            return;
+          }
+          key = (await requestSecret({
+            title: 'Set primary Venice API key',
+            prompt: 'Paste your API key (get one at https://venice.ai/settings/api). It is stored in ~/.venice/config.json and used from the next request.',
+          }))?.trim() ?? '';
+          if (!key) {
+            addEvent('Cancelled — primary API key unchanged.');
+            return;
+          }
+        }
+        writeKey('api_key', key);
+        addEvent(`Primary API key set (${m.maskSecretValue(key)}). It will be used from the next request.`);
+        return;
+      }
+
+      case 'fallback-api-key':
+      case 'fallback':
+      case 'fallbackkey': {
+        let key = value;
+        if (!key) {
+          if (!requestSecret) {
+            addEvent(
+              'Usage: /config fallback-api-key <key> — set the secondary Venice API key\n' +
+              'The fallback key is used automatically when the primary key is missing or rejected by the API.'
+            );
+            return;
+          }
+          key = (await requestSecret({
+            title: 'Set fallback Venice API key',
+            prompt: 'Paste the secondary API key. It is used automatically when the primary key is missing or rejected (401/403).',
+          }))?.trim() ?? '';
+          if (!key) {
+            addEvent('Cancelled — fallback API key unchanged.');
+            return;
+          }
+        }
+        writeKey('fallback_api_key', key);
+        addEvent(`Fallback API key set (${m.maskSecretValue(key)}). It is used automatically if the primary key is missing or rejected.`);
+        return;
+      }
+
+      case 'clear-api-key':
+        removeKey('api_key');
+        addEvent('Primary API key removed from config. Set one with /config api-key <key>.');
+        return;
+
+      case 'clear-fallback-api-key':
+        removeKey('fallback_api_key');
+        addEvent('Fallback API key removed from config.');
+        return;
+
+      case '': {
+        const config = m.loadConfig();
+        const envKey = process.env.VENICE_API_KEY;
+        const activeKey = envKey || config.api_key || config.fallback_api_key;
+        const primarySource = envKey
+          ? 'environment (VENICE_API_KEY)'
+          : config.api_key
+            ? 'global config'
+            : config.fallback_api_key
+              ? 'global config (fallback key, no primary set)'
+              : 'not set';
+        addEvent(
+          `Configuration Hub:\n` +
+          `  • Global CLI config: ~/.venice/config.json\n` +
+          `  • Workspace config: ${workspaceRoot}/.venice/config.json\n` +
+          `  • MCP servers: ~/.venice/mcp.json and ${workspaceRoot}/.venice/mcp.json\n` +
+          `  • Skills: ~/.venice/skills/ and ${workspaceRoot}/.venice/skills/\n\n` +
+          `Authentication:\n` +
+          `  API Key: ${activeKey ? m.maskSecretValue(activeKey) : '(not set)'} — ${primarySource}\n` +
+          `  Fallback API Key: ${config.fallback_api_key ? m.maskSecretValue(config.fallback_api_key) : '(not set)'}\n\n` +
+          `Current Configuration:\n` +
+          `  Model: ${config.default_model || 'not set'}\n` +
+          `  Image Model: ${config.default_image_model || 'not set'}\n` +
+          `  Output Format: ${config.output_format || 'pretty'}\n` +
+          `  Theme: ${config.theme || 'default'}\n` +
+          `  Media Safe Mode: ${config.media_safe_mode === false ? 'disabled' : 'enabled'}\n\n` +
+          `Set your keys here: /config api-key <key>  ·  /config fallback-api-key <key>\n` +
+          `(or use 'venice config' for non-secret base CLI settings.)`
+        );
+        return;
+      }
+
+      default:
+        addEvent(
+          `Unknown /config subcommand: ${sub}\n` +
+          `Available: /config (overview), /config api-key <key>, /config fallback-api-key <key>,\n` +
+          `/config clear-api-key, /config clear-fallback-api-key`
+        );
+    }
   },
 
   async effort(args, { addEvent, getRuntime }) {
@@ -698,7 +813,7 @@ export async function handleSlashCommand(command: string, args: string, context:
   const handler = SLASH_HANDLERS[getSlashCommandBase(definition.name)];
   if (!handler) return false;
 
-  const { setMessages, status, model, approvalMode, setApprovalMode, workspaceRoot, setModel, showModelPicker, showSessionPicker, resumeSession, listSessions, deleteSession, refreshTheme, mcpManager, getRuntime } = context;
+  const { setMessages, status, model, approvalMode, setApprovalMode, workspaceRoot, setModel, showModelPicker, showSessionPicker, resumeSession, listSessions, deleteSession, setConfigKey, deleteConfigKey, requestSecret, refreshTheme, mcpManager, getRuntime } = context;
 
   const addEvent = (content: string) => {
     setMessages((prev) => [...prev, { id: `cmd-${prev.length + 1}`, role: 'event', content }]);
@@ -728,6 +843,9 @@ export async function handleSlashCommand(command: string, args: string, context:
     resumeSession,
     listSessions,
     deleteSession,
+    setConfigKey,
+    deleteConfigKey,
+    requestSecret,
     refreshTheme,
     mcpManager,
     getRuntime,

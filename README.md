@@ -94,7 +94,7 @@ Then work naturally:
 > generate a README image and save it under docs/assets
 ```
 
-Use `@file` to attach workspace context, `!command` to request an explicit shell command, and slash commands such as `/model`, `/status`, `/permissions`, `/sessions`, and `/help` to control the session.
+Use `@file` to attach workspace context, `!command` to request an explicit shell command, and slash commands such as `/model`, `/status`, `/permissions`, `/sessions`, and `/help` to control the session. Set or rotate your Venice API key without leaving the session with `/config api-key <key>` (and a secondary fallback key via `/config fallback-api-key <key>`).
 
 ## Interactive greeting
 
@@ -404,6 +404,7 @@ On POSIX systems, the CLI restricts its configuration directory and file permiss
 | Variable | Purpose |
 | --- | --- |
 | `VENICE_API_KEY` | API key; overrides the stored configuration value |
+| `VENICE_API_KEY_FALLBACK` | Secondary Venice API key; used automatically when the primary key is missing or rejected (401/403) |
 | `NO_COLOR` | Disable colored terminal output |
 | `VENICE_NO_ANIMATION=1` | Disable the interactive Venice greeting animation and render its stable frame immediately |
 

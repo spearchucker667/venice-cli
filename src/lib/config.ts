@@ -26,6 +26,7 @@ const CONFIG_SCHEMA = {
   type: 'object',
   properties: {
     api_key: { type: 'string' },
+    fallback_api_key: { type: 'string' },
     signInWithX: { type: 'string' },
     default_model: { type: 'string' },
     default_image_model: { type: 'string' },
@@ -157,12 +158,28 @@ export function deleteConfigValue(key: keyof VeniceConfig): void {
 }
 
 export function getApiKey(): string | undefined {
-  // Priority: env var > config file
+  // Priority: env var > config file primary key > config fallback key. The
+  // fallback key doubles as the active credential when no primary is stored,
+  // so a user who only configured `/config fallback-api-key` still works.
   const envKey = process.env.VENICE_API_KEY;
   if (envKey) return envKey;
-  
+
   const config = loadConfig();
-  return config.api_key;
+  return config.api_key || config.fallback_api_key;
+}
+
+/**
+ * The secondary Venice API key, if configured. Never returns the primary key
+ * (or `VENICE_API_KEY`): callers use this only as a retry credential when the
+ * active key was rejected. The `VENICE_API_KEY_FALLBACK` env var overrides the
+ * config value, mirroring `VENICE_API_KEY`.
+ */
+export function getFallbackApiKey(): string | undefined {
+  const envKey = process.env.VENICE_API_KEY_FALLBACK;
+  if (envKey) return envKey;
+
+  const config = loadConfig();
+  return config.fallback_api_key;
 }
 
 export function getSignInWithX(): string | undefined {
@@ -196,6 +213,22 @@ export function getVeniceAuth(): VeniceAuth | undefined {
   if (signInWithX) return { kind: 'sign-in-with-x', value: signInWithX };
 
   return undefined;
+}
+
+/**
+ * The fallback credential usable after the active credential is rejected.
+ * Returns `undefined` when no fallback key is configured, or when the fallback
+ * key is already the active credential (nothing left to fall back to).
+ */
+export function getFallbackVeniceAuth(): VeniceAuth | undefined {
+  const key = getFallbackApiKey();
+  if (!key) return undefined;
+
+  const active = getVeniceAuth();
+  if (active?.kind === 'api-key' && active.value === key) {
+    return undefined;
+  }
+  return { kind: 'api-key', value: key };
 }
 
 export function applyVeniceAuth(
@@ -330,6 +363,7 @@ export function getDefaultVoice(): string {
  */
 export const CONFIG_KEY_METADATA = {
   api_key: { secret: true },
+  fallback_api_key: { secret: true },
   signInWithX: { secret: true },
   default_model: { secret: false },
   default_image_model: { secret: false },

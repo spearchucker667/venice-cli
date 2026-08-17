@@ -3,13 +3,20 @@ import assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { loadProjectConfig, validateConfigShape } from './config.js';
+import {
+  loadProjectConfig,
+  validateConfigShape,
+  getApiKey,
+  getFallbackApiKey,
+  getFallbackVeniceAuth,
+} from './config.js';
 
 describe('validateConfigShape (P2 config schema)', () => {
   it('accepts a well-formed config', () => {
     assert.deepStrictEqual(
       validateConfigShape({
         api_key: 'vnc_x',
+        fallback_api_key: 'vnc_y',
         default_model: 'kimi-k2-5',
         output_format: 'json',
         no_color: true,
@@ -28,6 +35,11 @@ describe('validateConfigShape (P2 config schema)', () => {
     assert.ok(problems.some((p) => p.includes('no_color')), problems.join('; '));
     assert.ok(problems.some((p) => p.includes('output_format')), problems.join('; '));
     assert.ok(problems.some((p) => p.includes('show_usage')), problems.join('; '));
+  });
+
+  it('rejects a non-string fallback_api_key', () => {
+    const problems = validateConfigShape({ fallback_api_key: 42 });
+    assert.ok(problems.some((p) => p.includes('fallback_api_key')), problems.join('; '));
   });
 
   it('rejects a non-object config', () => {
@@ -118,5 +130,41 @@ describe('loadProjectConfig (VCL-R3-010)', () => {
       return;
     }
     assert.deepStrictEqual(loadProjectConfig(tmp), {});
+  });
+});
+
+describe('fallback API key resolution (env-only, no config writes)', () => {
+  const savedKey = process.env.VENICE_API_KEY;
+  const savedFallback = process.env.VENICE_API_KEY_FALLBACK;
+
+  after(() => {
+    if (savedKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = savedKey;
+    if (savedFallback === undefined) delete process.env.VENICE_API_KEY_FALLBACK;
+    else process.env.VENICE_API_KEY_FALLBACK = savedFallback;
+  });
+
+  it('prefers the primary env key over the fallback env key', () => {
+    process.env.VENICE_API_KEY = 'primary';
+    process.env.VENICE_API_KEY_FALLBACK = 'fallback';
+    assert.strictEqual(getApiKey(), 'primary');
+  });
+
+  it('reads the fallback key from its env var', () => {
+    process.env.VENICE_API_KEY = 'primary';
+    process.env.VENICE_API_KEY_FALLBACK = 'fallback';
+    assert.strictEqual(getFallbackApiKey(), 'fallback');
+  });
+
+  it('getFallbackVeniceAuth returns the fallback credential when it differs from the active key', () => {
+    process.env.VENICE_API_KEY = 'primary';
+    process.env.VENICE_API_KEY_FALLBACK = 'fallback';
+    assert.deepStrictEqual(getFallbackVeniceAuth(), { kind: 'api-key', value: 'fallback' });
+  });
+
+  it('getFallbackVeniceAuth returns undefined when the fallback equals the active key', () => {
+    process.env.VENICE_API_KEY = 'same-key';
+    process.env.VENICE_API_KEY_FALLBACK = 'same-key';
+    assert.strictEqual(getFallbackVeniceAuth(), undefined);
   });
 });

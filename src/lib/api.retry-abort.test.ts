@@ -1,11 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apiRequest } from './api.js';
+import { fetchWithAuthFallback } from './transport.js';
 
 function jsonError(status: number, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify({ error: { message: 'boom' } }), {
     status,
     headers: { 'Content-Type': 'application/json', ...headers },
+  });
+}
+
+function jsonOk(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
   });
 }
 
@@ -35,6 +43,98 @@ test('R2-004: cancellation during Retry-After backoff unwinds promptly without r
     globalThis.fetch = originalFetch;
     if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
     else process.env.VENICE_API_KEY = originalApiKey;
+  }
+});
+
+test('auth rejection is retried once with the fallback API key', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const originalFallback = process.env.VENICE_API_KEY_FALLBACK;
+  process.env.VENICE_API_KEY = 'primary-key';
+  process.env.VENICE_API_KEY_FALLBACK = 'fallback-key';
+
+  const authorizations: Array<string | null> = [];
+  let fetchCalls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    fetchCalls++;
+    const headers = new Headers((init?.headers ?? {}) as Record<string, string>);
+    authorizations.push(headers.get('authorization'));
+    return fetchCalls === 1 ? jsonError(401) : jsonOk({ ok: true });
+  }) as typeof fetch;
+
+  try {
+    const result = await apiRequest<{ ok: boolean }>('/models', { method: 'GET', retries: 0 });
+    assert.deepEqual(result, { ok: true });
+    assert.equal(fetchCalls, 2, 'exactly one retry with the fallback credential');
+    assert.equal(authorizations[0], 'Bearer primary-key');
+    assert.equal(authorizations[1], 'Bearer fallback-key');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+    if (originalFallback === undefined) delete process.env.VENICE_API_KEY_FALLBACK;
+    else process.env.VENICE_API_KEY_FALLBACK = originalFallback;
+  }
+});
+
+test('fetchWithAuthFallback retries direct media fetches with the fallback key', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const originalFallback = process.env.VENICE_API_KEY_FALLBACK;
+  process.env.VENICE_API_KEY = 'primary-key';
+  process.env.VENICE_API_KEY_FALLBACK = 'fallback-key';
+
+  const authorizations: Array<string | null> = [];
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    const headers = new Headers((init?.headers ?? {}) as Record<string, string>);
+    authorizations.push(headers.get('authorization'));
+    return calls === 1 ? jsonError(401) : jsonOk({ ok: true });
+  }) as typeof fetch;
+
+  try {
+    const response = await fetchWithAuthFallback('https://api.venice.ai/api/v1/audio/speech', {
+      method: 'POST',
+    });
+    assert.equal(response.status, 200);
+    assert.equal(calls, 2, 'exactly one retry with the fallback credential');
+    assert.deepStrictEqual(authorizations, ['Bearer primary-key', 'Bearer fallback-key']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+    if (originalFallback === undefined) delete process.env.VENICE_API_KEY_FALLBACK;
+    else process.env.VENICE_API_KEY_FALLBACK = originalFallback;
+  }
+});
+
+test('auth rejection never retries when the fallback key equals the active credential', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+  const originalFallback = process.env.VENICE_API_KEY_FALLBACK;
+  // Primary and fallback are the same key, so there is nothing to fall back to.
+  process.env.VENICE_API_KEY = 'fallback-key';
+  process.env.VENICE_API_KEY_FALLBACK = 'fallback-key';
+
+  let fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls++;
+    return jsonError(401);
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      apiRequest('/models', { method: 'GET', retries: 0 }),
+      /Authentication failed/
+    );
+    assert.equal(fetchCalls, 1, 'an identical fallback credential must not trigger a retry');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = originalApiKey;
+    if (originalFallback === undefined) delete process.env.VENICE_API_KEY_FALLBACK;
+    else process.env.VENICE_API_KEY_FALLBACK = originalFallback;
   }
 });
 

@@ -9,8 +9,10 @@
 
 import {
   getVeniceAuth,
+  getFallbackVeniceAuth,
   requireAuth,
   applyVeniceAuth,
+  type VeniceAuth,
 } from './config.js';
 import { startSpinner, stopSpinner } from './output.js';
 import { getVersion } from './version.js';
@@ -120,7 +122,8 @@ function applyStatusContract(error: VeniceApiError, status: number, retryAfter?:
  */
 export function getHeaders(
   authenticated = true,
-  contentType = 'application/json'
+  contentType = 'application/json',
+  authOverride?: VeniceAuth
 ): Record<string, string> {
   const headers: Record<string, string> = {
     'User-Agent': `venice-cli/${getVersion()}`,
@@ -129,7 +132,7 @@ export function getHeaders(
     headers['Content-Type'] = contentType;
   }
   if (authenticated) {
-    const auth = getVeniceAuth();
+    const auth = authOverride ?? getVeniceAuth();
     if (!auth) {
       // Trigger the throw for missing auth
       requireAuth();
@@ -138,6 +141,52 @@ export function getHeaders(
     }
   }
   return headers;
+}
+
+/**
+ * Fetch a Venice API endpoint with standard auth headers, retrying once with
+ * the configured fallback key when the primary credential is rejected
+ * (401/403). Mirrors the auth-fallback in `apiRequest` for endpoints that
+ * fetch directly (media upload/download, video retrieve, augment).
+ *
+ * `init.headers` (if any) are merged over the generated auth headers so
+ * multipart callers can set `Content-Type`/`Content-Length` without losing
+ * the Authorization header.
+ */
+export async function fetchWithAuthFallback(
+  url: string,
+  init: RequestInit = {},
+  options: { authenticated?: boolean; contentType?: string } = {}
+): Promise<Response> {
+  const authenticated = options.authenticated ?? true;
+  const contentType = options.contentType ?? 'application/json';
+  const makeInit = (authOverride?: VeniceAuth): RequestInit => {
+    const headers: Record<string, string> = {
+      ...getHeaders(authenticated, contentType, authOverride),
+    };
+    // init.headers may be a plain object or a Headers instance; normalize both
+    // so callers using multipart bodies do not lose the auth header.
+    if (init.headers instanceof Headers) {
+      for (const [key, value] of init.headers.entries()) {
+        headers[key] = value;
+      }
+    } else if (init.headers) {
+      Object.assign(headers, init.headers);
+    }
+    return { ...init, headers };
+  };
+
+  const response = await fetch(url, makeInit());
+  if (response.status === 401 || response.status === 403) {
+    const fallback = getFallbackVeniceAuth();
+    if (fallback) {
+      // The rejected response body is never used for reporting; release it and
+      // re-issue the same request with the fallback credential once.
+      await response.body?.cancel().catch(() => undefined);
+      return fetch(url, makeInit(fallback));
+    }
+  }
+  return response;
 }
 
 /**
@@ -410,6 +459,13 @@ export async function apiRequest<T>(
   let spinner = showSpinner && !stream ? startSpinner(spinnerText) : null;
   let lastError: VeniceApiError | null = null;
 
+  // A rejected primary credential (401/403) is retried once with the secondary
+  // Venice API key before the auth error is surfaced. The retry re-runs the
+  // same attempt index so it never consumes the retry/backoff budget.
+  const fallbackAuth = getFallbackVeniceAuth();
+  let authOverride: VeniceAuth | undefined;
+  let usedFallbackAuth = false;
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -424,7 +480,7 @@ export async function apiRequest<T>(
     try {
       const response = await fetch(`${VENICE_API}${endpoint}`, {
         method,
-        headers: { ...getHeaders(authenticated), ...additionalHeaders },
+        headers: { ...getHeaders(authenticated, 'application/json', authOverride), ...additionalHeaders },
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
@@ -532,6 +588,15 @@ export async function apiRequest<T>(
         lastError = error;
 
         if (error.isAuthError()) {
+          // Secondary Venice API key fallback: re-run the same attempt with the
+          // configured fallback credential once before surfacing the error.
+          if (!usedFallbackAuth && fallbackAuth) {
+            usedFallbackAuth = true;
+            authOverride = fallbackAuth;
+            if (spinner) spinner.text = 'Primary key rejected, retrying with fallback key...';
+            attempt--;
+            continue;
+          }
           if (spinner) stopSpinner(false, 'Authentication failed');
           throw new Error(
             'Authentication failed. Please check your API key.\n' +

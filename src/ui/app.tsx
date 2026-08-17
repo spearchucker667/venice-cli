@@ -13,6 +13,7 @@ import { EventBus } from '../agent/events.js';
 import type { McpManager } from '../mcp/manager.js';
 import { PermissionManager } from '../agent/permissions.js';
 import type { ApprovalMode } from '../agent/permissions.js';
+import { setConfigValue, deleteConfigValue } from '../lib/config.js';
 import type { ProjectAgentConfig } from '../lib/config.js';
 import { Composer } from './composer.js';
 import { Transcript } from './transcript.js';
@@ -24,6 +25,7 @@ import { StatusBar } from './status.js';
 import { ApprovalPrompt, type ApprovalDecision } from './approval.js';
 import { PlanApprovalPrompt } from './plan-approval.js';
 import { UserQuestionPrompt } from './user-question.js';
+import { SecretInputPrompt } from './secret-input.js';
 import { mapEventToMessage } from './events.js';
 import { parseSlashCommand } from './slash-commands.js';
 import { handleSlashCommand } from './slash-handlers.js';
@@ -71,6 +73,12 @@ interface PendingPlanApproval {
 interface PendingUserQuestion {
   request: UserQuestionRequest;
   resolve: (response: UserQuestionResponse | undefined) => void;
+}
+
+interface PendingSecret {
+  title: string;
+  prompt: string;
+  resolve: (value: string | undefined) => void;
 }
 
 type PickerMode = 'normal' | 'model-picker' | 'session-picker';
@@ -124,6 +132,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [pendingPlanApproval, setPendingPlanApproval] = useState<PendingPlanApproval | null>(null);
   const [pendingUserQuestion, setPendingUserQuestion] = useState<PendingUserQuestion | null>(null);
+  const [pendingSecret, setPendingSecret] = useState<PendingSecret | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
   const [currentModel, setCurrentModel] = useState(model);
   const [currentModelProfile, setCurrentModelProfile] = useState<ModelProfile | undefined>();
@@ -351,6 +360,12 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
         }
         return null;
       });
+      setPendingSecret((current) => {
+        if (current) {
+          current.resolve(undefined);
+        }
+        return null;
+      });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceRoot, model, approvalMode, maxTurns, mcpManager, skillsDirs, additionalRoots, projectConfig, agent]);
@@ -537,6 +552,13 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
         resumeSession: handleResumeSession,
         listSessions: () => new SessionManager().list(workspaceRoot),
         deleteSession: (id, workspace) => new SessionManager().delete(id, workspace),
+        setConfigKey: (key, value) => setConfigValue(key, value),
+        deleteConfigKey: (key) => deleteConfigValue(key),
+        // A promise the slash handler awaits while the masked SecretInputPrompt
+        // collects the credential; resolves undefined when cancelled.
+        requestSecret: (options) => new Promise<string | undefined>((resolve) => {
+          setPendingSecret({ ...options, resolve });
+        }),
         mcpManager,
         getRuntime: () => runtimeRef.current ?? undefined,
       });
@@ -654,13 +676,27 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
           }}
         />
       )}
+      {pendingSecret && pickerMode === 'normal' && (
+        <SecretInputPrompt
+          title={pendingSecret.title}
+          prompt={pendingSecret.prompt}
+          onConfirm={(value) => {
+            pendingSecret.resolve(value);
+            setPendingSecret(null);
+          }}
+          onCancel={() => {
+            pendingSecret.resolve(undefined);
+            setPendingSecret(null);
+          }}
+        />
+      )}
       <Composer
         onSubmit={handleSubmit}
         onInject={handleInject}
         workspaceRoot={workspaceRoot}
         inputMode={inputMode}
         operatingMode={operatingMode}
-        disabled={pendingApproval !== null || pendingPlanApproval !== null || pendingUserQuestion !== null || pickerMode !== 'normal'}
+        disabled={pendingApproval !== null || pendingPlanApproval !== null || pendingUserQuestion !== null || pendingSecret !== null || pickerMode !== 'normal'}
         maxSuggestions={Math.max(3, Math.min(8, rows - 11))}
         columns={columns}
         skillNames={runtimeRef.current?.getState().skillSummaries.map((s) => s.name) ?? []}

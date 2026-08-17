@@ -14,7 +14,7 @@ import { Readable } from 'stream';
 import {
   apiRequest,
   DEFAULT_TIMEOUT_MS,
-  getHeaders,
+  fetchWithAuthFallback,
   MAX_RETRIES,
   parseUsageHeaders,
   readResponseBodyWithLimit,
@@ -633,9 +633,8 @@ export async function upscaleImage(
   else signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
   try {
-    const response = await fetch(`${VENICE_API}/image/upscale`, {
+    const response = await fetchWithAuthFallback(`${VENICE_API}/image/upscale`, {
       method: 'POST',
-      headers: getHeaders(),
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -721,9 +720,8 @@ export async function textToSpeech(
   else signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
   try {
-    const response = await fetch(`${VENICE_API}/audio/speech`, {
+    const response = await fetchWithAuthFallback(`${VENICE_API}/audio/speech`, {
       method: 'POST',
-      headers: getHeaders(),
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -817,12 +815,15 @@ export async function cloneVoice(
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`${VENICE_API}/audio/voices`, {
-      method: 'POST',
-      headers: getHeaders(true, ''),
-      body: form,
-      signal: controller.signal,
-    });
+    const response = await fetchWithAuthFallback(
+      `${VENICE_API}/audio/voices`,
+      {
+        method: 'POST',
+        body: form,
+        signal: controller.signal,
+      },
+      { contentType: '' }
+    );
 
     if (!response.ok) {
       const errorBody = await response.text();
@@ -926,7 +927,6 @@ export async function transcribe(
     const requestInit: RequestInit & { duplex: 'half' } = {
       method: 'POST',
       headers: {
-        ...getHeaders(true, ''),
         'Content-Type': `multipart/form-data; boundary=${boundary}`,
         'Content-Length': String(contentLength),
       },
@@ -935,9 +935,11 @@ export async function transcribe(
       signal: controller.signal,
     };
 
-    const res = await fetch(`${VENICE_API}/audio/transcriptions`, {
-      ...requestInit,
-    });
+    const res = await fetchWithAuthFallback(
+      `${VENICE_API}/audio/transcriptions`,
+      requestInit,
+      { contentType: '' }
+    );
 
     clearTimeout(timeoutId);
 
@@ -1280,9 +1282,8 @@ async function retrieveVideoResponse(
     };
 
     try {
-      const response = await fetch(`${VENICE_API}/video/retrieve`, {
+      const response = await fetchWithAuthFallback(`${VENICE_API}/video/retrieve`, {
         method: 'POST',
-        headers: getHeaders(),
         body: JSON.stringify(body),
         signal: controller.signal,
       });
@@ -1877,7 +1878,6 @@ export async function parseDocument(filePath: string): Promise<DocumentParseResp
     const requestInit: RequestInit & { duplex: 'half' } = {
       method: 'POST',
       headers: {
-        ...getHeaders(true, ''),
         'Content-Type': `multipart/form-data; boundary=${boundary}`,
         'Content-Length': String(contentLength),
       },
@@ -1885,7 +1885,11 @@ export async function parseDocument(filePath: string): Promise<DocumentParseResp
       duplex: 'half',
       signal: controller.signal,
     };
-    const response = await fetch(`${VENICE_API}/augment/text-parser`, requestInit);
+    const response = await fetchWithAuthFallback(
+      `${VENICE_API}/augment/text-parser`,
+      requestInit,
+      { contentType: '' }
+    );
     const responseBytes = await readResponseBodyWithLimit(
       response,
       MAX_DOCUMENT_PARSE_RESPONSE_BYTES,

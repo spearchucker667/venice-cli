@@ -32,6 +32,7 @@ export function registerConfigCommand(program: Command): void {
 
       const keys: Array<keyof VeniceConfig> = [
         'api_key',
+        'fallback_api_key',
         'signInWithX',
         'default_model',
         'default_image_model',
@@ -80,6 +81,7 @@ export function registerConfigCommand(program: Command): void {
 
       const keys: Array<keyof VeniceConfig> = [
         'api_key',
+        'fallback_api_key',
         'signInWithX',
         'default_model',
         'default_image_model',
@@ -133,7 +135,9 @@ export function registerConfigCommand(program: Command): void {
           value = await askHiddenQuestion(
             key === 'api_key'
               ? 'API Key (get from https://venice.ai/settings/api): '
-              : 'Sign-In-With-X token: '
+              : key === 'fallback_api_key'
+                ? 'Fallback API Key (used when the primary key is missing or rejected): '
+                : 'Sign-In-With-X token: '
           );
         } else {
           console.error(

@@ -4,6 +4,8 @@
 
 export interface VeniceConfig {
   api_key?: string;
+  /** Secondary Venice API key used when the primary key is absent or rejected. */
+  fallback_api_key?: string;
   signInWithX?: string;
   default_model?: string;
   default_image_model?: string;
