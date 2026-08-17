@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import * as url from 'node:url';
 import { Command } from 'commander';
-import { registerAgentCommand, resolveApprovalMode, resolveInteractive, validateStartupConflicts } from './agent.js';
+import { registerAgentCommand, resolveApprovalMode, resolveInteractive, terminalExitCode, validateStartupConflicts } from './agent.js';
 
 describe('registerAgentCommand', () => {
   it('registers the agent command', () => {
@@ -113,14 +113,33 @@ describe('resolveInteractive (VCL-R3-007/008)', () => {
     assert.strictEqual(resolveInteractive({ outputFormat: 'stream-json', prompt: 'x' }, tty), false);
   });
 
-  it('an explicit --interactive/--no-interactive flag always wins', () => {
+  it('an explicit --interactive/--no-interactive flag wins over the default', () => {
     assert.strictEqual(resolveInteractive({ prompt: 'x', interactive: true }, tty), true);
-    assert.strictEqual(resolveInteractive({ outputFormat: 'json', interactive: true }, tty), true);
     assert.strictEqual(resolveInteractive({ interactive: false }, tty), false);
+  });
+
+  it('machine output formats stay headless even with --interactive (VCL-013)', () => {
+    assert.strictEqual(resolveInteractive({ outputFormat: 'json', interactive: true }, tty), false);
+    assert.strictEqual(resolveInteractive({ json: true, interactive: true }, tty), false);
+    assert.strictEqual(resolveInteractive({ outputFormat: 'stream-json', interactive: true }, tty), false);
   });
 
   it('a non-TTY stdin with no prompt stays headless', () => {
     assert.strictEqual(resolveInteractive({ outputFormat: 'text' }, { stdinTTY: false, stdoutTTY: true }), false);
+  });
+});
+
+describe('terminalExitCode (VCL-010)', () => {
+  it('maps terminal states to distinct exit codes', () => {
+    assert.strictEqual(terminalExitCode('complete'), 0);
+    assert.strictEqual(terminalExitCode('failed'), 1);
+    assert.strictEqual(terminalExitCode('cancelled'), 5);
+    assert.strictEqual(terminalExitCode('limit_reached'), 6);
+  });
+
+  it('maps unexpected non-terminal states to the generic failure code', () => {
+    assert.strictEqual(terminalExitCode('idle'), 1);
+    assert.strictEqual(terminalExitCode('thinking'), 1);
   });
 });
 

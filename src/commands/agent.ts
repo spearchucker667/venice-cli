@@ -13,7 +13,7 @@ import { buildAgentMcpConfig } from '../mcp/config.js';
 import { McpManager } from '../mcp/manager.js';
 import { defaultMode } from '../agent/mode.js';
 import { SessionManager } from '../agent/sessions.js';
-import type { AgentState } from '../agent/types.js';
+import type { AgentState, AgentStatus } from '../agent/types.js';
 
 export function registerAgentCommand(program: Command): Command {
   const agent = program
@@ -286,10 +286,7 @@ export function registerAgentCommand(program: Command): Command {
           }
         }
         await mcpManager.stop();
-        // Terminal exit-code contract (VCL-010): 0 = completed successfully;
-        // 1 = any non-success terminal state (failed, cancelled, limit_reached).
-        // The exact state is exposed structurally via --output-format json/stream-json.
-        process.exit(result.state.status === 'complete' ? 0 : 1);
+        process.exit(terminalExitCode(result.state.status));
       } catch (error) {
         renderer.stop();
         await mcpManager.stop().catch(() => {});
@@ -377,9 +374,10 @@ export function resolveApprovalMode(
  * Decide whether the agent run should open the TUI (VCL-R3-007/008).
  *
  * A `-p/--prompt` run is never interactive by default, and any machine
- * output format (`json`/`stream-json`) forces headless behavior. Only a plain
- * text run on a TTY with no prompt is interactive. An explicit
- * `--interactive`/`--no-interactive` flag always wins.
+ * output format (`json`/`stream-json`) forces headless behavior — this wins
+ * even over an explicit `--interactive`, because opening the TUI would corrupt
+ * machine-readable stdout (VCL-013). Only a plain text run on a TTY with no
+ * prompt is interactive; otherwise `--interactive`/`--no-interactive` wins.
  */
 export function resolveInteractive(
   options: {
@@ -390,10 +388,33 @@ export function resolveInteractive(
   },
   env: { stdinTTY: boolean; stdoutTTY: boolean }
 ): boolean {
+  const outputFormat = options.json ? 'json' : options.outputFormat;
+  // Machine-output formats are unconditionally headless: a TUI would emit
+  // control sequences onto parseable stdout (VCL-013).
+  if (outputFormat === 'json' || outputFormat === 'stream-json') return false;
   if (options.interactive !== undefined) return options.interactive;
   const promptMode = options.prompt !== undefined;
-  const outputFormat = options.json ? 'json' : options.outputFormat;
   return !promptMode && env.stdinTTY && env.stdoutTTY && outputFormat === 'text';
+}
+
+/**
+ * Headless terminal exit-code contract (VCL-010). Distinct codes let
+ * automation distinguish a budget-constrained stop or cancellation from real
+ * success without parsing prose. `2` is reserved for CLI/usage errors and is
+ * used directly by the argument validators above.
+ */
+export function terminalExitCode(status: AgentStatus): number {
+  switch (status) {
+    case 'complete':
+      return 0;
+    case 'cancelled':
+      return 5;
+    case 'limit_reached':
+      return 6;
+    case 'failed':
+    default:
+      return 1;
+  }
 }
 
 function readStdin(): Promise<string> {

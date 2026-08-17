@@ -169,6 +169,18 @@ Approval behavior is explicit:
 | `auto` | Reads, writes, and non-destructive local execution; network still requires approval |
 | `yolo` | Non-destructive operations; destructive shell commands still require approval |
 
+Non-interactive (`--prompt`/stdin) runs exit with a stable status code so automation can distinguish outcomes without parsing prose. Machine output formats (`--output-format json`/`stream-json`) are always headless — even with `--interactive` — so stdout stays parseable and never contains TUI control sequences.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Completed successfully |
+| `1` | Agent/task failure |
+| `2` | CLI/usage or configuration error |
+| `5` | Cancelled |
+| `6` | Turn/step budget reached (`limit_reached`) |
+
+The exact terminal state is also available structurally via `--output-format json`/`stream-json` (`status` / `session.completed.status`).
+
 Write-capable subagents remain bounded to workspace read/edit operations. They do not receive shell or network tools.
 
 Interactive controls include `/model`, `/models`, `/resume`, `/sessions`, `/status`, `/clear`, `/permissions`, `/help`, and `/quit`.
