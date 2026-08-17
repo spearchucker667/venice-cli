@@ -198,7 +198,8 @@ Interactive controls include `/model`, `/models`, `/resume`, `/sessions`, `/stat
 | `venice characters` | Browse Venice character personas |
 | `venice rpc` | Venice-proxied blockchain JSON-RPC |
 | `venice billing` | Account balance, billed usage, and analytics |
-| `venice keys` | API-key metadata, creation, rate limits, and deletion |
+| `venice keys` | API-key metadata, creation, update, rate limits, and deletion |
+| `venice wallet` | x402 wallet balance, transactions, and guided top-up |
 | `venice history` | Local conversation-history operations |
 | `venice config` | Local configuration |
 | `venice usage` | CLI-local usage statistics |
@@ -448,8 +449,21 @@ venice billing analytics --lookback 30d
 venice keys list
 venice keys create --name ci --usd-limit 25 \
   --limit-period MONTH --output ./ci.key
+venice keys show <key-id>
+venice keys update <key-id> --name renamed --usd-limit 100 --no-expires
 venice keys rate-limits
+venice keys rate-limits-log
+venice keys web3 --private-key <hex> --output ./wallet.key   # or set VENICE_WALLET_KEY
 venice keys delete <key-id>
+
+# x402 wallet (requires SIGN-IN-WITH-X wallet auth)
+venice wallet balance 0xYourWalletAddress
+venice wallet transactions 0xYourWalletAddress --limit 50
+
+# Guided top-up: prints payment requirements + the exact x402 SDK signing
+# steps, then re-submit the signed header:
+venice wallet top-up
+venice wallet top-up --payment-signature "<signed-header>"
 
 # RPC
 venice rpc networks
@@ -458,6 +472,12 @@ venice rpc base-mainnet eth_getBalance 0xYourAddress latest
 ```
 
 API-key creation is designed not to print the newly returned secret to normal output; use the required output file and protect it like any other credential.
+
+`venice keys web3` mints a key from a wallet holding sVVV: it fetches a token, signs it with EIP-191 `personal_sign` using your wallet private key, and saves the one-time secret to the output file. Prefer the `VENICE_WALLET_KEY` environment variable over the `--private-key` flag so the key never appears in shell history.
+
+`venice wallet top-up` is a guided x402 payment flow: it probes `POST /x402/top-up` (no credentials — `security: []`), renders the Base/Solana USDC payment options the API returned, and prints the exact signing steps for the x402 SDK (`npm install x402`, then `createPaymentHeader` with the entry's `network`/`asset`/`payTo`/`amount`). Re-running with `--payment-signature` submits the signed header and prints the credited balance.
+
+On x402-authenticated chat and agent runs, the CLI reports the `X-Balance-Remaining` header after each call (`x402 credits remaining: $4.23`), so wallet users can see their USDC balance shrink in real time without a separate `venice wallet balance` call. Rate-limit headers are reported too when the API includes them.
 
 ## Output formats and shell use
 

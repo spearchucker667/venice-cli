@@ -119,6 +119,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: 'model', aliases: ['models'], description: 'Show model picker or set a model', availability: 'always' },
   { name: 'resume', description: 'Resume a session', availability: 'always' },
   { name: 'sessions', description: 'List saved sessions', availability: 'always' },
+  { name: 'delete', description: 'Delete a saved session by id (see /sessions)', availability: 'always' },
   { name: 'diff', description: 'Show git diff or changed files', availability: 'always' },
   { name: 'review', description: 'Review current changes read-only', availability: 'always' },
   { name: 'plan', description: 'Toggle plan mode', availability: 'always' },

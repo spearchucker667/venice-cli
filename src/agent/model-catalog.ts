@@ -18,17 +18,29 @@ export interface ModelCatalogOptions {
   fetcher?: ModelFetcher;
   /** Cache freshness window in milliseconds. */
   ttlMs?: number;
+  /**
+   * Invoked when a model fetch fails, so discovery failures are surfaced
+   * instead of silently changing fallback behavior (P2).
+   */
+  onError?: (error: unknown) => void;
 }
 
 export class ModelCatalog {
   private readonly fetcher: ModelFetcher;
   private readonly ttlMs: number;
+  private onError?: (error: unknown) => void;
   private cache?: { models: Model[]; fetchedAt: number };
   private inflight?: Promise<Model[]>;
 
   constructor(options: ModelCatalogOptions = {}) {
     this.fetcher = options.fetcher ?? listModels;
     this.ttlMs = options.ttlMs ?? 60_000;
+    this.onError = options.onError;
+  }
+
+  /** Attach (or replace) the failure handler after construction. */
+  setOnError(handler: (error: unknown) => void): void {
+    this.onError = handler;
   }
 
   /**
@@ -44,6 +56,12 @@ export class ModelCatalog {
       .then((models) => {
         this.cache = { models, fetchedAt: Date.now() };
         return models;
+      })
+      .catch((error) => {
+        // Surface the failure (P2) before rethrowing so callers keep their
+        // graceful fallbacks but the problem is no longer invisible.
+        this.onError?.(error);
+        throw error;
       })
       .finally(() => {
         this.inflight = undefined;

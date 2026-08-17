@@ -11,6 +11,8 @@ describe('handleSlashCommand', () => {
     let model = 'kimi-k2.5';
     let pickerShown: 'model' | 'session' | undefined = undefined;
     let resumedSessionId: string | undefined = undefined;
+    let themeRefreshed = false;
+    const deleted: string[] = [];
     const messages: TuiMessage[] = [];
     return {
       exited: () => exited,
@@ -18,8 +20,11 @@ describe('handleSlashCommand', () => {
       currentModel: () => model,
       pickerShown: () => pickerShown,
       resumedSessionId: () => resumedSessionId,
+      themeRefreshed: () => themeRefreshed,
+      deleted: () => deleted,
       context: {
         exit: () => { exited = true; },
+        refreshTheme: () => { themeRefreshed = true; },
         setMessages: (updater: (prev: TuiMessage[]) => TuiMessage[]) => {
           const next = updater(messages);
           messages.length = 0;
@@ -34,6 +39,8 @@ describe('handleSlashCommand', () => {
         showSessionPicker: () => { pickerShown = 'session'; },
         resumeSession: async (id: string) => { resumedSessionId = id; },
         listSessions: () => [],
+        deleteSession: (id: string) => { deleted.push(id); return true; },
+        getRuntime: (): AgentRuntime | undefined => undefined,
       },
     };
   };
@@ -108,6 +115,42 @@ describe('handleSlashCommand', () => {
     const { context, messages } = makeContext();
     await handleSlashCommand('sessions', '', context);
     assert.ok(messages().some((m) => m.content.includes('No saved sessions')));
+  });
+
+  it('handles /delete with no argument by showing usage', async () => {
+    const { context, messages, deleted } = makeContext();
+    await handleSlashCommand('delete', '', context);
+    assert.ok(messages().some((m) => m.content.includes('Usage: /delete')));
+    assert.strictEqual(deleted().length, 0);
+  });
+
+  it('handles /delete by deleting a saved session (P2)', async () => {
+    const { context, messages, deleted } = makeContext();
+    await handleSlashCommand('delete', 'session-abc', context);
+    assert.deepStrictEqual(deleted(), ['session-abc']);
+    assert.ok(messages().some((m) => m.content.includes('Deleted session session-abc')));
+  });
+
+  it('refuses to /delete the active session (P2)', async () => {
+    const { context, messages, deleted } = makeContext();
+    context.getRuntime = () => ({ getState: () => ({ sessionId: 'session-live' }) }) as unknown as AgentRuntime;
+    await handleSlashCommand('delete', 'session-live', context);
+    assert.strictEqual(deleted().length, 0);
+    assert.ok(messages().some((m) => m.content.includes('Refusing to delete the active session')));
+  });
+
+  it('handles /theme without argument (no config write, no refresh)', async () => {
+    const { context, messages, themeRefreshed } = makeContext();
+    await handleSlashCommand('theme', '', context);
+    assert.ok(messages().some((m) => m.content.includes('Current theme:')));
+    assert.strictEqual(themeRefreshed(), false);
+  });
+
+  it('rejects an invalid /theme without refreshing (P2)', async () => {
+    const { context, messages, themeRefreshed } = makeContext();
+    await handleSlashCommand('theme', 'not-a-theme', context);
+    assert.ok(messages().some((m) => m.content.includes('Invalid theme')));
+    assert.strictEqual(themeRefreshed(), false);
   });
 
   it('handles /diff and /review', async () => {
@@ -204,10 +247,12 @@ describe('handleSlashCommand', () => {
     assert.ok(messages.some((m) => m.content.includes('Unknown skill: nope')));
   });
 
-  it('intercepts unknown commands to prevent typos from executing API calls (VC-KIMI-047)', async () => {
+  it('forwards unknown commands to the model instead of intercepting them (VC-KIMI-047)', async () => {
     const { context, messages } = makeContext();
     const handled = await handleSlashCommand('frobnicate', '', context);
-    assert.strictEqual(handled, true);
+    // `false` signals the caller to forward the raw command to the agent.
+    assert.strictEqual(handled, false);
+    // The non-blocking hint is still shown.
     assert.ok(messages().some(m => m.content.includes('Unknown command')));
   });
 

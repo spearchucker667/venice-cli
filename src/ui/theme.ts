@@ -15,6 +15,69 @@ export interface ThemeTokens {
   accent: ChalkInstance;
 }
 
+/**
+ * Ink-compatible color tokens (named colors or hex strings) for `<Text
+ * color="...">`. Kept in lockstep with the chalk `ThemeTokens` so the TUI
+ * actually reflects the active theme instead of hardcoding colors (P2).
+ */
+export interface InkTheme {
+  primary: string;
+  secondary: string;
+  success: string;
+  error: string;
+  warning: string;
+  info: string;
+  muted: string;
+  accent: string;
+}
+
+const inkThemes: Record<ThemeName, InkTheme> = {
+  default: {
+    primary: 'blue',
+    secondary: 'gray',
+    success: 'green',
+    error: 'red',
+    warning: 'yellow',
+    info: 'cyan',
+    muted: 'gray',
+    accent: 'magenta',
+  },
+  ocean: {
+    primary: 'cyan',
+    secondary: 'blueBright',
+    success: 'greenBright',
+    error: 'redBright',
+    warning: 'yellowBright',
+    info: 'cyanBright',
+    muted: 'blue',
+    accent: 'magentaBright',
+  },
+  dracula: {
+    primary: '#bd93f9',
+    secondary: '#6272a4',
+    success: '#50fa7b',
+    error: '#ff5555',
+    warning: '#f1fa8c',
+    info: '#8be9fd',
+    muted: '#6272a4',
+    accent: '#ff79c6',
+  },
+  monokai: {
+    primary: '#a6e22e',
+    secondary: '#75715e',
+    success: '#a6e22e',
+    error: '#f92672',
+    warning: '#e6db74',
+    info: '#66d9ef',
+    muted: '#75715e',
+    accent: '#fd971f',
+  },
+};
+
+export function getInkTheme(name: ThemeName = getActiveThemeName()): InkTheme {
+  return inkThemes[name] ?? inkThemes.default;
+}
+
 const themes: Record<ThemeName, ThemeTokens> = {
   default: {
     primary: chalk.blue,

@@ -4,6 +4,7 @@
 
 import { Box, Text } from 'ink';
 import { compactError, toolActivity, toolResultSummary } from './tool-format.js';
+import { useTheme } from './theme-context.js';
 
 export interface ToolCallEventProps {
   toolName: string;
@@ -15,6 +16,7 @@ export interface ToolCallEventProps {
 }
 
 export function ToolCallEvent({ toolName, input, ok, error, result, pending }: ToolCallEventProps): JSX.Element {
+  const { ink } = useTheme();
   const resultLike = (result && typeof result === 'object')
     ? result as { ok?: boolean; data?: unknown; error?: { message?: string } }
     : { ok, error: error ? { message: error } : undefined };
@@ -27,11 +29,11 @@ export function ToolCallEvent({ toolName, input, ok, error, result, pending }: T
   const summary = toolResultSummary(toolName, resultLike);
   return (
     <Box flexDirection="column" paddingLeft={1}>
-      <Text wrap="truncate-end" color={failed ? 'red' : ok === true ? 'green' : undefined}>
+      <Text wrap="truncate-end" color={failed ? ink.error : ok === true ? ink.success : undefined}>
         {failed ? '✗' : ok === true ? '✓' : '●'} {toolActivity(toolName, input)}{pending ? '' : ` · ${summary}`}
       </Text>
       {failed && failureLines.map((line) => (
-        <Text key={line} color="red" dimColor wrap="truncate-end">  {line}</Text>
+        <Text key={line} color={ink.error} dimColor wrap="truncate-end">  {line}</Text>
       ))}
     </Box>
   );

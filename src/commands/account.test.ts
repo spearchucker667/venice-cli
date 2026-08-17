@@ -517,3 +517,231 @@ test('keys delete rejects key material before constructing a request', async () 
   });
   assert.equal(requests, 0);
 });
+
+test('keys show fetches one key by id and prints its details', async () => {
+  let requestedPath = '';
+  await withApiServer((request, response) => {
+    assert.equal(request.method, 'GET');
+    requestedPath = request.url ?? '';
+    sendJson(response, {
+      data: {
+        id: 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5',
+        apiKeyType: 'INFERENCE',
+        description: 'backend prod',
+        consumptionLimits: { usd: 50, diem: 10 },
+        limitPeriod: 'EPOCH',
+        createdAt: '2025-10-01T12:00:00Z',
+        expiresAt: null,
+        lastUsedAt: '2026-04-20T10:05:00Z',
+        last6Chars: '2V2jNW',
+        usage: { trailingSevenDays: { usd: '4.20', diem: '0.00' } },
+        currentPeriodUsage: { usd: '1.00', diem: '0.50' },
+      },
+    });
+  }, async (baseUrl, homeDir) => {
+    const result = await runCli(
+      ['keys', 'show', 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5', '--format', 'json'],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.id, 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5');
+    assert.equal(parsed.usage.trailingSevenDays.usd, '4.20');
+  });
+  assert.equal(requestedPath, '/api_keys/e28e82dc-9df2-4b47-b726-d0a222ef2ab5');
+});
+
+test('keys show rejects key material before constructing a request', async () => {
+  let requests = 0;
+  await withApiServer((_request, response) => {
+    requests++;
+    sendJson(response, { data: {} });
+  }, async (baseUrl, homeDir) => {
+    const result = await runCli(
+      ['keys', 'show', 'venice-secret-once'],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Use the UUID shown by "venice keys list"/);
+  });
+  assert.equal(requests, 0);
+});
+
+test('keys update sends a PATCH with only the provided fields', async () => {
+  let requestBody = '';
+  let requestMethod = '';
+  await withApiServer((request, response) => {
+    requestMethod = request.method ?? '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { requestBody += chunk; });
+    request.on('end', () => {
+      sendJson(response, {
+        data: {
+          id: 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5',
+          apiKeyType: 'INFERENCE',
+          description: 'renamed',
+          consumptionLimits: { usd: 100, diem: null },
+          limitPeriod: 'MONTH',
+          createdAt: '2025-10-01T12:00:00Z',
+          expiresAt: '2026-12-31T23:59:59Z',
+          lastUsedAt: null,
+          last6Chars: '2V2jNW',
+        },
+      });
+    });
+  }, async (baseUrl, homeDir) => {
+    const result = await runCli(
+      [
+        'keys', 'update', 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5',
+        '--name', 'renamed',
+        '--expires', '2026-12-31T23:59:59Z',
+        '--usd-limit', '100',
+        '--limit-period', 'month',
+        '--format', 'json',
+      ],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).description, 'renamed');
+  });
+
+  assert.equal(requestMethod, 'PATCH');
+  assert.deepEqual(JSON.parse(requestBody), {
+    id: 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5',
+    description: 'renamed',
+    expiresAt: '2026-12-31T23:59:59Z',
+    consumptionLimit: { usd: 100 },
+    limitPeriod: 'MONTH',
+  });
+});
+
+test('keys update --no-expires removes the expiration date', async () => {
+  let requestBody = '';
+  await withApiServer((request, response) => {
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { requestBody += chunk; });
+    request.on('end', () => {
+      sendJson(response, {
+        data: {
+          id: 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5',
+          apiKeyType: 'INFERENCE',
+          description: 'ci',
+          consumptionLimits: {},
+          limitPeriod: 'EPOCH',
+          createdAt: '2025-10-01T12:00:00Z',
+          expiresAt: null,
+          lastUsedAt: null,
+          last6Chars: '2V2jNW',
+        },
+      });
+    });
+  }, async (baseUrl, homeDir) => {
+    const result = await runCli(
+      ['keys', 'update', 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5', '--no-expires'],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Expires: never/);
+  });
+  assert.equal(JSON.parse(requestBody).expiresAt, null);
+});
+
+test('keys rate-limits-log lists the last breaches', async () => {
+  await withApiServer((request, response) => {
+    assert.equal(request.url, '/api_keys/rate_limits/log');
+    sendJson(response, {
+      object: 'list',
+      data: [
+        {
+          apiKeyId: 'e28e82dc-9df2-4b47-b726-d0a222ef2ab5',
+          modelId: 'zai-org-glm-5-1',
+          rateLimitTier: 'paid',
+          rateLimitType: 'RPM',
+          timestamp: '2026-04-20T12:34:56Z',
+        },
+      ],
+    });
+  }, async (baseUrl, homeDir) => {
+    const result = await runCli(
+      ['keys', 'rate-limits-log', '--format', 'json'],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].rateLimitType, 'RPM');
+  });
+});
+
+test('keys web3 mints a key with an EIP-191 signed wallet token', async () => {
+  const methodAndPaths: string[] = [];
+  const bodies: string[] = [];
+  const authHeaders: (string | undefined)[] = [];
+  await withApiServer((request, response) => {
+    authHeaders.push(request.headers.authorization as string | undefined);
+    request.setEncoding('utf8');
+    let body = '';
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => {
+      methodAndPaths.push(`${request.method} ${request.url}`);
+      bodies.push(body);
+      if (request.url?.includes('generate_web3_key') && request.method === 'GET') {
+        sendJson(response, { success: true, data: { token: 'jwt-ish-token' } });
+        return;
+      }
+      sendJson(response, {
+        success: true,
+        data: {
+          id: 'web3-key-id',
+          apiKey: 'venice-web3-secret-once',
+          apiKeyType: 'INFERENCE',
+          description: 'Web3 API Key',
+          consumptionLimit: { usd: 50 },
+          limitPeriod: 'EPOCH',
+          expiresAt: null,
+        },
+      });
+    });
+  }, async (baseUrl, homeDir) => {
+    const secretFile = join(homeDir, 'web3.key');
+    const result = await runCli(
+      [
+        'keys', 'web3',
+        '--private-key', '0000000000000000000000000000000000000000000000000000000000000001',
+        '--usd-limit', '50',
+        '--output', secretFile,
+        '--format', 'json',
+      ],
+      homeDir,
+      baseUrl
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.id, 'web3-key-id');
+    assert.equal(parsed.secretFile, realpathSync(secretFile));
+    assert.doesNotMatch(result.stdout, /venice-web3-secret-once/);
+    assert.doesNotMatch(result.stderr, /venice-web3-secret-once/);
+    assert.equal(readFileSync(secretFile, 'utf8'), 'venice-web3-secret-once\n');
+    if (process.platform !== 'win32') assert.equal(statSync(secretFile).mode & 0o777, 0o600);
+  });
+
+  assert.deepEqual(methodAndPaths, [
+    'GET /api_keys/generate_web3_key',
+    'POST /api_keys/generate_web3_key',
+  ]);
+  // The web3 flow is unauthenticated: no Authorization header on either call.
+  assert.deepEqual(authHeaders, [undefined, undefined]);
+
+  const mintBody = JSON.parse(bodies[1]);
+  assert.equal(mintBody.token, 'jwt-ish-token');
+  assert.equal(mintBody.address, '0x7e5f4552091a69125d5dfcb7b8c2659029395bdf');
+  assert.match(mintBody.signature, /^0x[0-9a-f]{130}$/);
+  assert.equal(mintBody.apiKeyType, 'INFERENCE');
+  assert.equal(mintBody.description, 'Web3 API Key');
+  assert.deepEqual(mintBody.consumptionLimit, { usd: 50 });
+});

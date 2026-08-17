@@ -20,10 +20,19 @@ import {
   ConsumptionLimits,
   assertApiKeyId,
   createApiKey,
+  createWeb3ApiKey,
   deleteApiKey,
+  getApiKey,
+  getApiKeyRateLimitLogs,
   getApiKeyRateLimits,
+  getWeb3KeyToken,
   listApiKeys,
+  updateApiKey,
 } from '../lib/account-api.js';
+import {
+  deriveAddressFromPrivateKey,
+  signPersonalMessage,
+} from '../lib/e2ee.js';
 import {
   detectOutputFormat,
   formatSuccess,
@@ -206,6 +215,225 @@ export function registerKeysCommand(program: Command): void {
     });
 
   keys
+    .command('show <id>')
+    .description('Show full details and usage for one API key (admin key required)')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (id: string, options) => {
+      const normalizedId = id.trim();
+      assertApiKeyId(normalizedId);
+      const key = await getApiKey(normalizedId);
+      if (detectOutputFormat(options.format) === 'json') {
+        console.log(JSON.stringify(toSafeApiKeyMetadata(key), null, 2));
+        return;
+      }
+
+      const c = getChalk();
+      console.log(c.bold(`\nAPI Key ${key.id}\n`));
+      console.log(`Type: ${key.apiKeyType}`);
+      console.log(`Name: ${key.description ?? '(none)'}`);
+      console.log(`Created: ${key.createdAt ?? 'unknown'}`);
+      console.log(`Expires: ${key.expiresAt ?? 'never'}`);
+      console.log(`Last used: ${key.lastUsedAt ?? 'never'}`);
+      console.log(`Limit period: ${key.limitPeriod}`);
+      const limits = formatConsumptionLimits(key.consumptionLimits);
+      console.log(`Consumption limits: ${limits}`);
+      if (key.usage?.trailingSevenDays) {
+        console.log(`Usage (7d): USD ${key.usage.trailingSevenDays.usd}, DIEM ${key.usage.trailingSevenDays.diem}`);
+      }
+      if (key.currentPeriodUsage) {
+        console.log(`Usage (current period): USD ${key.currentPeriodUsage.usd}, DIEM ${key.currentPeriodUsage.diem}`);
+      }
+    });
+
+  keys
+    .command('update <id>')
+    .description('Update an API key description, expiration, or consumption limits')
+    .option('-n, --name <name>', 'New key name/description (max 64 characters)')
+    .option('--expires <date>', 'Expiration date (YYYY-MM-DD or ISO 8601 UTC)')
+    .option('--no-expires', 'Remove the expiration date')
+    .option('--usd-limit <amount>', 'USD consumption limit (0 disables the USD cap)')
+    .option('--diem-limit <amount>', 'DIEM consumption limit (0 disables the DIEM cap)')
+    .option('--limit-period <period>', 'Limit reset period (EPOCH|MONTH|LIFETIME)')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (id: string, options) => {
+      const normalizedId = id.trim();
+      assertApiKeyId(normalizedId);
+
+      const input: {
+        id: string;
+        description?: string;
+        expiresAt?: string | null;
+        consumptionLimit?: ConsumptionLimits;
+        limitPeriod?: 'EPOCH' | 'MONTH' | 'LIFETIME';
+      } = { id: normalizedId };
+
+      if (options.name !== undefined) {
+        const description = String(options.name).trim();
+        if (description.length === 0 || description.length > 64) {
+          throw new Error('name must contain between 1 and 64 characters');
+        }
+        input.description = description;
+      }
+      // Commander's --no-expires sets `expires` to false; the flag's absence
+      // defaults it to true, so only a string is a real expiration value.
+      if (typeof options.expires === 'string') {
+        validateExpiration(options.expires);
+        input.expiresAt = options.expires;
+      } else if (options.expires === false) {
+        input.expiresAt = null;
+      }
+      if (options.limitPeriod !== undefined) {
+        input.limitPeriod = parseEnum(options.limitPeriod, LIMIT_PERIODS, 'limit-period');
+      }
+
+      const consumptionLimit: ConsumptionLimits = {};
+      if (options.usdLimit !== undefined) {
+        consumptionLimit.usd = parseLimit(options.usdLimit, 'usd-limit');
+      }
+      if (options.diemLimit !== undefined) {
+        consumptionLimit.diem = parseLimit(options.diemLimit, 'diem-limit');
+      }
+      if (Object.keys(consumptionLimit).length > 0) {
+        input.consumptionLimit = consumptionLimit;
+      }
+
+      const key = await updateApiKey(input);
+      if (detectOutputFormat(options.format) === 'json') {
+        console.log(JSON.stringify(toSafeApiKeyMetadata(key), null, 2));
+        return;
+      }
+      console.log(formatSuccess(`Updated API key ${key.id}`));
+      console.log(`Type: ${key.apiKeyType}`);
+      console.log(`Name: ${key.description ?? '(none)'}`);
+      console.log(`Expires: ${key.expiresAt ?? 'never'}`);
+      console.log(`Limit period: ${key.limitPeriod}`);
+      console.log(`Consumption limits: ${formatConsumptionLimits(key.consumptionLimits)}`);
+    });
+
+  keys
+    .command('rate-limits-log')
+    .description('Show the last 50 rate-limit breaches for the current API key')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (options) => {
+      const entries = await getApiKeyRateLimitLogs();
+      if (detectOutputFormat(options.format) === 'json') {
+        console.log(JSON.stringify(entries, null, 2));
+        return;
+      }
+      if (entries.length === 0) {
+        console.log(getChalk().dim('No recent rate-limit breaches.'));
+        return;
+      }
+      console.log(formatTable(entries.map((entry) => ({
+        model: entry.modelId,
+        tier: entry.rateLimitTier,
+        type: entry.rateLimitType,
+        time: entry.timestamp,
+      })), [
+        { key: 'model', label: 'Model', width: 34 },
+        { key: 'tier', label: 'Tier', width: 10 },
+        { key: 'type', label: 'Limit', width: 22 },
+        { key: 'time', label: 'Timestamp', width: 24 },
+      ]));
+    });
+
+  keys
+    .command('web3')
+    .description('Mint an API key from a wallet holding sVVV (two-step flow)')
+    .requiredOption('-o, --output <file>', 'New file in which to save the API key secret')
+    .option('-p, --private-key <hex>', 'Wallet private key (hex). Prefer VENICE_WALLET_KEY instead.')
+    .option('-n, --name <name>', 'Key name/description (max 64 characters)', 'Web3 API Key')
+    .option('-t, --type <type>', 'Key type (INFERENCE|ADMIN)', 'INFERENCE')
+    .option('--expires <date>', 'Expiration date (YYYY-MM-DD or ISO 8601 UTC)')
+    .option('--usd-limit <amount>', 'USD consumption limit')
+    .option('--diem-limit <amount>', 'DIEM consumption limit')
+    .option('--limit-period <period>', 'Limit reset period (EPOCH|MONTH|LIFETIME)', 'EPOCH')
+    .option('-f, --format <format>', 'Output format (pretty|json)')
+    .action(async (options) => {
+      const description = String(options.name).trim();
+      if (description.length === 0 || description.length > 64) {
+        throw new Error('name must contain between 1 and 64 characters');
+      }
+      const apiKeyType = parseEnum(options.type, KEY_TYPES, 'type');
+      const limitPeriod = parseEnum(options.limitPeriod, LIMIT_PERIODS, 'limit-period');
+      const consumptionLimit: ConsumptionLimits = {};
+      if (options.usdLimit !== undefined) {
+        consumptionLimit.usd = parseLimit(options.usdLimit, 'usd-limit');
+      }
+      if (options.diemLimit !== undefined) {
+        consumptionLimit.diem = parseLimit(options.diemLimit, 'diem-limit');
+      }
+      if (options.expires !== undefined) validateExpiration(options.expires);
+
+      const privateKey = (process.env.VENICE_WALLET_KEY ?? String(options.privateKey)).trim();
+      if (!privateKey) {
+        throw new Error('A wallet private key is required. Pass --private-key or set VENICE_WALLET_KEY.');
+      }
+      const address = deriveAddressFromPrivateKey(privateKey);
+
+      // Step 1: obtain the token to sign (no authentication required).
+      const token = await getWeb3KeyToken();
+      // Step 2: sign it with EIP-191 personal_sign and mint the key.
+      const signature = signPersonalMessage(token, privateKey);
+
+      const secretFile = prepareSecretFile(String(options.output));
+      let minted: Awaited<ReturnType<typeof createWeb3ApiKey>>;
+      try {
+        minted = await createWeb3ApiKey({
+          apiKeyType,
+          address,
+          signature,
+          token,
+          description,
+          ...(options.expires ? { expiresAt: options.expires } : {}),
+          ...(Object.keys(consumptionLimit).length > 0
+            ? { consumptionLimit, limitPeriod }
+            : {}),
+        });
+      } catch (error) {
+        secretFile.cleanup();
+        throw error;
+      }
+
+      let saveWarning: string | undefined;
+      try {
+        saveWarning = secretFile.commit(minted.apiKey);
+      } catch (saveError) {
+        let cleanupError: unknown;
+        try {
+          secretFile.cleanup();
+        } catch (error) {
+          cleanupError = error;
+        }
+        const saveFailure = cleanupError === undefined
+          ? summarizeError(saveError, minted.apiKey)
+          : `${summarizeError(saveError, minted.apiKey)}; local temporary-file cleanup failed: ` +
+            summarizeError(cleanupError, minted.apiKey);
+        throw new Error(
+          `Failed to save the API key secret (${saveFailure}). ` +
+          `The key was minted but not saved; revoke it from the Venice dashboard, then retry.`
+        );
+      }
+
+      if (saveWarning !== undefined) {
+        console.error(formatWarning(saveWarning));
+      }
+
+      if (detectOutputFormat(options.format) === 'json') {
+        console.log(JSON.stringify({
+          ...toSafeApiKeyMetadata(minted),
+          secretFile: secretFile.path,
+        }, null, 2));
+        return;
+      }
+
+      console.log(formatSuccess(`Minted ${minted.apiKeyType} API key "${minted.description ?? description}"`));
+      console.log(`ID: ${minted.id}`);
+      console.log(`Secret saved to: ${secretFile.path}`);
+      console.error(formatWarning('The API key secret is never printed and Venice will not show it again.'));
+    });
+
+  keys
     .command('rate-limits')
     .description('Show balances and rate limits for the current API key')
     .option('-f, --format <format>', 'Output format (pretty|json)')
@@ -270,6 +498,13 @@ function validateExpiration(value: string): void {
   if ((!dateOnly.test(value) && !utcDateTime.test(value)) || Number.isNaN(Date.parse(value))) {
     throw new Error('expires must be YYYY-MM-DD or an ISO 8601 UTC timestamp');
   }
+}
+
+function formatConsumptionLimits(limits: ConsumptionLimits): string {
+  const parts: string[] = [];
+  if (limits.usd !== undefined && limits.usd !== null) parts.push(`USD ${limits.usd}`);
+  if (limits.diem !== undefined && limits.diem !== null) parts.push(`DIEM ${limits.diem}`);
+  return parts.length > 0 ? parts.join(', ') : 'none';
 }
 
 function toSafeApiKeyMetadata(key: ApiKeyMetadata): ApiKeyMetadata {

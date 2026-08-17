@@ -1,0 +1,27 @@
+# Remediation Task List
+
+- `[x]` **Streaming and API Reliability (P0/P1)**
+  - `[x]` `src/lib/api.ts`: Add `if (json.error)` check to `chatCompletionStream`
+  - `[x]` `src/lib/api.ts`: Add `AbortSignal` support to stream
+  - `[x]` `src/lib/api.ts`: Fix connection cleanup (`reader.cancel()`)
+  - `[x]` `src/lib/api.stream.test.ts`: Failure-mode tests (json.error, non-SSE JSON error, malformed SSE frame, abort/cancel)
+  - `[x]` `src/agent/runtime.test.ts`: Throwing-tool exception-handling test
+- `[x]` **Error Handling & Agent Runtime (P1)**
+  - `[x]` `src/agent/runtime.ts`: Wrap `tool.execute()` in `try/catch`
+- `[x]` **Sessions & Context (P1)**
+  - `[x]` `src/agent/context.ts`: Modify `compact()` to preserve recent turns
+- `[x]` **Tool System Boundary Defenses (P1)**
+  - `[x]` `src/tools/search/grep.ts`: Slice results to prevent context overflow
+  - `[x]` `src/tools/search/find.ts`: Slice results to prevent context overflow
+  - `[x]` `src/tools/venice/io.ts`: Pass `additionalRoots` to `WorkspaceManager`
+- `[x]` **Model Handling (P1)**
+  - `[x]` `src/lib/api.ts`: Add `bypassCache` option to `listModels`
+  - `[x]` `src/agent/model-catalog.ts`: Pass `bypassCache` correctly
+  - `[x]` `src/types/index.ts`: Add `supportsReasoningEffort`
+  - `[x]` `src/agent/model-profile.ts`: Set `supportsReasoningEffort`
+  - `[x]` `src/ui/slash-handlers.ts`: Gate `/effort` on `supportsReasoningEffort`
+- `[x]` **Config & Secrets (P1)**
+  - `[x]` `src/lib/redactor.ts`: Retrieve and redact configured `api_key`
+- `[x]` **Verification**
+  - `[x]` Run `npm run test:compiled`
+  - `[x]` Run `npm run verify`

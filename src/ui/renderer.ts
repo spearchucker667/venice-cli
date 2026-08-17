@@ -10,6 +10,7 @@ import type { AgentEvent } from '../agent/events.js';
 import { EventBus } from '../agent/events.js';
 import { getChalk } from '../lib/output.js';
 import { toStreamJson, serializeStreamJson } from '../agent/stream-json.js';
+import { getTheme } from './theme.js';
 
 export interface RendererOptions {
   eventBus: EventBus;
@@ -86,7 +87,7 @@ export class AgentRenderer {
         out(c.yellow(`  ? approval required: ${event.toolName}`));
         break;
       case 'file_changed':
-        out(c.blue(`  ~ ${event.path}`));
+        out(getTheme().primary(`  ~ ${event.path}`));
         break;
       case 'context_compacted':
         out(c.dim('  … context compacted'));
@@ -96,6 +97,12 @@ export class AgentRenderer {
         break;
       case 'session_persist_failed':
         out(c.red(`⚠ Session save failed: ${event.message}`));
+        break;
+      case 'model_catalog_failed':
+        out(c.yellow(`⚠ Model discovery failed: ${event.message}`));
+        break;
+      case 'balance_remaining':
+        out(c.dim(`🔋 x402 credits remaining: $${event.balanceUsd.toFixed(4)}`));
         break;
     }
   }

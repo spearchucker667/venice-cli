@@ -22,6 +22,7 @@ import {
 } from '../lib/tools.js';
 import {
   formatUsage,
+  formatUsageHeaders,
   formatError,
   formatWarning,
   getChalk,
@@ -63,7 +64,7 @@ import {
   PROMPT_CACHE_RETENTIONS,
   REASONING_EFFORTS,
 } from '../lib/structured-output.js';
-import type { ChatCompletionRequestOptions } from '../lib/api.js';
+import type { ChatCompletionRequestOptions, UsageHeaders } from '../lib/api.js';
 import {
   assertAttachmentCapabilities,
   assertAttachmentsAllowedForPrivacy,
@@ -880,6 +881,7 @@ export async function streamChat(
   const completionStream = extras.completionStream ?? chatCompletionStream;
 
   let usage: any = null;
+  let usageHeaders: UsageHeaders | undefined;
 
   // E2EE: Build headers
   const additionalHeaders = e2eeContext ? buildE2EEHeaders(e2eeContext) : undefined;
@@ -968,6 +970,9 @@ export async function streamChat(
         if (chunk.usage) {
           usage = chunk.usage;
         }
+        if (chunk.usageHeaders) {
+          usageHeaders = chunk.usageHeaders;
+        }
         if (chunk.done) {
           break;
         }
@@ -1027,6 +1032,12 @@ export async function streamChat(
     // Show usage
     if (usage && format === 'pretty') {
       console.log(formatUsage(usage));
+    }
+
+    // x402 wallet users see their remaining credits after each call
+    if (format === 'pretty' && !quiet) {
+      const headersLine = formatUsageHeaders(usageHeaders);
+      if (headersLine) console.log(headersLine);
     }
 
     // E2EE indicator (skip in quiet mode)
@@ -1191,6 +1202,11 @@ export async function nonStreamChat(
       }
       if (response.usage && format === 'pretty') {
         console.log(formatUsage(response.usage));
+      }
+      // x402 wallet users see their remaining credits after each call
+      if (format === 'pretty' && !extras.quiet) {
+        const headersLine = formatUsageHeaders(response.usageHeaders);
+        if (headersLine) console.log(headersLine);
       }
       return;
     }

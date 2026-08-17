@@ -128,6 +128,29 @@ describe('risk-scoped grants (VC-KIMI-009)', () => {
     assert.strictEqual(await pm.isApproved('write_file', {}, 'write'), true);
     assert.strictEqual(await pm.isApproved('write_file', {}, 'execute'), false);
   });
+
+  it('outside_workspace is never auto-approved by any mode (P2)', async () => {
+    for (const mode of ['suggest', 'auto-edit', 'auto', 'yolo'] as const) {
+      const pm = new PermissionManager(mode);
+      assert.strictEqual(
+        await pm.isApproved('read_file', { path: '/etc/passwd' }, 'outside_workspace'),
+        false,
+        `${mode} must not auto-approve outside_workspace`
+      );
+    }
+  });
+
+  it('a stored outside_workspace grant is reachable and authorizes the call (P2)', async () => {
+    const pm = new PermissionManager('suggest');
+    pm.grant('session', 'read_file', undefined, 'outside_workspace');
+    assert.strictEqual(await pm.isApproved('read_file', { path: '/etc/passwd' }, 'outside_workspace'), true);
+  });
+
+  it('an outside_workspace grant does not cover more severe destructive calls (P2)', async () => {
+    const pm = new PermissionManager('suggest');
+    pm.grant('session', 'shell', undefined, 'outside_workspace');
+    assert.strictEqual(await pm.isApproved('shell', { command: 'rm -rf /' }, 'destructive'), false);
+  });
 });
 
 describe('matchers (VC-KIMI-070/071)', () => {

@@ -177,6 +177,82 @@ export async function deleteApiKey(id: string): Promise<void> {
   }
 }
 
+export async function getApiKey(id: string): Promise<ApiKeyMetadata> {
+  assertApiKeyId(id);
+  const response = await apiRequest<{ data: ApiKeyMetadata }>(`/api_keys/${id}`, {
+    spinnerText: 'Fetching API key...',
+  });
+  return response.data;
+}
+
+export async function updateApiKey(input: {
+  id: string;
+  description?: string;
+  expiresAt?: string | null;
+  consumptionLimit?: ConsumptionLimits;
+  limitPeriod?: 'EPOCH' | 'MONTH' | 'LIFETIME';
+}): Promise<ApiKeyMetadata> {
+  assertApiKeyId(input.id);
+  const body: Record<string, unknown> = { id: input.id };
+  if (input.description !== undefined) body.description = input.description;
+  if (input.expiresAt !== undefined) body.expiresAt = input.expiresAt;
+  if (input.consumptionLimit !== undefined) body.consumptionLimit = input.consumptionLimit;
+  if (input.limitPeriod !== undefined) body.limitPeriod = input.limitPeriod;
+  const response = await apiRequest<{ data: ApiKeyMetadata }>('/api_keys', {
+    method: 'PATCH',
+    body,
+    spinnerText: 'Updating API key...',
+    retries: 0,
+  });
+  return response.data;
+}
+
+export interface ApiKeyRateLimitLogEntry {
+  apiKeyId: string;
+  modelId: string;
+  rateLimitTier: string;
+  rateLimitType: 'RPD' | 'RPM' | 'TPM' | 'FAILED_REQUESTS' | 'UNSUPPORTED_FEATURE_REQUESTS' | string;
+  timestamp: string;
+}
+
+export async function getApiKeyRateLimitLogs(): Promise<ApiKeyRateLimitLogEntry[]> {
+  const response = await apiRequest<{ data: ApiKeyRateLimitLogEntry[] }>('/api_keys/rate_limits/log', {
+    spinnerText: 'Fetching rate limit log...',
+  });
+  return response.data;
+}
+
+export async function getWeb3KeyToken(): Promise<string> {
+  const response = await apiRequest<{ data: { token: string } }>('/api_keys/generate_web3_key', {
+    spinnerText: 'Requesting web3 signing token...',
+    authenticated: false,
+    retries: 0,
+  });
+  return response.data.token;
+}
+
+export async function createWeb3ApiKey(input: {
+  apiKeyType: 'INFERENCE' | 'ADMIN';
+  address: string;
+  signature: string;
+  token: string;
+  description: string;
+  expiresAt?: string;
+  consumptionLimit?: ConsumptionLimits;
+  limitPeriod?: 'EPOCH' | 'MONTH' | 'LIFETIME';
+}): Promise<ApiKeyMetadata & { apiKey: string }> {
+  const response = await apiRequest<{
+    data: ApiKeyMetadata & { apiKey: string };
+  }>('/api_keys/generate_web3_key', {
+    method: 'POST',
+    body: input,
+    spinnerText: 'Minting web3 API key...',
+    authenticated: false,
+    retries: 0,
+  });
+  return response.data;
+}
+
 export async function getApiKeyRateLimits(): Promise<ApiKeyRateLimits> {
   const response = await apiRequest<{ data: ApiKeyRateLimits }>('/api_keys/rate_limits', {
     spinnerText: 'Fetching rate limits...',

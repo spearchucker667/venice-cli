@@ -44,8 +44,40 @@ try {
     assert(fishCompletions.includes(`-a ${cmd} `) || fishCompletions.includes(`-a "${cmd}"`) || fishCompletions.includes(`-a '${cmd}'`), `Fish completion missing command: ${cmd}`);
   }
 
+  // 5. Verify subcommands of command groups are present too (wallet is the
+  // newest group; extend this list as groups are added). This guards against
+  // adding a subcommand without updating the static zsh/fish blocks — bash
+  // derives its list dynamically from the program.
+  const walletHelp = run('node dist/index.js wallet --help');
+  const walletCommands = extractSubcommands(walletHelp);
+  console.log('Detected wallet subcommands:', walletCommands.join(', '));
+  assert(walletCommands.length > 0, 'Wallet should expose subcommands');
+  for (const cmd of walletCommands) {
+    // bash: wallet_cmds="..." is generated from the live program
+    assert(bashCompletions.includes(`wallet_cmds="`) && bashCompletions.split('\n').some(l => l.startsWith('    local wallet_cmds=') && l.includes(cmd)), `Bash completion missing wallet subcommand: ${cmd}`);
+    // zsh: 'name:description' entries inside the wallet _describe block
+    assert(zshCompletions.includes(`'${cmd}:`), `Zsh completion missing wallet subcommand: ${cmd}`);
+    // fish: -a <name> -d "..." lines
+    assert(fishCompletions.includes(`-a ${cmd} `) || fishCompletions.includes(`-a ${cmd}\n`), `Fish completion missing wallet subcommand: ${cmd}`);
+  }
+
   console.log('✅ Completions parity check passed successfully.');
 } catch (e) {
   console.error('❌ Completions Parity Check Failed:', e.message);
   process.exit(1);
+}
+
+function extractSubcommands(helpOutput) {
+  const commandsMatch = helpOutput.match(/Commands:\s+([\s\S]+)$/);
+  if (!commandsMatch) return [];
+  const section = commandsMatch[1];
+  // Only lines that declare a command (`name [options]` or `name <arg>`) are
+  // real subcommands; wrapped description continuation lines (e.g. "wallet"
+  // after "Show the x402 ... for a") must be ignored.
+  return section
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => /^[A-Za-z0-9-]+(\s+\[|\s+<)/.test(l))
+    .map(l => l.split(' ')[0])
+    .filter(c => c && c !== 'help');
 }

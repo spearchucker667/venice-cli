@@ -8,6 +8,7 @@ import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { isPathInside } from '../agent/workspace.js';
 import { findSlashCommands, skillSlashCommands } from './slash-commands.js';
+import { useTheme } from './theme-context.js';
 
 export interface ComposerProps {
   onSubmit: (text: string) => void;
@@ -139,6 +140,7 @@ export async function findMentionCompletions(workspaceRoot: string, query: strin
 }
 
 export function Composer({ onSubmit, onInject, workspaceRoot, inputMode = 'agent', operatingMode = 'agent', disabled, maxSuggestions = 8, columns = 80, skillNames = [] }: ComposerProps): JSX.Element {
+  const { ink } = useTheme();
   const [value, setValue] = useState('');
   const [history, setHistory] = useState<string[]>(() => loadComposerHistory());
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -269,9 +271,9 @@ export function Composer({ onSubmit, onInject, workspaceRoot, inputMode = 'agent
     <Box flexDirection="column">
       {slashOptions.length > 0 && (
         <Box flexDirection="column" borderStyle="round" paddingX={1} marginBottom={1}>
-          <Text bold color="cyan">Commands</Text>
+          <Text bold color={ink.primary}>Commands</Text>
           {slashOptions.map((option, index) => (
-            <Text key={option.name} color={index === slashIndex ? 'green' : undefined}>
+            <Text key={option.name} color={index === slashIndex ? ink.success : undefined}>
               {truncateSuggestion(`${index === slashIndex ? '> ' : '  '}/${option.name} — ${option.description}`, columns)}
             </Text>
           ))}
@@ -279,9 +281,9 @@ export function Composer({ onSubmit, onInject, workspaceRoot, inputMode = 'agent
       )}
       {autocompleteOptions.length > 0 && (
         <Box flexDirection="column" borderStyle="round" paddingX={1} marginBottom={1}>
-          <Text bold color="cyan">Files</Text>
+          <Text bold color={ink.primary}>Files</Text>
           {autocompleteOptions.map((option, index) => (
-            <Text key={option} color={index === autocompleteIndex ? 'green' : undefined}>
+            <Text key={option} color={index === autocompleteIndex ? ink.success : undefined}>
               {truncateSuggestion(`${index === autocompleteIndex ? '> ' : '  '}@${option}`, columns)}
             </Text>
           ))}

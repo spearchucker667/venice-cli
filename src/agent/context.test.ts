@@ -53,6 +53,22 @@ describe('ContextManager', () => {
     assert.ok(tokens > 0);
   });
 
+  it('calibrates the estimate from real usage feedback (P2)', () => {
+    const ctx = new ContextManager();
+    ctx.addConversationMessage({ role: 'user', content: 'Hello world' });
+    const before = ctx.estimateTokens();
+    const bytes = Buffer.byteLength(JSON.stringify(ctx.buildMessages()), 'utf-8');
+
+    // Report a lower tokens-per-byte than the naive heuristic (dense text).
+    ctx.calibrate(bytes, Math.ceil(bytes / 6));
+    const after = ctx.estimateTokens();
+    assert.ok(after < before, 'calibration must lower the estimate when tokens-per-byte is lower');
+
+    // Bogus usage (0 / negative) must not corrupt the factor.
+    ctx.calibrate(bytes, 0);
+    assert.strictEqual(ctx.estimateTokens(), after);
+  });
+
   it('compacts context', () => {
     const ctx = new ContextManager();
     ctx.addConversationMessage({ role: 'user', content: 'Hello' });

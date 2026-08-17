@@ -1,5 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { McpStdioClient } from './client.js';
 import { MCP_PROTOCOL_VERSION } from './protocol.js';
@@ -51,6 +53,39 @@ describe('McpStdioClient', () => {
     );
     await assert.rejects(() => client.start(), /malformed JSON-RPC/);
     await client.stop();
+  });
+
+  it('terminates the whole process tree on malformed JSON-RPC, not just the direct child (P2)', async () => {
+    const pidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-mcp-tree-')), 'grandchild.pid');
+    const script = `
+      const { spawn } = require('node:child_process');
+      const grandchild = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+      require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(grandchild.pid));
+      process.stdin.once('data', () => process.stdout.write('not-json\\n'));
+      setInterval(()=>{},1000);
+    `;
+    const client = new McpStdioClient(
+      { command: 'node', args: ['-e', script] },
+      { startTimeoutMs: 500, requestTimeoutMs: 500, stopGraceMs: 20 }
+    );
+    await assert.rejects(() => client.start(), /malformed JSON-RPC/);
+
+    const pid = Number(fs.readFileSync(pidFile, 'utf-8').trim());
+    // Poll until the grandchild is reaped; a bare SIGTERM to the direct child
+    // would leave it alive (the leak this guards against).
+    let alive = true;
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((r) => setTimeout(r, 50));
+      } catch {
+        alive = false;
+        break;
+      }
+    }
+    assert.strictEqual(alive, false, 'grandchild process must be terminated with the server');
+    fs.rmSync(path.dirname(pidFile), { recursive: true, force: true });
   });
 
   it('rejects unbounded output without newlines and stops the server', async () => {

@@ -16,6 +16,8 @@ import { VeniceModelClient, UNKNOWN_CONTEXT_LIMIT } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
 import type { AgentMessage } from './types.js';
 import { McpManager } from '../mcp/manager.js';
+import { ModelCatalog } from './model-catalog.js';
+import { EventBus } from './events.js';
 import type { ToolDefinition } from '../types/index.js';
 import type { ModelProfile } from './model-profile.js';
 
@@ -1142,6 +1144,158 @@ describe('AgentRuntime', () => {
     assert.strictEqual(call.result.ok, false);
     assert.strictEqual(call.result.error?.code, 'INVALID_ARGUMENTS');
     assert.match(call.result.error?.message ?? '', /schema validation/);
+  });
+
+  it('calibrates the context estimate from real model usage (P2)', async () => {
+    const makeRuntime = (withUsage: boolean) => {
+      const responses: ModelResponse[] = withUsage
+        ? [{ content: 'done', finishReason: 'stop', usage: { prompt_tokens: 100000, completion_tokens: 10, total_tokens: 100010 } }]
+        : [{ content: 'done', finishReason: 'stop' }];
+      return new AgentRuntime({
+        workspaceRoot: tmp,
+        objective: 'x',
+        approvalMode: 'auto',
+        maxTurns: 5,
+        autoValidate: false,
+        modelClient: new MockModelClient(responses),
+        toolRegistry: new ToolRegistry(),
+      });
+    };
+
+    const calibrated = makeRuntime(true);
+    const uncalibrated = makeRuntime(false);
+    await calibrated.run();
+    await uncalibrated.run();
+
+    // Same conversation, but the calibrated runtime learned a far larger
+    // tokens-per-byte ratio from the reported usage, so its estimate must be
+    // much bigger than the uncalibrated byte/4 heuristic.
+    assert.ok(
+      calibrated.getContextManager().estimateTokens() > uncalibrated.getContextManager().estimateTokens(),
+      'model usage must calibrate the context estimate'
+    );
+  });
+
+  it('emits balance_remaining when the API reports X-Balance-Remaining', async () => {
+    const client = new MockModelClient([{
+      content: 'done',
+      finishReason: 'stop',
+      usageHeaders: {
+        balanceRemainingUsd: 4.23,
+        rateLimit: { remaining: 7, limit: 100 },
+      },
+    }]);
+    const eventBus = new EventBus();
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'x',
+      approvalMode: 'auto',
+      maxTurns: 5,
+      autoValidate: false,
+      modelClient: client,
+      eventBus,
+      toolRegistry: new ToolRegistry(),
+    });
+
+    await runtime.run();
+
+    const balanceEvents = eventBus.events.filter((e) => e.type === 'balance_remaining');
+    assert.strictEqual(balanceEvents.length, 1, 'one balance_remaining per model call');
+    const evt = balanceEvents[0] as { balanceUsd: number; rateLimit?: { remaining?: number; limit?: number } };
+    assert.strictEqual(evt.balanceUsd, 4.23);
+    assert.strictEqual(evt.rateLimit?.remaining, 7);
+    assert.strictEqual(evt.rateLimit?.limit, 100);
+  });
+
+  it('does not emit balance_remaining when the API omits the header', async () => {
+    const eventBus = new EventBus();
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'x',
+      approvalMode: 'auto',
+      maxTurns: 5,
+      autoValidate: false,
+      modelClient: new MockModelClient([{ content: 'done', finishReason: 'stop' }]),
+      eventBus,
+      toolRegistry: new ToolRegistry(),
+    });
+
+    await runtime.run();
+
+    assert.strictEqual(eventBus.events.filter((e) => e.type === 'balance_remaining').length, 0);
+  });
+
+  it('surfaces model-discovery failures via model_catalog_failed instead of silently (P2)', async () => {
+    const catalog = new ModelCatalog({
+      fetcher: async () => {
+        throw new Error('catalog down');
+      },
+    });
+    const eventBus = new EventBus();
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Discover models',
+      approvalMode: 'auto',
+      maxTurns: 5,
+      autoValidate: false,
+      modelCatalog: catalog,
+      eventBus,
+      // No modelClient: the runtime builds its own VeniceModelClient with the
+      // injected catalog, exercising the onError -> model_catalog_failed wiring.
+    });
+
+    await runtime.start();
+
+    const failures = eventBus.events.filter((e) => e.type === 'model_catalog_failed');
+    assert.ok(failures.length > 0, 'model discovery failure must be surfaced, not silent');
+    assert.match((failures[0] as { message: string }).message, /catalog down/);
+  });
+
+  it('synthesizes a ToolResult error when a tool throws instead of crashing the loop (P1)', async () => {
+    const registry = new ToolRegistry();
+    const boomTool: AgentTool<Record<string, never>, never> = {
+      name: 'boom',
+      description: 'Always throws during execution',
+      inputSchema: { type: 'object', properties: {} },
+      risk: 'execute',
+      async execute() {
+        throw new Error('kaboom');
+      },
+    };
+    registry.register(boomTool);
+
+    const responses: ModelResponse[] = [
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_boom',
+            type: 'function',
+            function: { name: 'boom', arguments: '{}' },
+          },
+        ],
+        finishReason: 'tool_calls',
+      },
+      { content: 'recovered after failure', finishReason: 'stop' },
+    ];
+
+    const runtime = new AgentRuntime({
+      workspaceRoot: tmp,
+      objective: 'Trigger a throwing tool',
+      approvalMode: 'auto',
+      maxTurns: 5,
+      autoValidate: false,
+      modelClient: new MockModelClient(responses),
+      toolRegistry: registry,
+    });
+
+    const result = await runtime.run();
+    assert.strictEqual(result.state.status, 'complete', 'the loop must survive a throwing tool');
+    const call = result.state.toolHistory[0];
+    assert.strictEqual(call.toolName, 'boom');
+    assert.strictEqual(call.result.ok, false);
+    assert.strictEqual(call.result.error?.code, 'tool_execution_error');
+    assert.match(call.result.error?.message ?? '', /kaboom/);
   });
 
   it('runs parallelSafe tool calls concurrently and records them in order (VCL-R3-022)', async () => {

@@ -26,12 +26,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace.
 - Published package contents exclude compiled tests and the MCP test server.
 
+### Added
+
+- `/delete` TUI slash command to remove a session (refuses the active session).
+- `model_catalog_failed` and `mcp_failed` runtime events so model-discovery and
+  MCP tool-refresh failures surface instead of being swallowed.
+- `npm run typecheck` (`tsc --noEmit`) as a standalone gate, wired into
+  `npm run verify`.
+- Structured error contracts (`cause`/`fix`/`debug`) on `VeniceApiError` for
+  auth, rate-limit, server, and SSE-stream errors, with a `describe()` renderer.
+
+### Changed
+
+- MCP stdio client terminates the full child process tree when a malformed
+  JSON-RPC frame kills the connection; stale `mcp:<server>:` tool definitions are
+  unregistered and `mcp_failed` is emitted when a `tools/list_changed` refresh
+  fails.
+- `/theme` now re-renders the Ink UI with the selected theme (chalk and Ink
+  tokens) instead of leaving components on hardcoded colors.
+- Unknown `/foo` slash commands are forwarded to the agent model (with a
+  "did you mean" hint) instead of being intercepted by the TUI.
+- `config.json` is JSON-Schema validated on load; malformed known fields print a
+  one-time warning to stderr instead of being silently dropped, while unknown
+  keys remain allowed for forward compatibility.
+- Token estimation is calibrated against real model `usage.prompt_tokens` each
+  turn instead of a fixed byte/4 heuristic, so compaction and the context meter
+  reflect actual consumption.
+- `outside_workspace` session grants are honored (stored approvals are no longer
+  unreachable); the risk is still never auto-approved by mode and destructive
+  commands still require explicit approval.
+- ModelCatalog fetch failures emit `model_catalog_failed` instead of falling
+  back silently, and `chatCompletion` throws `VeniceApiError` on 200 responses
+  with an error envelope instead of returning empty output.
+- App startup errors surface in the TUI (`failed` status) instead of being
+  swallowed.
+
+### Added
+
+- `venice wallet top-up` guided x402 payment flow: probes `POST /x402/top-up`
+  (no credentials), renders the Base/Solana USDC payment options, prints the
+  exact x402 SDK signing steps (`npm install x402`, `createPaymentHeader`), and
+  submits a signed `PAYMENT-SIGNATURE` header to credit the wallet.
+- `X-Balance-Remaining` reporting on chat and agent runs: x402 wallet users see
+  their remaining USDC balance after each call, surfaced as a `balance_remaining`
+  runtime event (`balance.remaining` in stream-json) and a credit line in the
+  chat output; `X-RateLimit-*` headers are parsed and reported when present.
+- `apiRequest` accepts `allowedStatuses` so expected non-2xx bodies (the x402
+  top-up probe's 402 requirements) are parsed as data instead of thrown.
+- Completions parity check now verifies `wallet` subcommands across bash/zsh/fish
+  automatically.
+
 ### Fixed
 
 - Normalized E2EE and TEE TypeScript sources to UTF-8 so ESLint can parse them.
 - Made macOS secret-file tests compare canonical filesystem paths.
 - Replaced the vulnerable `elliptic` dependency with Noble's maintained
   secp256k1 implementation while preserving E2EE wire behavior.
+- MCP child-process leak: grandchildren of an MCP server were orphaned when a
+  malformed frame killed the direct child.
 
 ## [2.0.0] - 2026-02-25
 

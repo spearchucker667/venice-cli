@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  chatCompletion,
   completeVideo,
   cryptoRpc,
   dedicatedWebSearch,
@@ -19,6 +20,7 @@ import {
   scrapeWebPage,
   transcribeVideo,
   videoUrlFromStatus,
+  VeniceApiError,
 } from './api.js';
 import type { Character, CharacterReviewsPage } from '../types/index.js';
 
@@ -306,6 +308,60 @@ function jsonResponse(body: unknown): Response {
     headers: { 'Content-Type': 'application/json' },
   });
 }
+
+test('chatCompletion throws VeniceApiError on a 200 error envelope instead of silent empty output', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+
+  try {
+    process.env.VENICE_API_KEY = 'test-key';
+
+    globalThis.fetch = (async () => {
+      return jsonResponse({ error: { message: 'rate limited', code: 'rate_limit_exceeded' } });
+    }) as typeof fetch;
+
+    await assert.rejects(
+      () => chatCompletion([{ role: 'user', content: 'hi' }], { showSpinner: false }),
+      (err: unknown) =>
+        err instanceof VeniceApiError &&
+        /rate limited/.test(err.message) &&
+        err.code === 'rate_limit_exceeded'
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('VeniceApiError carries a cause/fix/debug contract for known statuses (P2)', () => {
+  const rateLimited = VeniceApiError.fromResponse(
+    new Response(null, { status: 429, headers: { 'Retry-After': '30' } }),
+    JSON.stringify({ error: { message: 'slow down', code: 'rate_limit_exceeded' } })
+  );
+  assert.strictEqual(rateLimited.isRateLimited(), true);
+  assert.match(rateLimited.cause ?? '', /rate limit/i);
+  assert.match(rateLimited.fix ?? '', /retry/i);
+  assert.match(rateLimited.debug ?? '', /Retry-After: 30/);
+  assert.match(rateLimited.describe(), /Cause:/);
+  assert.match(rateLimited.describe(), /Fix:/);
+
+  const auth = VeniceApiError.fromResponse(new Response(null, { status: 401 }), 'nope');
+  assert.match(auth.cause ?? '', /Authentication/i);
+  assert.match(auth.fix ?? '', /api_key/i);
+
+  const server = VeniceApiError.fromResponse(new Response(null, { status: 503 }), 'boom');
+  assert.match(server.cause ?? '', /server error/i);
+  assert.match(server.fix ?? '', /retry/i);
+
+  // Unknown statuses keep a clean message but no fabricated contract.
+  const other = VeniceApiError.fromResponse(new Response(null, { status: 418 }), 'teapot');
+  assert.strictEqual(other.cause, undefined);
+  assert.strictEqual(other.describe(), 'teapot');
+});
 
 test('listCryptoNetworks is a public GET without Authorization', async () => {
   const originalFetch = globalThis.fetch;

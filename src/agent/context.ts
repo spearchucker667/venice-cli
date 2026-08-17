@@ -31,6 +31,10 @@ export class ContextManager {
   private fileContext: AgentMessage[] = [];
   private summary?: StructuredSummary;
   private activeSkills: Skill[] = [];
+  // Tokens-per-byte factor for the estimate. Starts at the classic UTF-8
+  // heuristic (1 token per 4 bytes) and is blended toward the model's actual
+  // reported prompt token ratio each turn (P2 token estimation).
+  private tokensPerByte = 0.25;
 
   constructor(budget?: Partial<ContextBudget>) {
     this.budget = {
@@ -172,10 +176,23 @@ export class ContextManager {
     return messages;
   }
 
+  /**
+   * Blend the observed tokens-per-byte ratio into the estimate factor using
+   * the model's actual `prompt_tokens` for the exact message set that was
+   * sent (P2). Code-heavy and CJK content drift far from the naive 1/4
+   * heuristic, so learning from real usage makes compaction and the status
+   * bar reflect actual consumption.
+   */
+  calibrate(bytes: number, promptTokens: number): void {
+    if (!Number.isFinite(promptTokens) || promptTokens <= 0) return;
+    const observed = promptTokens / Math.max(1, bytes);
+    // Smooth to avoid a single outlier turn swinging the estimate.
+    this.tokensPerByte = this.tokensPerByte * 0.7 + observed * 0.3;
+  }
+
   estimateTokens(): number {
     const text = JSON.stringify(this.buildMessages());
-    // UTF-8 byte count / 4 is a reasonable fast heuristic for mixed text.
-    return Math.ceil(Buffer.byteLength(text, 'utf-8') / 4);
+    return Math.ceil(Buffer.byteLength(text, 'utf-8') * this.tokensPerByte);
   }
 
   shouldCompact(): boolean {

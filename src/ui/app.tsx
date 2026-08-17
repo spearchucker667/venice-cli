@@ -2,7 +2,7 @@
  * Top-level Ink app for the Venice agent TUI.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import type { AgentRuntime } from '../agent/runtime.js';
 import { AgentRuntime as AgentRuntimeClass } from '../agent/runtime.js';
@@ -16,6 +16,8 @@ import type { ApprovalMode } from '../agent/permissions.js';
 import type { ProjectAgentConfig } from '../lib/config.js';
 import { Composer } from './composer.js';
 import { Transcript } from './transcript.js';
+import { ThemeProvider, useTheme } from './theme-context.js';
+import { getActiveThemeName, type ThemeName } from './theme.js';
 import { Greeting } from './greeting.js';
 import { resolveGreetingPolicy } from './brand.js';
 import { StatusBar } from './status.js';
@@ -95,6 +97,11 @@ function useStdoutDimensions() {
 
 import { execSync } from 'child_process';
 
+function ThemedError({ message }: { message: string }): JSX.Element {
+  const { ink } = useTheme();
+  return <Text color={ink.error}>Error: {message}</Text>;
+}
+
 function getGitBranch(cwd: string): string | undefined {
   try {
     return execSync('git branch --show-current', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
@@ -125,6 +132,8 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
   const [queuedCount, setQueuedCount] = useState(0);
   const [greetingVisible, setGreetingVisible] = useState(true);
   const [gitBranch] = useState(() => getGitBranch(workspaceRoot));
+  const [themeName, setThemeName] = useState<ThemeName>(() => getActiveThemeName());
+  const refreshTheme = useCallback(() => setThemeName(getActiveThemeName()), []);
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
@@ -308,7 +317,12 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
           setIsRunning(false);
         });
     } else {
-      runtime.start().catch(() => {});
+      // Surface startup failures instead of swallowing them (P2): a broken
+      // workspace/MCP setup must not leave the UI looking healthy.
+      runtime.start().catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+        setStatus('failed');
+      });
     }
 
     return () => {
@@ -480,6 +494,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
           exit();
           onExit();
         },
+        refreshTheme,
         setMessages,
         status,
         model: currentModel,
@@ -491,6 +506,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
         showSessionPicker: () => setPickerMode('session-picker'),
         resumeSession: handleResumeSession,
         listSessions: () => new SessionManager().list(workspaceRoot),
+        deleteSession: (id) => new SessionManager().delete(id),
         mcpManager,
         getRuntime: () => runtimeRef.current ?? undefined,
       });
@@ -540,7 +556,8 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
     pickerMode === 'normal';
 
   return (
-    <Box flexDirection="column" height={rows} width={columns}>
+    <ThemeProvider themeName={themeName} refreshTheme={refreshTheme}>
+      <Box flexDirection="column" height={rows} width={columns}>
       {showGreeting && (
         <Greeting
           columns={columns}
@@ -559,7 +576,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
       <Transcript messages={messages} maxMessages={Math.max(3, rows - 8)} />
       {error && (
         <Box paddingX={1}>
-          <Text color="red">Error: {error}</Text>
+          <ThemedError message={error} />
         </Box>
       )}
       {pickerMode === 'model-picker' && (
@@ -637,6 +654,7 @@ export function App({ workspaceRoot, model, approvalMode, mode: initialMode, max
           gitBranch,
         }}
       />
-    </Box>
+      </Box>
+    </ThemeProvider>
   );
 }

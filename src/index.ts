@@ -28,6 +28,7 @@ import { registerTeeCommand } from './commands/tee.js';
 import { registerRpcCommand } from './commands/rpc.js';
 import { registerBillingCommand } from './commands/billing.js';
 import { registerKeysCommand } from './commands/keys.js';
+import { registerWalletCommand } from './commands/wallet.js';
 import { registerAugmentCommands } from './commands/augment.js';
 import { registerAgentCommand } from './commands/agent.js';
 import { registerMcpCommand } from './commands/mcp.js';
@@ -89,6 +90,7 @@ async function main() {
   registerRpcCommand(program);
   registerBillingCommand(program);
   registerKeysCommand(program);
+  registerWalletCommand(program);
   registerAugmentCommands(program);
   registerAgentCommand(program);
   registerMcpCommand(program);

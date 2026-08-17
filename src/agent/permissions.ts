@@ -144,15 +144,16 @@ export class PermissionManager {
   }
 
   async isApproved(toolName: string, input: unknown, risk: RiskLevel): Promise<boolean> {
-    if (risk === 'outside_workspace') {
-      return false;
-    }
+    // `outside_workspace` is never auto-approved by mode — it requires an
+    // explicit grant or a fresh approval. Previously it returned false before
+    // the grant loop, making stored session/pattern grants for it unreachable
+    // and forcing a re-prompt on every call (P2).
 
-    if (this.mode === 'yolo' && risk !== 'destructive') {
+    if (this.mode === 'yolo' && risk !== 'destructive' && risk !== 'outside_workspace') {
       return true;
     }
 
-    if (this.mode === 'auto' && risk !== 'destructive' && risk !== 'network' && risk !== 'external_side_effect') {
+    if (this.mode === 'auto' && risk !== 'destructive' && risk !== 'network' && risk !== 'external_side_effect' && risk !== 'outside_workspace') {
       return true;
     }
 

@@ -56,8 +56,22 @@ const DOCUMENT_PARSE_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_DOCUMENT_PARSE_RESPONSE_BYTES = 50 * 1024 * 1024;
 const MAX_VIDEO_STATUS_BYTES = 1024 * 1024;
 
-export class VeniceApiError extends Error {
+/**
+ * Structured error contract (P2): every API error carries an actionable
+ * `cause`/`fix`/`debug` triple so callers and the UI can show recovery steps
+ * instead of a bare message. `describe()` renders it as plain text.
+ */
+export interface VeniceErrorContract {
+  cause?: string;
+  fix?: string;
+  debug?: string;
+}
+
+export class VeniceApiError extends Error implements VeniceErrorContract {
   public retryAfter?: number;
+  public cause?: string;
+  public fix?: string;
+  public debug?: string;
   
   constructor(
     message: string,
@@ -74,14 +88,17 @@ export class VeniceApiError extends Error {
     const status = response.status;
     const retryAfter = parseRetryAfterHeader(response.headers.get('retry-after'));
     
+    let error: VeniceApiError;
     try {
       const json = JSON.parse(body);
       const message = json.error?.message || json.message || body;
       const code = json.error?.code;
-      return new VeniceApiError(message, status, code, retryAfter);
+      error = new VeniceApiError(message, status, code, retryAfter);
     } catch {
-      return new VeniceApiError(body || `HTTP ${status}`, status, undefined, retryAfter);
+      error = new VeniceApiError(body || `HTTP ${status}`, status, undefined, retryAfter);
     }
+    applyStatusContract(error, status, retryAfter);
+    return error;
   }
 
   isRetryable(): boolean {
@@ -96,6 +113,34 @@ export class VeniceApiError extends Error {
 
   isRateLimited(): boolean {
     return this.statusCode === 429;
+  }
+
+  /** Render the cause/fix/debug contract as a single human-readable string. */
+  describe(): string {
+    const parts = [
+      this.cause ? `Cause: ${this.cause}` : undefined,
+      this.fix ? `Fix: ${this.fix}` : undefined,
+      this.debug ? `Debug: ${this.debug}` : undefined,
+    ].filter((part): part is string => Boolean(part));
+    return parts.length ? parts.join('\n') : this.message;
+  }
+}
+
+/** Attach the cause/fix/debug contract for well-known HTTP statuses. */
+function applyStatusContract(error: VeniceApiError, status: number, retryAfter?: number): void {
+  if (status === 401 || status === 403) {
+    error.cause = 'Authentication was rejected by the Venice API';
+    error.fix =
+      'Check VENICE_API_KEY / X_SIGN_IN_WITH_X, or run `venice config set api_key`; the credential may be invalid or expired.';
+    error.debug = `HTTP ${status}`;
+  } else if (status === 429) {
+    error.cause = 'The Venice API rate limit was exceeded';
+    error.fix = 'Wait for the retry-after window (or slow the request rate) and retry.';
+    error.debug = retryAfter ? `Retry-After: ${retryAfter}s` : 'No Retry-After header';
+  } else if (status >= 500 && status < 600) {
+    error.cause = 'The Venice API reported a server error';
+    error.fix = 'Retry after a short delay; if it persists, check https://status.venice.ai.';
+    error.debug = `HTTP ${status}`;
   }
 }
 
@@ -123,6 +168,61 @@ export function getHeaders(
     }
   }
   return headers;
+}
+
+/**
+ * Usage/billing headers reported by the API on inference responses.
+ *
+ * `X-Balance-Remaining` is only present for x402 wallet auth and carries the
+ * USDC credit balance left after the request. `X-RateLimit-*` headers are set
+ * when a rate-limit response is returned; parsing them defensively means any
+ * future success-path rate info also surfaces (VC-AUD-037 parity).
+ */
+export interface UsageHeaders {
+  /** Remaining x402 credit balance in USD after this request (x402 auth only). */
+  balanceRemainingUsd?: number;
+  /** Per-minute request cap information when the API includes it. */
+  rateLimit?: {
+    /** Per-minute request cap for the caller's tier. */
+    limit?: number;
+    /** Requests remaining in the current 60-second window. */
+    remaining?: number;
+    /** Unix timestamp (seconds) when the current window resets. */
+    reset?: number;
+  };
+}
+
+/** Parse X-Balance-Remaining / X-RateLimit-* into a typed UsageHeaders object. */
+export function parseUsageHeaders(headers: Headers): UsageHeaders {
+  const parsed: UsageHeaders = {};
+
+  const balance = headers.get('x-balance-remaining');
+  if (balance) {
+    const value = Number(balance);
+    if (Number.isFinite(value)) parsed.balanceRemainingUsd = value;
+  }
+
+  const limit = headers.get('x-ratelimit-limit');
+  const remaining = headers.get('x-ratelimit-remaining');
+  const reset = headers.get('x-ratelimit-reset');
+  if (limit !== null || remaining !== null || reset !== null) {
+    const rateLimit: NonNullable<UsageHeaders['rateLimit']> = {};
+    if (limit !== null) {
+      const value = Number(limit);
+      if (Number.isFinite(value)) rateLimit.limit = value;
+    }
+    if (remaining !== null) {
+      const value = Number(remaining);
+      if (Number.isFinite(value)) rateLimit.remaining = value;
+    }
+    if (reset !== null) {
+      const value = Number(reset);
+      if (Number.isFinite(value)) rateLimit.reset = value;
+    }
+    parsed.rateLimit = rateLimit;
+  }
+
+  return parsed;
 }
 
 function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
@@ -169,7 +269,7 @@ async function checkOnline(): Promise<boolean> {
 }
 
 type ApiRequestOptions = {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: unknown;
   retries?: number;
   showSpinner?: boolean;
@@ -178,6 +278,12 @@ type ApiRequestOptions = {
   additionalHeaders?: Record<string, string>;
   authenticated?: boolean;
   onHeaders?: (headers: Headers) => void;
+  /**
+   * HTTP statuses that are parsed as a normal JSON body instead of throwing
+   * (e.g. the x402 top-up probe expects a 402 with payment requirements).
+   * Only meaningful for JSON responses; binary paths always throw.
+   */
+  allowedStatuses?: number[];
 } & (
   | {
       responseType?: 'json';
@@ -249,7 +355,7 @@ export async function apiRequest<T>(
         signal: controller.signal,
       });
 
-      if (!response.ok) {
+      if (!response.ok && !(options.allowedStatuses?.includes(response.status))) {
         let errorBody: string;
         if (binaryOptions) {
           const errorBytes = await readResponseBodyWithLimit(
@@ -509,22 +615,42 @@ export async function chatCompletion(
   }>;
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
   finish_reason: string;
+  /** X-Balance-Remaining / X-RateLimit-* reported by the API for this call. */
+  usageHeaders?: UsageHeaders;
 }> {
   const body = buildChatCompletionBody(messages, options, false);
 
+  let capturedHeaders: UsageHeaders | undefined;
   const response = await apiRequest<{
     choices: Array<{
       message: { content: string; reasoning_content?: string; tool_calls?: any[] };
       finish_reason: string;
     }>;
     usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+    /** Error envelope returned with HTTP 200 — must not become silent output. */
+    error?: { message?: string; code?: string };
   }>('/chat/completions', {
     method: 'POST',
     body,
     spinnerText: 'Thinking...',
     showSpinner: options.showSpinner,
     additionalHeaders: options.additionalHeaders,
+    onHeaders: (headers) => {
+      capturedHeaders = parseUsageHeaders(headers);
+    },
   });
+
+  // A 200-with-error-envelope (e.g. a rate limit reported in the body after
+  // headers flushed) must surface as a VeniceApiError, mirroring
+  // chatCompletionStream. Otherwise `choice?.message?.content || ''` returns
+  // empty output silently.
+  if (response.error) {
+    throw new VeniceApiError(
+      response.error.message || JSON.stringify(response.error),
+      undefined,
+      response.error.code
+    );
+  }
 
   const choice = response.choices?.[0];
   const usage = response.usage;
@@ -544,6 +670,9 @@ export async function chatCompletion(
     tool_calls: choice?.message?.tool_calls,
     usage,
     finish_reason: choice?.finish_reason || 'stop',
+    ...(capturedHeaders && (capturedHeaders.balanceRemainingUsd !== undefined || capturedHeaders.rateLimit)
+      ? { usageHeaders: capturedHeaders }
+      : {}),
   };
 }
 
@@ -559,6 +688,8 @@ export async function* chatCompletionStream(
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
   completionId?: string;
   done: boolean;
+  /** X-Balance-Remaining / X-RateLimit-* reported by the API for this call. */
+  usageHeaders?: UsageHeaders;
 }> {
   const body = buildChatCompletionBody(messages, options, true);
 
@@ -575,6 +706,8 @@ export async function* chatCompletionStream(
     const errorBytes = await response.text();
     throw VeniceApiError.fromResponse(response, errorBytes);
   }
+
+  const usageHeaders = parseUsageHeaders(response.headers);
 
   const reader = response.body?.getReader();
   if (!reader) throw new Error('No response body');
@@ -626,7 +759,7 @@ export async function* chatCompletionStream(
                 ...totalUsage,
               });
             }
-            yield { done: true, usage: totalUsage, completionId };
+            yield { done: true, usage: totalUsage, completionId, usageHeaders };
             return;
           }
 
@@ -634,7 +767,15 @@ export async function* chatCompletionStream(
             const json = JSON.parse(data);
             
             if (json.error) {
-              throw new VeniceApiError(json.error.message || JSON.stringify(json.error), json.error.code);
+              const streamError = new VeniceApiError(
+                json.error.message || JSON.stringify(json.error),
+                undefined,
+                json.error.code
+              );
+              streamError.cause = 'The Venice API returned an error during the stream';
+              streamError.fix = 'Retry the request; if the error persists, check the model and your quota.';
+              streamError.debug = json.error.code ? `Code: ${json.error.code}` : undefined;
+              throw streamError;
             }
 
             const choice = json.choices?.[0];
@@ -664,7 +805,10 @@ export async function* chatCompletionStream(
             if (choice?.finish_reason) {
               yield { finish_reason: choice.finish_reason, done: false, completionId };
             }
-          } catch {
+          } catch (err) {
+            // A VeniceApiError raised for a mid-stream json.error payload must
+            // propagate as-is; only JSON.parse failures are malformed frames.
+            if (err instanceof VeniceApiError) throw err;
             // VC-KIMI-031: never silently drop malformed SSE frames. Surface a
             // bounded snippet so tool calls, text, usage, or finish reasons are
             // not lost without notice.
@@ -680,7 +824,7 @@ export async function* chatCompletionStream(
     reader.cancel().catch(() => {});
   }
 
-  yield { done: true, usage: totalUsage, completionId };
+  yield { done: true, usage: totalUsage, completionId, usageHeaders };
 }
 
 // Image generation (Venice-native endpoint)

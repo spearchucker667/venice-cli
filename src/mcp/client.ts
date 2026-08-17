@@ -304,7 +304,10 @@ export class McpStdioClient {
       } catch {
         const error = new Error('MCP server sent malformed JSON-RPC');
         this.rejectPending(error);
-        this.process?.kill('SIGTERM');
+        // P2: use stop() so the whole process group is terminated (via
+        // terminateProcessTree/forceKillProcessTree), not a bare SIGTERM that
+        // leaks orphaned child processes.
+        this.stop().catch(() => {});
       }
     }
   }

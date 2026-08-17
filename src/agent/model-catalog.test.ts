@@ -76,4 +76,22 @@ describe('ModelCatalog (VCL-R3-027)', () => {
     const catalog = new ModelCatalog({ fetcher: async () => [agentModel] });
     assert.strictEqual(await catalog.find('nope'), undefined);
   });
+
+  it('surfaces fetch failures via onError instead of swallowing them (P2)', async () => {
+    const failures: unknown[] = [];
+    const catalog = new ModelCatalog({
+      fetcher: async () => {
+        throw new Error('catalog boom');
+      },
+      onError: (error) => failures.push(error),
+    });
+
+    await assert.rejects(() => catalog.listModels(), /catalog boom/);
+    assert.strictEqual(failures.length, 1, 'onError must be invoked on fetch failure');
+    assert.match(String(failures[0]), /catalog boom/);
+
+    // A subsequent call retries (the failed fetch must not poison the cache).
+    await assert.rejects(() => catalog.listModels(), /catalog boom/);
+    assert.strictEqual(failures.length, 2);
+  });
 });

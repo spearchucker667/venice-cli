@@ -17,7 +17,7 @@ import { ContextManager, buildStructuredSummary } from './context.js';
 import { SessionManager } from './sessions.js';
 import { VeniceModelClient, UNKNOWN_CONTEXT_LIMIT } from './model-client.js';
 import type { ModelResponse } from './model-client.js';
-import type { ModelCatalog } from './model-catalog.js';
+import { ModelCatalog } from './model-catalog.js';
 import { loadInstructions } from './instructions.js';
 import { WorkspaceManager, detectGitRoot } from './workspace.js';
 import { getDefaultModel, loadProjectConfig, type ProjectAgentConfig } from '../lib/config.js';
@@ -164,9 +164,21 @@ export class AgentRuntime {
         sourcePath: options.agent.sourcePath,
       };
     }
+    // Surface model-discovery failures as an event instead of silently
+    // falling back to a heuristic context budget (P2). Wired on whichever
+    // catalog the client will use (injected or the runtime's own default).
+    const catalog = options.modelCatalog ?? new ModelCatalog();
+    catalog.setOnError((error) => {
+      this.emit({
+        type: 'model_catalog_failed',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
     this.modelClient = options.modelClient || new VeniceModelClient({
       model: this.state.model,
-      catalog: options.modelCatalog,
+      catalog,
     });
     this.registry = options.toolRegistry || createDefaultRegistry();
     this.permissions = options.permissionManager || new PermissionManager(approvalMode);
@@ -852,6 +864,17 @@ export class AgentRuntime {
       this.mcpManager.setToolsChangedHandler((serverName, tools) => {
         this.replaceMcpTools(serverName, tools);
       });
+      // A failed refresh must not leave stale tool definitions in the agent's
+      // context: unregister the server's namespace and surface the error (P2).
+      this.mcpManager.setToolsRefreshFailedHandler((serverName, error) => {
+        this.registry.unregisterPrefix(`mcp:${serverName}:`);
+        this.emit({
+          type: 'mcp_failed',
+          timestamp: new Date().toISOString(),
+          eventId: randomUUID(),
+          message: `MCP server '${serverName}' tool refresh failed: ${error}`,
+        });
+      });
       const servers = this.mcpManager.getServerStates().map((s) => ({
         name: s.name,
         toolCount: s.tools.length,
@@ -947,7 +970,7 @@ export class AgentRuntime {
     // The model client streams; surface incremental content and reasoning as
     // events so consumers can render progressively (VCL-R3-012). The canonical
     // assistant message is still persisted once after the stream finishes.
-    return await this.modelClient.complete(
+    const response = await this.modelClient.complete(
       messages,
       tools,
       (chunk) => {
@@ -972,6 +995,26 @@ export class AgentRuntime {
       },
       { reasoningEffort: this.state.reasoningEffort }
     );
+    // Calibrate the context estimate with the model's actual prompt token
+    // count for the exact message set just sent (P2): the byte-length
+    // heuristic drifts for code-heavy content, so learn the real
+    // tokens-per-byte ratio each turn.
+    if (response.usage?.prompt_tokens) {
+      const bytes = Buffer.byteLength(JSON.stringify(messages), 'utf-8');
+      this.context.calibrate(bytes, response.usage.prompt_tokens);
+    }
+    // x402 wallet users see their remaining credits after each model call
+    // (X-Balance-Remaining header, present for SIGN-IN-WITH-X auth).
+    if (response.usageHeaders?.balanceRemainingUsd !== undefined) {
+      this.emit({
+        type: 'balance_remaining',
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+        balanceUsd: response.usageHeaders.balanceRemainingUsd,
+        ...(response.usageHeaders.rateLimit ? { rateLimit: response.usageHeaders.rateLimit } : {}),
+      });
+    }
+    return response;
   }
 
   /**

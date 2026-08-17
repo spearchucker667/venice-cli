@@ -99,6 +99,14 @@ export function toStreamJson(
       return { ...base, type: 'model.request', data: { messageCount: event.messageCount } };
     case 'model_profile_updated':
       return { ...base, type: 'model.profile_updated', data: { profile: event.profile } };
+    case 'model_catalog_failed':
+      return { ...base, type: 'model.catalog_failed', data: { message: event.message } };
+    case 'balance_remaining':
+      return {
+        ...base,
+        type: 'balance.remaining',
+        data: { balanceUsd: event.balanceUsd, rateLimit: event.rateLimit },
+      };
     case 'assistant_delta':
       return { ...base, type: 'assistant.message', data: { content: event.content } };
     case 'assistant_reasoning':

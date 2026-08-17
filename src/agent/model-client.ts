@@ -8,7 +8,7 @@
 import type { AgentMessage, TokenUsage } from './types.js';
 import type { Message } from '../types/index.js';
 import type { ToolDefinition } from '../types/index.js';
-import { chatCompletionStream, type VeniceApiError } from '../lib/api.js';
+import { chatCompletionStream, type VeniceApiError, type UsageHeaders } from '../lib/api.js';
 import { getDefaultModel } from '../lib/config.js';
 import { profileModel, type ModelProfile } from './model-profile.js';
 import { ModelCatalog } from './model-catalog.js';
@@ -42,6 +42,8 @@ export interface ModelResponse {
   finishReason: string;
   /** True when the response was assembled from a streaming request (VCL-R3-012). */
   streamed?: boolean;
+  /** X-Balance-Remaining / X-RateLimit-* reported by the API for this call. */
+  usageHeaders?: UsageHeaders;
 }
 
 export interface StreamingDelta {
@@ -50,6 +52,7 @@ export interface StreamingDelta {
   toolCalls?: unknown[];
   finishReason?: string;
   usage?: TokenUsage;
+  usageHeaders?: UsageHeaders;
   done: boolean;
 }
 
@@ -88,6 +91,7 @@ export class VeniceModelClient {
     let finishReason = 'stop';
     let usage: TokenUsage | undefined;
     let sawToolCalls = false;
+    let usageHeaders: UsageHeaders | undefined;
     // OpenAI-style streaming tool-call deltas are keyed by index with
     // fragmented name/arguments strings that must be concatenated.
     const toolCalls = new Map<number, { id?: string; type?: string; name?: string; arguments?: string }>();
@@ -117,6 +121,7 @@ export class VeniceModelClient {
       }
       if (delta.finishReason) finishReason = delta.finishReason;
       if (delta.usage) usage = delta.usage;
+      if (delta.usageHeaders) usageHeaders = delta.usageHeaders;
     }
 
     const assembledToolCalls: ModelResponse['toolCalls'] = sawToolCalls && toolCalls.size > 0
@@ -136,6 +141,9 @@ export class VeniceModelClient {
       usage,
       finishReason,
       streamed: true,
+      ...(usageHeaders && (usageHeaders.balanceRemainingUsd !== undefined || usageHeaders.rateLimit)
+        ? { usageHeaders }
+        : {}),
     };
   }
 
@@ -154,6 +162,7 @@ export class VeniceModelClient {
         toolCalls: delta.tool_calls,
         finishReason: delta.finish_reason,
         usage: delta.usage,
+        usageHeaders: delta.usageHeaders,
         done: delta.done,
       };
     }

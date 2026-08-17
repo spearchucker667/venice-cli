@@ -12,6 +12,8 @@ export type AgentEvent =
   | { type: 'message_injected'; timestamp: string; eventId: string; content: string }
   | { type: 'model_request'; timestamp: string; eventId: string; messageCount: number }
   | { type: 'model_profile_updated'; timestamp: string; eventId: string; profile: import('./model-profile.js').ModelProfile }
+  | { type: 'model_catalog_failed'; timestamp: string; eventId: string; message: string }
+  | { type: 'balance_remaining'; timestamp: string; eventId: string; balanceUsd: number; rateLimit?: { limit?: number; remaining?: number; reset?: number } }
   | { type: 'assistant_delta'; timestamp: string; eventId: string; turnId: string; content?: string; toolCalls?: unknown[] }
   | { type: 'assistant_reasoning'; timestamp: string; eventId: string; turnId: string; content?: string }
   | { type: 'assistant_complete'; timestamp: string; eventId: string; turnId: string; content: string }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { chatCompletionStream } from './api.js';
+import { chatCompletionStream, VeniceApiError } from './api.js';
 
 test('SSE parser: handles complete lines, optional spaces, and EOF without trailing newline', async () => {
   const originalFetch = globalThis.fetch;
@@ -87,6 +87,171 @@ test('SSE parser: ignores comments and heartbeats', async () => {
     }
 
     assert.equal(events.length, 2);
+    assert.equal(events[0].content, 'A');
+    assert.equal(events[1].done, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('SSE parser: mid-stream json.error throws VeniceApiError instead of swallowing (P0)', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+
+  try {
+    process.env.VENICE_API_KEY = 'test-key';
+
+    globalThis.fetch = (async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n' +
+                'data: {"error":{"message":"rate limit exceeded","code":"rate_limit_exceeded"}}\n\n'
+            )
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    }) as typeof fetch;
+
+    const stream = chatCompletionStream([{ role: 'user', content: 'test' }]);
+    const events: Array<{ content?: string; done?: boolean }> = [];
+    let thrown: unknown;
+    try {
+      for await (const event of stream) {
+        events.push(event);
+      }
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, 'mid-stream json.error must surface as a thrown error, not silent empty output');
+    assert.ok(thrown instanceof VeniceApiError, `expected VeniceApiError, got ${(thrown as Error)?.constructor?.name}`);
+    assert.match((thrown as VeniceApiError).message, /rate limit exceeded/);
+    assert.equal((thrown as VeniceApiError).code, 'rate_limit_exceeded');
+    // Content emitted before the error is still surfaced to the caller.
+    assert.equal(events.length, 1);
+    assert.equal(events[0].content, 'partial');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('SSE parser: non-SSE JSON error response throws VeniceApiError (P2 media fix)', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+
+  try {
+    process.env.VENICE_API_KEY = 'test-key';
+
+    // A 200 with an application/json body is an error envelope, not an SSE stream.
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({ error: { message: 'upstream failure', code: 'upstream' } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const stream = chatCompletionStream([{ role: 'user', content: 'test' }]);
+    await assert.rejects(
+      async () => {
+        for await (const _event of stream) {
+          /* drain */
+        }
+      },
+      (err: unknown) => err instanceof VeniceApiError && /upstream failure/.test(err.message)
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('SSE parser: malformed SSE frame surfaces a bounded snippet instead of silent drop (VC-KIMI-031)', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+
+  try {
+    process.env.VENICE_API_KEY = 'test-key';
+
+    globalThis.fetch = (async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {this is not valid json'));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    }) as typeof fetch;
+
+    const stream = chatCompletionStream([{ role: 'user', content: 'test' }]);
+    await assert.rejects(
+      async () => {
+        for await (const _event of stream) {
+          /* drain */
+        }
+      },
+      /Malformed SSE frame from API/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) {
+      delete process.env.VENICE_API_KEY;
+    } else {
+      process.env.VENICE_API_KEY = originalApiKey;
+    }
+  }
+});
+
+test('SSE parser: aborting the request signal cancels the reader cleanly (P1 stream cancellation)', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalApiKey = process.env.VENICE_API_KEY;
+
+  try {
+    process.env.VENICE_API_KEY = 'test-key';
+
+    let cancelCalled = false;
+    globalThis.fetch = (async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"A"}}]}\n\n'));
+          // Leave the stream open so the abort/cancel path is exercised.
+        },
+        cancel() {
+          cancelCalled = true;
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    }) as typeof fetch;
+
+    const controller = new AbortController();
+    const stream = chatCompletionStream([{ role: 'user', content: 'test' }], { abortSignal: controller.signal });
+    const events: Array<{ content?: string; done?: boolean }> = [];
+    for await (const event of stream) {
+      events.push(event);
+      if (event.content === 'A') {
+        controller.abort(); // triggers reader.cancel() -> stream cancel; pending read resolves done:true
+      }
+    }
+
+    assert.equal(cancelCalled, true, 'reader.cancel() must be invoked on abort');
+    assert.equal(events.length, 2, "expected the chunk plus the final { done: true }");
     assert.equal(events[0].content, 'A');
     assert.equal(events[1].done, true);
   } finally {

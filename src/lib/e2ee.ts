@@ -184,6 +184,44 @@ export const recoverSignerAddress = (message: string, signatureHex: string): str
 }
 
 /**
+ * Derive the Ethereum address for a secp256k1 private key (hex, with or
+ * without 0x). Used by the web3 API-key mint flow to prove wallet ownership.
+ */
+export const deriveAddressFromPrivateKey = (privateKeyHex: string): string => {
+  const privateKey = hexToBytes(privateKeyHex)
+  const publicKey = secp256k1.getPublicKey(privateKey, false)
+  const hash = keccak_256(publicKey.slice(1))
+  return '0x' + bytesToHex(hash.slice(12))
+}
+
+/**
+ * Sign a message with EIP-191 personal_sign semantics (the same scheme
+ * ethers' wallet.signMessage uses):
+ *
+ *   keccak256("\x19Ethereum Signed Message:\n" + msgLen + message)
+ *
+ * Returns the 65-byte r || s || v signature as a 0x-prefixed hex string, with
+ * v normalized to 27/28 for Ethereum tooling compatibility.
+ */
+export const signPersonalMessage = (message: string, privateKeyHex: string): string => {
+  const privateKey = hexToBytes(privateKeyHex)
+  const messageBytes = new TextEncoder().encode(message)
+  const prefix = new TextEncoder().encode(`\x19Ethereum Signed Message:\n${messageBytes.length}`)
+  const prefixed = new Uint8Array(prefix.length + messageBytes.length)
+  prefixed.set(prefix, 0)
+  prefixed.set(messageBytes, prefix.length)
+  const msgHash = keccak_256(prefixed)
+
+  const signature = secp256k1.sign(msgHash, privateKey)
+  const compact = signature.toCompactRawBytes()
+  const recovery = signature.recovery ?? 0
+  const signed = new Uint8Array(65)
+  signed.set(compact, 0)
+  signed[64] = 27 + recovery
+  return '0x' + bytesToHex(signed)
+}
+
+/**
  * Verify a TEE response signature matches the expected signing address.
  */
 export interface SignatureVerificationParams {

@@ -8,6 +8,7 @@ import SelectInput from 'ink-select-input';
 import { listModels } from '../lib/api.js';
 import type { Model } from '../types/index.js';
 import { modelCapabilitySummary, profileModel, type ModelProfile } from '../agent/model-profile.js';
+import { useTheme } from './theme-context.js';
 
 export interface ModelPickerProps {
   currentModel?: string;
@@ -38,6 +39,7 @@ export function buildModelItems(models: Model[], currentModel?: string, maxLabel
 }
 
 export function ModelPicker({ currentModel, onSelect, availableModels, limit = 8, columns = 80 }: ModelPickerProps): JSX.Element {
+  const { ink } = useTheme();
   const [models, setModels] = useState<Model[]>(availableModels ?? []);
   const [loading, setLoading] = useState(availableModels === undefined);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -76,7 +78,7 @@ export function ModelPicker({ currentModel, onSelect, availableModels, limit = 8
   if (error) {
     return (
       <Box flexDirection="column" paddingX={1}>
-        <Text color="red">Failed to load models: {error}</Text>
+        <Text color={ink.error}>Failed to load models: {error}</Text>
         <Text dimColor>Press Esc or Ctrl+C to close.</Text>
       </Box>
     );

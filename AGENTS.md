@@ -114,7 +114,7 @@ The agent runtime is event-driven and strictly decoupled from transport and UI:
 4. **ContextManager** (`src/agent/context.ts`) layers system contract → project instructions (`AGENTS.md`, `VENICE.md`, `.venice/instructions.md`) → working memory → active skills → conversation/tool history.
 5. **ToolRegistry** exposes every tool via a uniform `AgentTool<TInput, TOutput>` interface. Inputs are validated against JSON Schema with `ajv` before execution.
 6. **WorkspaceManager** (`src/agent/workspace.ts`) enforces the workspace boundary: path canonicalization, traversal prevention, symlink escape defense, and mutation tracking.
-7. **McpManager** (`src/mcp/manager.ts`) discovers external tools from MCP stdio servers and registers them under the `mcp:<server>:<tool>` namespace.
+7. **McpManager** (`src/mcp/manager.ts`) discovers external tools from MCP stdio servers and registers them under the `mcp:<server>:<tool>` namespace. On a `tools/list_changed` refresh failure the manager only records `state.error`; the runtime must unregister the stale `mcp:<server>:` prefix and emit `mcp_failed` so broken tool definitions don't linger.
 8. **SkillRegistry** (`src/skills/registry.ts`) progressively loads skill instructions from `~/.config/venice/skills/` and `.venice/skills/`.
 
 ### Agent state
@@ -178,6 +178,10 @@ Workspace initialization scaffolds `.venice/config.json`, `.venice/instructions.
 
 Add the tool definition to `BUILTIN_TOOLS` in `src/lib/tools.ts`, add the executor to `toolExecutors`, update completions, and document in README.
 
+### New TUI slash command
+
+Add metadata to `SLASH_COMMANDS` in `src/ui/slash-commands.ts` and a handler in `SLASH_HANDLERS` in `src/ui/slash-handlers.ts` (the two must stay in sync). `handleSlashCommand` at the bottom of `slash-handlers.ts` rebuilds the handler context from an **explicit allowlist** — a new `SlashHandlerContext` field must be added in BOTH the destructure near the bottom and the forwarded object, or it silently never reaches handlers. Injected test doubles (e.g. `deleteSession`, `refreshTheme`) belong in that same allowlist.
+
 ## 8. Code style and conventions
 
 - **TypeScript**: strict mode. Avoid `any`; use proper types. Public functions should have JSDoc comments.
@@ -188,6 +192,8 @@ Add the tool definition to `BUILTIN_TOOLS` in `src/lib/tools.ts`, add the execut
   - Types/interfaces: `PascalCase`.
   - Constants: `UPPER_SNAKE_CASE`.
 - **Error handling**: provide helpful, actionable messages; never expose API keys or tokens; handle network failures gracefully.
+- **`VeniceApiError` constructor order is `(message, statusCode?, code?, retryAfter?)`** — passing a code as the 2nd arg silently lands in `statusCode`. In the SSE parser, a `json.error` throw must be rethrown from the malformed-frame `catch` (`if (err instanceof VeniceApiError) throw err`), otherwise it is re-wrapped as a generic `Error`.
+- **UI theme has two token systems**: chalk tokens via `getTheme()` (`src/ui/theme.ts`) for string output/headless renderer, and Ink tokens via `getInkTheme()` + `useTheme()` (`src/ui/theme-context.tsx`) for `<Text color>`. `/theme` re-renders by calling `refreshTheme()` threaded from App state through the slash context.
 - **Imports**: use `.js` extensions on relative TypeScript imports because the project uses NodeNext module resolution.
 - **Commits**: use Conventional Commits — `feat(scope):`, `fix(scope):`, `docs(scope):`, `refactor(scope):`, `test(scope):`, `chore(scope):`.
 - **Branches**: `feature/description`, `fix/description`, `docs/description`, `refactor/description`.
@@ -204,6 +210,7 @@ ESLint rules of note (see `eslint.config.mjs`):
 - `scripts/run-tests.mjs` discovers compiled tests recursively and runs them with `node --test`.
 - Tests mock `globalThis.fetch` for API tests and use temporary directories for filesystem tests.
 - Tests must restore mocked globals and environment variables in a `finally` block.
+- `~/.venice/config.json` and `~/.venice/sessions` paths are module-level constants (not env-redirectable). Tests must NOT call `setConfigValue`/`/theme <valid>` or real `SessionManager` writes — they clobber the user's actual config/sessions. Use injectable slash-context callbacks (`deleteSession`, `refreshTheme`) and test the pure `getInkTheme` instead.
 - Security-focused tests live in files named `security.test.ts` and run separately via `npm run test:security`.
 - Run the full verification gate before finishing work: `npm run verify`.
 
@@ -224,12 +231,13 @@ ESLint rules of note (see `eslint.config.mjs`):
   - Quality job: Node 22 on Ubuntu — `npm run verify`.
   - Platform job: Node 22 on Ubuntu, macOS, Windows — build + `test:compiled`.
   - Runtime job: Node 18, 20, 22 on Ubuntu — build + `test:compiled`.
-- **Publish** (`.github/workflows/publish.yml`) triggers on GitHub release creation. It runs `npm run verify`; the actual `npm publish --provenance --access public` step is currently commented out until trusted publishing is enabled.
+- **Publish** (`.github/workflows/publish.yml`) triggers on GitHub release creation. It runs `npm run verify`, checks package identity and release-tag ↔ `package.json` version consistency, then runs a real `npm publish --access public` via OIDC trusted publishing (`id-token: write`, no `NODE_AUTH_TOKEN`). Trusted publishing requires npm ≥ 11.5.1 (the workflow upgrades npm). `package.json` also has a `prepare` script (build) so Git-source installs work, and `publishConfig` for public registry access.
 - `npm run prepublishOnly` is wired to `npm run verify`, so publishing always runs the full gate.
 
 ## 12. Reference material and current work
 
 - Read-only reference for Kimi Code CLI workflows: `.reference/kimi-code/`. **Do not edit files under `.reference/`.**
+- `.omk/` at the repo root is gitignored agent project memory (agentmemory skill). It never enters VCS or the npm tarball; keep it that way.
 - Current parity workorder: `docs/workorders/VENICE_CLI_KIMI_FUNCTIONAL_PARITY_HANDOFF_2026-08-16.md`.
 - Architecture spec: `docs/AGENT_ARCHITECTURE.md`.
 - Developer guide: `docs/development.md`.

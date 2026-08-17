@@ -3,7 +3,42 @@ import assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { loadProjectConfig } from './config.js';
+import { loadProjectConfig, validateConfigShape } from './config.js';
+
+describe('validateConfigShape (P2 config schema)', () => {
+  it('accepts a well-formed config', () => {
+    assert.deepStrictEqual(
+      validateConfigShape({
+        api_key: 'vnc_x',
+        default_model: 'kimi-k2-5',
+        output_format: 'json',
+        no_color: true,
+        theme: 'dracula',
+      }),
+      []
+    );
+  });
+
+  it('rejects wrong types and invalid enum values', () => {
+    const problems = validateConfigShape({
+      no_color: 'yes',
+      output_format: 'xml',
+      show_usage: 1,
+    });
+    assert.ok(problems.some((p) => p.includes('no_color')), problems.join('; '));
+    assert.ok(problems.some((p) => p.includes('output_format')), problems.join('; '));
+    assert.ok(problems.some((p) => p.includes('show_usage')), problems.join('; '));
+  });
+
+  it('rejects a non-object config', () => {
+    assert.ok(validateConfigShape('nope').length > 0);
+    assert.ok(validateConfigShape([1, 2]).length > 0);
+  });
+
+  it('allows unknown keys so a future field never bricks an older CLI', () => {
+    assert.deepStrictEqual(validateConfigShape({ future_field: 'x', no_color: false }), []);
+  });
+});
 
 describe('loadProjectConfig (VCL-R3-010)', () => {
   let tmp: string;

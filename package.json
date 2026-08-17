@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "prepare": "npm run build",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
@@ -18,7 +19,7 @@
     "api:contract": "node scripts/api-drift-check.mjs",
     "completions:check": "node scripts/completions-check.mjs",
     "pack:check": "npm pack --dry-run --json",
-    "verify": "npm run lint && npm run build && npm run test:compiled && npm run test:security && npm run completions:check && npm run api:contract && npm audit --omit=dev && npm run pack:check",
+    "verify": "npm run lint && npm run typecheck && npm run build && npm run test:compiled && npm run test:security && npm run completions:check && npm run api:contract && npm audit --omit=dev && npm run pack:check",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "clean": "node -e \"const fs = require('fs'); fs.rmSync('dist', { recursive: true, force: true });\"",
     "prepublishOnly": "npm run verify"

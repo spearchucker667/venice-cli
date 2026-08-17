@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
+import { Ajv } from 'ajv';
 import type { Message, VeniceConfig } from '../types/index.js';
 import { sanitizeMessagesForHistory } from '../types/index.js';
 
@@ -15,6 +16,44 @@ const CONFIG_DIR = path.join(os.homedir(), '.venice');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const HISTORY_FILE = path.join(CONFIG_DIR, 'history.json');
 const USAGE_FILE = path.join(CONFIG_DIR, 'usage.json');
+
+/**
+ * JSON Schema for `~/.venice/config.json` (P2). Unknown keys are allowed so a
+ * future config field never bricks an older CLI; known fields are type- and
+ * value-checked so a malformed file is surfaced instead of silently accepted.
+ */
+const CONFIG_SCHEMA = {
+  type: 'object',
+  properties: {
+    api_key: { type: 'string' },
+    signInWithX: { type: 'string' },
+    default_model: { type: 'string' },
+    default_image_model: { type: 'string' },
+    default_voice: { type: 'string' },
+    output_format: { type: 'string', enum: ['pretty', 'json', 'markdown', 'raw'] },
+    no_color: { type: 'boolean' },
+    show_usage: { type: 'boolean' },
+    media_safe_mode: { type: 'boolean' },
+    theme: { type: 'string' },
+  },
+  additionalProperties: true,
+} as const;
+
+const configValidator = new Ajv({ allErrors: true, strict: true }).compile(CONFIG_SCHEMA);
+let configWarningShown = false;
+
+/**
+ * Validate a parsed config object against the schema, returning human-readable
+ * messages for every offending field. Pure and side-effect free so it can be
+ * unit-tested without touching the real `~/.venice/config.json`.
+ */
+export function validateConfigShape(config: unknown): string[] {
+  if (configValidator(config)) return [];
+  return (configValidator.errors ?? []).map((error) => {
+    const path = error.instancePath ? `$.${error.instancePath}` : '$';
+    return `${path}: ${error.message ?? `failed ${error.keyword} validation`}`;
+  });
+}
 
 export function ensureConfigDir(): void {
   if (fs.existsSync(CONFIG_DIR)) {
@@ -37,7 +76,18 @@ export function loadConfig(): VeniceConfig {
   assertRegularConfigFile();
   try {
     const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
-    return JSON.parse(content);
+    const parsed = JSON.parse(content) as VeniceConfig;
+    // Surface malformed config instead of silently accepting it (P2). The
+    // config is still returned so a single bad field never drops the user's
+    // API key; the warning is emitted once per process to avoid noise.
+    if (!configWarningShown) {
+      const problems = validateConfigShape(parsed);
+      if (problems.length > 0) {
+        configWarningShown = true;
+        console.error(`Warning: invalid entries in ${CONFIG_FILE}:\n  ${problems.join('\n  ')}`);
+      }
+    }
+    return parsed;
   } catch {
     // Return empty config on error
   }

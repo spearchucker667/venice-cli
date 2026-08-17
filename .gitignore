@@ -44,3 +44,6 @@ coverage/
 tmp/
 .worktrees/
 .reference/
+
+# Agent project memory (agentmemory skill) — never commit or publish
+.omk/

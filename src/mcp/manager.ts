@@ -19,6 +19,7 @@ export class McpManager {
   private readonly servers: ServerState[] = [];
   private startPromise?: Promise<void>;
   private toolsChangedHandler?: (serverName: string, tools: McpTool[]) => void;
+  private toolsRefreshFailedHandler?: (serverName: string, error: string) => void;
 
   constructor(config: McpConfig) {
     this.config = config;
@@ -31,6 +32,15 @@ export class McpManager {
    */
   setToolsChangedHandler(handler: (serverName: string, tools: McpTool[]) => void): void {
     this.toolsChangedHandler = handler;
+  }
+
+  /**
+   * Register a callback invoked when a tools/list_changed refresh fails. The
+   * runtime uses it to unregister the server's stale namespace so broken tool
+   * definitions never linger in the agent's context (P2).
+   */
+  setToolsRefreshFailedHandler(handler: (serverName: string, error: string) => void): void {
+    this.toolsRefreshFailedHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -102,7 +112,11 @@ export class McpManager {
       state.tools = await state.client.listTools();
       this.toolsChangedHandler?.(name, state.tools);
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
+      state.error = message;
+      // P2: surface the failure so the runtime can drop the server's stale
+      // namespace instead of leaving broken tool definitions registered.
+      this.toolsRefreshFailedHandler?.(name, message);
     }
   }
 

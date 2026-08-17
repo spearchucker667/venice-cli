@@ -185,6 +185,29 @@ export function formatUsage(usage: {
   return `\n${c.dim('📊 Tokens:')} ${parts.join(' | ')}`;
 }
 
+// x402 balance / rate-limit reporting from inference response headers. Returns
+// an empty string when the API reported nothing worth showing.
+export function formatUsageHeaders(usageHeaders?: {
+  balanceRemainingUsd?: number;
+  rateLimit?: { limit?: number; remaining?: number; reset?: number };
+}): string {
+  const c = getChalk();
+  if (!usageHeaders) return '';
+  const parts: string[] = [];
+  if (usageHeaders.balanceRemainingUsd !== undefined) {
+    parts.push(`x402 credits remaining: ${c.bold(`$${usageHeaders.balanceRemainingUsd.toFixed(4)}`)}`);
+  }
+  if (usageHeaders.rateLimit?.remaining !== undefined) {
+    const rl = usageHeaders.rateLimit;
+    const resetText = rl.reset !== undefined
+      ? ` (resets ${new Date(rl.reset * 1000).toISOString()})`
+      : '';
+    parts.push(`rate limit: ${rl.remaining}${rl.limit !== undefined ? `/${rl.limit}` : ''} remaining${resetText}`);
+  }
+  if (parts.length === 0) return '';
+  return `\n${c.dim(parts.join(' | '))}`;
+}
+
 // Table formatting
 export function formatTable(
   rows: Array<Record<string, unknown>>,

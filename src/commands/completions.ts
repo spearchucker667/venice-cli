@@ -134,6 +134,7 @@ _venice_completion() {
     local music_cmds="${getSubcommands(program, 'music')}"
     local billing_cmds="${getSubcommands(program, 'billing')}"
     local keys_cmds="${getSubcommands(program, 'keys')}"
+    local wallet_cmds="${getSubcommands(program, 'wallet')}"
     local formats="pretty json markdown raw"
     local voices="af_sky af_bella af_nicole am_adam am_michael bf_emma bf_isabella bm_george bm_lewis"
     local tools="calculator weather datetime random base64 hash"
@@ -165,6 +166,10 @@ _venice_completion() {
             ;;
         keys)
             COMPREPLY=( \$(compgen -W "\${keys_cmds}" -- "\${cur}") )
+            return 0
+            ;;
+        wallet)
+            COMPREPLY=( \$(compgen -W "\${wallet_cmds}" -- "\${cur}") )
             return 0
             ;;
         voice)
@@ -344,7 +349,18 @@ _venice_completion() {
             return 0
             ;;
         keys)
-            COMPREPLY=( \$(compgen -W "\${keys_cmds} -n --name -o --output -t --type --expires --usd-limit --diem-limit --limit-period --force -f --format" -- "\${cur}") )
+            COMPREPLY=( \$(compgen -W "\${keys_cmds} -n --name -o --output -t --type --expires --usd-limit --diem-limit --limit-period --no-expires --force -p --private-key -f --format" -- "\${cur}") )
+            return 0
+            ;;
+        wallet)
+            case "\${words[2]}" in
+                top-up)
+                    COMPREPLY=( \$(compgen -W "--payment-signature -f --format" -- "\${cur}") )
+                    ;;
+                *)
+                    COMPREPLY=( \$(compgen -W "\${wallet_cmds} --limit --offset --payment-signature -f --format" -- "\${cur}") )
+                    ;;
+            esac
             return 0
             ;;
     esac
@@ -643,10 +659,28 @@ ${program.commands
                     local -a keys_cmds=(
                         'list:List API key metadata'
                         'create:Create an API key'
+                        'show:Show details for one API key'
+                        'update:Update an API key'
                         'delete:Permanently delete an API key'
                         'rate-limits:Show current key limits'
+                        'rate-limits-log:Show recent rate-limit breaches'
+                        'web3:Mint an API key from a wallet'
                     )
                     _describe -t keys_cmds 'API key commands' keys_cmds
+                    ;;
+                wallet)
+                    local -a wallet_cmds=(
+                        'balance:Show x402 wallet balance'
+                        'transactions:Show x402 wallet transactions'
+                        'top-up:Probe x402 payment requirements and submit a signed top-up'
+                    )
+                    _describe -t wallet_cmds 'wallet commands' wallet_cmds
+                    ;;
+                top-up)
+                    _arguments \\
+                        '--payment-signature[Signed x402 v2 payment payload (base64)]:header:' \\
+                        '-f[Output format]:format:((\$formats))' \\
+                        '--format[Output format]:format:((\$formats))'
                     ;;
                 completions)
                     _arguments '1:shell:(bash zsh fish)'
@@ -836,9 +870,24 @@ complete -c venice -n "__fish_seen_subcommand_from billing" -a analytics -d "Sho
 # API key subcommands
 complete -c venice -n "__fish_seen_subcommand_from keys" -a list -d "List API keys"
 complete -c venice -n "__fish_seen_subcommand_from keys" -a create -d "Create API key"
+complete -c venice -n "__fish_seen_subcommand_from keys" -a show -d "Show details for one API key"
+complete -c venice -n "__fish_seen_subcommand_from keys" -a update -d "Update an API key"
 complete -c venice -n "__fish_seen_subcommand_from keys" -a delete -d "Delete API key"
 complete -c venice -n "__fish_seen_subcommand_from keys" -a rate-limits -d "Show rate limits"
+complete -c venice -n "__fish_seen_subcommand_from keys" -a rate-limits-log -d "Show recent rate-limit breaches"
+complete -c venice -n "__fish_seen_subcommand_from keys" -a web3 -d "Mint an API key from a wallet"
 complete -c venice -n "__fish_seen_subcommand_from keys; and __fish_seen_subcommand_from create" -s o -l output -d "Restrictive API key secret file" -r
+complete -c venice -n "__fish_seen_subcommand_from keys; and __fish_seen_subcommand_from web3" -s o -l output -d "Restrictive API key secret file" -r
+complete -c venice -n "__fish_seen_subcommand_from keys; and __fish_seen_subcommand_from web3" -s p -l private-key -d "Wallet private key hex (prefer VENICE_WALLET_KEY)" -r
+
+# Wallet
+complete -c venice -n "__fish_seen_subcommand_from wallet" -a balance -d "Show x402 wallet balance"
+complete -c venice -n "__fish_seen_subcommand_from wallet" -a transactions -d "Show x402 wallet transactions"
+complete -c venice -n "__fish_seen_subcommand_from wallet" -a top-up -d "Probe x402 payment requirements and submit a signed top-up"
+complete -c venice -n "__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from transactions" -l limit -d "Max transactions" -r
+complete -c venice -n "__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from transactions" -l offset -d "Skip transactions" -r
+complete -c venice -n "__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from top-up" -l payment-signature -d "Signed x402 v2 payment payload (base64)" -r
+complete -c venice -n "__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from top-up" -s f -l format -d "Format" -xa "$formats"
 
 # Completions
 complete -c venice -n "__fish_seen_subcommand_from completions" -a "bash zsh fish" -d "Shell"

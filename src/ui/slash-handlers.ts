@@ -44,6 +44,8 @@ function formatSessionAsMarkdown(state: AgentState): string {
 
 export interface SlashHandlerContext {
   exit: () => void;
+  /** Re-read the active theme and re-render the TUI (P2 `/theme` dead end). */
+  refreshTheme?: () => void;
   setMessages: (updater: (prev: TuiMessage[]) => TuiMessage[]) => void;
   status: AgentStatus;
   model: string;
@@ -55,6 +57,8 @@ export interface SlashHandlerContext {
   showSessionPicker?: () => void;
   resumeSession?: (sessionId: string) => void | Promise<void>;
   listSessions?: () => StoredSession[];
+  /** Delete a saved session (defaults to SessionManager.delete). */
+  deleteSession?: (sessionId: string) => boolean;
   mcpManager?: McpManager;
   getRuntime?: () => AgentRuntime | undefined;
 }
@@ -167,6 +171,21 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
             .join('\n')
       );
     }
+  },
+
+  async delete(args, { addEvent, getRuntime, deleteSession }) {
+    const sessionId = args.trim();
+    if (!sessionId) {
+      addEvent('Usage: /delete <session-id>. See /sessions for ids.');
+      return;
+    }
+    const active = getRuntime?.()?.getState().sessionId;
+    if (sessionId === active) {
+      addEvent(`Refusing to delete the active session (${sessionId}). Finish or fork it first.`);
+      return;
+    }
+    const deleted = deleteSession ? deleteSession(sessionId) : new SessionManager().delete(sessionId);
+    addEvent(deleted ? `Deleted session ${sessionId}.` : `No session found with id ${sessionId}.`);
   },
 
   async diff(_args, { addEvent, toolContext, getRuntime }) {
@@ -450,7 +469,8 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
     );
   },
 
-  async theme(args, { addEvent }) {
+  async theme(args, context) {
+    const { addEvent } = context;
     await import('./theme.js').then((m) => {
       const requested = args.trim().toLowerCase();
       const validThemes = m.getAvailableThemes();
@@ -464,6 +484,9 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
       }
       m.setActiveThemeName(requested as any);
       addEvent(`Theme set to: ${requested}`);
+      // P2: the theme was a dead end — it persisted to config but the TUI kept
+      // hardcoded colors. Re-read the active theme so components re-render.
+      context.refreshTheme?.();
     });
   },
 
@@ -633,6 +656,9 @@ export async function handleSlashCommand(command: string, args: string, context:
   let definition = findSlashCommandDefinition(command);
   
   if (!definition) {
+    // VC-KIMI-047: an unknown /foo is a normal user message, not an error.
+    // Emit a non-blocking "did you mean" hint, then return false so the caller
+    // forwards the raw command to the model instead of intercepting it.
     const { setMessages } = context;
     const nearest = findNearestSlashCommand(command);
     if (nearest) {
@@ -648,7 +674,7 @@ export async function handleSlashCommand(command: string, args: string, context:
         content: `Unknown command "/${command}". Type /help all to see available commands.`,
       }]);
     }
-    return true; // We intercepted it as a bad command, do not send to API
+    return false; // Not handled locally — forward to the agent (VC-KIMI-047)
   }
 
   if (!isSlashCommandAvailable(definition, context.status)) {
@@ -664,7 +690,7 @@ export async function handleSlashCommand(command: string, args: string, context:
   const handler = SLASH_HANDLERS[getSlashCommandBase(definition.name)];
   if (!handler) return false;
 
-  const { setMessages, status, model, approvalMode, setApprovalMode, workspaceRoot, setModel, showModelPicker, showSessionPicker, resumeSession, listSessions, mcpManager, getRuntime } = context;
+  const { setMessages, status, model, approvalMode, setApprovalMode, workspaceRoot, setModel, showModelPicker, showSessionPicker, resumeSession, listSessions, deleteSession, refreshTheme, mcpManager, getRuntime } = context;
 
   const addEvent = (content: string) => {
     setMessages((prev) => [...prev, { id: `cmd-${prev.length + 1}`, role: 'event', content }]);
@@ -693,6 +719,8 @@ export async function handleSlashCommand(command: string, args: string, context:
     showSessionPicker,
     resumeSession,
     listSessions,
+    deleteSession,
+    refreshTheme,
     mcpManager,
     getRuntime,
     addEvent,

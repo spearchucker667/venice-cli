@@ -5,10 +5,12 @@ import { keccak_256 } from '@noble/hashes/sha3';
 import {
   bytesToHex,
   decryptChunk,
+  deriveAddressFromPrivateKey,
   deriveSigningAddressFromKey,
   encryptMessage,
   generateEphemeralKeyPair,
   recoverSignerAddress,
+  signPersonalMessage,
 } from './e2ee.js';
 
 describe('E2EE secp256k1 operations', () => {
@@ -28,6 +30,32 @@ describe('E2EE secp256k1 operations', () => {
       deriveSigningAddressFromKey(bytesToHex(publicKey)),
       '7e5f4552091a69125d5dfcb7b8c2659029395bdf'
     );
+  });
+
+  it('derives the same address as the public-key helper for private key one', () => {
+    const privateKey = new Uint8Array(32);
+    privateKey[31] = 1;
+    const publicKey = secp256k1.getPublicKey(privateKey, false);
+
+    assert.strictEqual(
+      deriveAddressFromPrivateKey(bytesToHex(privateKey)),
+      '0x' + deriveSigningAddressFromKey(bytesToHex(publicKey))
+    );
+    assert.strictEqual(
+      deriveAddressFromPrivateKey('0x' + bytesToHex(privateKey)),
+      '0x7e5f4552091a69125d5dfcb7b8c2659029395bdf'
+    );
+  });
+
+  it('personal-signs a message and the signature recovers to the signer address', () => {
+    const privateKey = new Uint8Array(32);
+    privateKey[31] = 1;
+    const message = 'Venice web3 key mint token';
+    const signature = signPersonalMessage(message, bytesToHex(privateKey));
+
+    assert.match(signature, /^0x[0-9a-f]{130}$/);
+    const recovered = recoverSignerAddress(message, signature);
+    assert.strictEqual(recovered, '7e5f4552091a69125d5dfcb7b8c2659029395bdf');
   });
 
   it('recovers an Ethereum address from an EIP-191 signature', () => {

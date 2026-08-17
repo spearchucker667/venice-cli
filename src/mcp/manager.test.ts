@@ -115,4 +115,52 @@ describe('McpManager', () => {
       await manager.stop();
     }
   });
+
+  it('reports a failed tools/list_changed refresh via the failure handler (P2)', async () => {
+    const script = `
+      let toolCalls = 0;
+      let buffer='';
+      const send=(v)=>process.stdout.write(JSON.stringify(v)+'\\n');
+      process.stdin.on('data',(chunk)=>{
+        buffer+=chunk.toString();
+        let i;
+        while((i=buffer.indexOf('\\n'))!==-1){
+          const line=buffer.slice(0,i).trim(); buffer=buffer.slice(i+1);
+          if(!line) continue;
+          const req=JSON.parse(line);
+          if(req.method==='initialize') send({jsonrpc:'2.0',id:req.id,result:{protocolVersion:'2025-06-18',capabilities:{},serverInfo:{name:'t',version:'1'}}});
+          if(req.method==='tools/list'){
+            toolCalls++;
+            if(toolCalls===1) send({jsonrpc:'2.0',id:req.id,result:{tools:[{name:'stale'}]}});
+            else send({jsonrpc:'2.0',id:req.id,error:{code:-32603,message:'refresh boom'}});
+          }
+          if(req.method==='initialized') setTimeout(()=>send({jsonrpc:'2.0',method:'notifications/tools/list_changed',params:{}}),100);
+        }
+      });
+      setInterval(()=>{},1000);
+    `;
+    const manager = new McpManager({
+      mcpServers: { live: { command: 'node', args: ['-e', script] } },
+    });
+    let refreshed: Array<{ serverName: string; tools: string[] }> = [];
+    let failed: Array<{ serverName: string; error: string }> = [];
+    manager.setToolsChangedHandler((serverName, tools) => {
+      refreshed.push({ serverName, tools: tools.map((t) => t.name) });
+    });
+    manager.setToolsRefreshFailedHandler((serverName, error) => {
+      failed.push({ serverName, error });
+    });
+    await manager.start();
+    try {
+      await new Promise((r) => setTimeout(r, 400));
+      assert.strictEqual(failed.length, 1, 'toolsRefreshFailedHandler must fire on refresh failure');
+      assert.strictEqual(failed[0].serverName, 'live');
+      assert.match(failed[0].error, /refresh boom/);
+      assert.strictEqual(refreshed.length, 0, 'success handler must not fire on failure');
+      // The manager keeps the (stale) tool list; the runtime unregisters it.
+      assert.strictEqual(manager.getTools().length, 1);
+    } finally {
+      await manager.stop();
+    }
+  });
 });
