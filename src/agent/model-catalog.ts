@@ -11,7 +11,7 @@
 import { listModels } from '../lib/api.js';
 import type { Model } from '../types/index.js';
 
-export type ModelFetcher = (options?: { showSpinner?: boolean }) => Promise<Model[]>;
+export type ModelFetcher = (options?: { showSpinner?: boolean; bypassCache?: boolean }) => Promise<Model[]>;
 
 export interface ModelCatalogOptions {
   /** Model source. Defaults to the live Venice `listModels` API. */
@@ -40,7 +40,7 @@ export class ModelCatalog {
       return [...this.cache.models];
     }
     if (this.inflight) return this.inflight;
-    this.inflight = this.fetcher({ showSpinner: false })
+    this.inflight = this.fetcher({ showSpinner: false, bypassCache: force })
       .then((models) => {
         this.cache = { models, fetchedAt: Date.now() };
         return models;

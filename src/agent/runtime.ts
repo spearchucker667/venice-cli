@@ -1222,7 +1222,19 @@ export class AgentRuntime {
     }
 
     this.state.status = 'executing_tool';
-    let result = await tool.execute(input, this.buildToolContext());
+    let result: ToolResult<unknown>;
+    try {
+      result = await tool.execute(input, this.buildToolContext());
+    } catch (error) {
+      result = {
+        ok: false,
+        error: {
+          code: 'tool_execution_error',
+          message: error instanceof Error ? error.message : String(error),
+          details: error instanceof Error ? error.stack : undefined,
+        },
+      };
+    }
 
     let changedFilesThisCall = false;
     if (result.metadata?.affectedFiles) {

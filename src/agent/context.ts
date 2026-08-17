@@ -183,9 +183,18 @@ export class ContextManager {
     return this.estimateTokens() > available * this.budget.compactionThreshold;
   }
 
-  compact(summary: StructuredSummary): void {
+  compact(summary: StructuredSummary, preserveTurns: number = 5): void {
     this.summary = summary;
-    this.conversation = [];
+    
+    // Preserve recent conversation turns to avoid complete context wipe
+    let startIndex = Math.max(0, this.conversation.length - (preserveTurns * 2));
+    
+    // Ensure we don't start on a tool result without its preceding assistant call
+    while (startIndex < this.conversation.length && this.conversation[startIndex].role === 'tool') {
+      startIndex++;
+    }
+
+    this.conversation = this.conversation.slice(startIndex);
     this.fileContext = [];
   }
 

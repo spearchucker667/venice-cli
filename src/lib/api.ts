@@ -453,6 +453,8 @@ export interface ChatCompletionRequestOptions {
   include?: string[];
   /** OpenAI-compatible request tracking metadata. */
   metadata?: Record<string, string>;
+  /** Signal to abort the request. */
+  abortSignal?: AbortSignal;
 }
 
 export function buildChatCompletionBody(
@@ -568,8 +570,19 @@ export async function* chatCompletionStream(
     additionalHeaders: options.additionalHeaders,
   });
 
+  const contentType = response.headers.get('content-type');
+  if (contentType && contentType.includes('application/json')) {
+    const errorBytes = await response.text();
+    throw VeniceApiError.fromResponse(response, errorBytes);
+  }
+
   const reader = response.body?.getReader();
   if (!reader) throw new Error('No response body');
+
+  const onAbort = () => {
+    reader.cancel().catch(() => {});
+  };
+  options.abortSignal?.addEventListener('abort', onAbort);
 
   const decoder = new TextDecoder();
   let buffer = '';
@@ -619,6 +632,11 @@ export async function* chatCompletionStream(
 
           try {
             const json = JSON.parse(data);
+            
+            if (json.error) {
+              throw new VeniceApiError(json.error.message || JSON.stringify(json.error), json.error.code);
+            }
+
             const choice = json.choices?.[0];
             const delta = choice?.delta;
             
@@ -658,7 +676,8 @@ export async function* chatCompletionStream(
       if (done) break;
     }
   } finally {
-    reader.releaseLock();
+    options.abortSignal?.removeEventListener('abort', onAbort);
+    reader.cancel().catch(() => {});
   }
 
   yield { done: true, usage: totalUsage, completionId };
@@ -1373,9 +1392,9 @@ function mergeModel(merged: Map<string, Model>, model: Model, requestedType?: st
 
 // List models
 export async function listModels(
-  options: { showSpinner?: boolean; type?: string } = {}
+  options: { showSpinner?: boolean; type?: string; bypassCache?: boolean } = {}
 ): Promise<Model[]> {
-  const { showSpinner: showSpinnerOption = true, type } = options;
+  const { showSpinner: showSpinnerOption = true, type, bypassCache = false } = options;
 
   if (type) {
     const response = await apiRequest<{ data: Model[] }>(
@@ -1393,7 +1412,7 @@ export async function listModels(
     );
   }
 
-  if (modelsCache && Date.now() - modelsCache.fetchedAt < MODELS_CACHE_TTL_MS) {
+  if (!bypassCache && modelsCache && Date.now() - modelsCache.fetchedAt < MODELS_CACHE_TTL_MS) {
     return [...modelsCache.models];
   }
 

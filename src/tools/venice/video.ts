@@ -105,7 +105,7 @@ export const imageToVideoTool: AgentTool<
       if (!input.prompt.trim()) {
         return failure('INVALID_VIDEO_PROMPT', 'prompt must be a non-empty string');
       }
-      const source = resolveWorkspaceFile(context.workspaceRoot, input.image);
+      const source = resolveWorkspaceFile(context.workspaceRoot, input.image, context.workspace?.additionalRoots);
       if (!fs.existsSync(source.absolute)) {
         return failure('IMAGE_NOT_FOUND', `Reference image not found: ${source.relative}`);
       }
@@ -125,7 +125,7 @@ export const imageToVideoTool: AgentTool<
       if (!input.wait) {
         return success({ queueId: queued.queue_id, model: queued.model, status: 'queued' });
       }
-      return await waitAndSaveVideo(context.workspaceRoot, queued.queue_id, queued.model, input.output, input.timeoutMs);
+      return await waitAndSaveVideo(context.workspaceRoot, queued.queue_id, queued.model, input.output, input.timeoutMs, context.workspace?.additionalRoots);
     } catch (error) {
       return failure('IMAGE_TO_VIDEO_ERROR', error instanceof Error ? error.message : String(error));
     }
@@ -137,13 +137,14 @@ async function waitAndSaveVideo(
   queueId: string,
   model: string,
   outputPath: string | undefined,
-  timeoutMs: number | undefined
+  timeoutMs: number | undefined,
+  additionalRoots?: string[]
 ): Promise<ToolResult<VideoToolOutput>> {
   if (!outputPath?.trim()) {
     return failure('MISSING_OUTPUT', 'output is required when wait is true');
   }
 
-  const dest = resolveWorkspaceFile(workspaceRoot, outputPath);
+  const dest = resolveWorkspaceFile(workspaceRoot, outputPath, additionalRoots);
   const status = await waitForVideoStatus(
     () => getVideoStatus(queueId, model),
     timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_VIDEO_TIMEOUT_MS

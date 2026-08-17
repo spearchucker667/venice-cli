@@ -391,6 +391,13 @@ export const SLASH_HANDLERS: Record<string, SlashHandler> = {
       addEvent('No active runtime to configure.');
       return;
     }
+
+    const modelProfile = runtime.getState().modelProfile;
+    if (!modelProfile?.supportsReasoningEffort) {
+      addEvent(`The current model (${modelProfile?.id || runtime.getState().model}) does not support configurable reasoning effort.`);
+      return;
+    }
+
     const level = args.trim().toLowerCase();
     const validLevels = ['low', 'medium', 'high'];
     if (!level) {

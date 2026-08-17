@@ -49,7 +49,8 @@ export const findTool: AgentTool<{ pattern?: string; path?: string }, string[]> 
           walk(root, root);
         }
       }
-      return success(results);
+      const isTruncated = results.length > 500;
+      return success(isTruncated ? results.slice(0, 500) : results, { truncated: isTruncated });
     } catch (error) {
       return failure('FIND_ERROR', error instanceof Error ? error.message : String(error));
     }

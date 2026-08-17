@@ -52,7 +52,7 @@ export const textToSpeechTool: AgentTool<
         speed: input.speed,
         temperature: input.temperature,
       });
-      const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, result.audio);
+      const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, result.audio, context.workspace?.additionalRoots);
       return success(relative, { affectedFiles: [relative] });
     } catch (error) {
       return failure('TTS_ERROR', error instanceof Error ? error.message : String(error));
@@ -79,7 +79,7 @@ export const transcribeAudioTool: AgentTool<
   risk: 'network',
   async execute(input, context) {
     try {
-      const source = resolveWorkspaceFile(context.workspaceRoot, input.audio);
+      const source = resolveWorkspaceFile(context.workspaceRoot, input.audio, context.workspace?.additionalRoots);
       const result = await transcribe(source.absolute, {
         model: input.model,
         language: input.language,
@@ -167,7 +167,7 @@ export const generateMusicTool: AgentTool<
           if (!finalOutput.endsWith(extension) && !finalOutput.endsWith('.bin')) {
              finalOutput += extension;
           }
-          const dest = resolveWorkspaceFile(context.workspaceRoot, finalOutput);
+          const dest = resolveWorkspaceFile(context.workspaceRoot, finalOutput, context.workspace?.additionalRoots);
           
           await writeResponseToFile(result.response, dest.absolute, {
             maxBytes: MAX_AUDIO_DOWNLOAD_BYTES,

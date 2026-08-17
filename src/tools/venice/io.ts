@@ -6,17 +6,22 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { WorkspaceManager } from '../../agent/workspace.js';
 
-export function resolveWorkspaceFile(workspaceRoot: string, inputPath: string): { absolute: string; relative: string } {
-  const workspace = new WorkspaceManager(workspaceRoot);
+export function resolveWorkspaceFile(
+  workspaceRoot: string,
+  inputPath: string,
+  additionalRoots?: string[]
+): { absolute: string; relative: string } {
+  const workspace = new WorkspaceManager(workspaceRoot, additionalRoots ?? []);
   return workspace.resolve(inputPath);
 }
 
 export function writeWorkspaceBytes(
   workspaceRoot: string,
   outputPath: string,
-  bytes: Buffer | ArrayBuffer
+  bytes: Buffer | ArrayBuffer,
+  additionalRoots?: string[]
 ): { absolute: string; relative: string } {
-  const workspace = new WorkspaceManager(workspaceRoot);
+  const workspace = new WorkspaceManager(workspaceRoot, additionalRoots ?? []);
   const resolved = workspace.resolve(outputPath);
   fs.mkdirSync(path.dirname(resolved.absolute), { recursive: true });
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(new Uint8Array(bytes));

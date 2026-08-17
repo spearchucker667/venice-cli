@@ -71,7 +71,8 @@ describe('ContextManager', () => {
     const messages = ctx.buildMessages();
     const system = String(messages[0].content);
     assert.ok(system.includes('greeting'));
-    assert.strictEqual(messages.length, 1);
+    assert.strictEqual(messages.length, 2);
+    assert.strictEqual(messages[1].content, 'Hello');
   });
 
   it('preserves a continuation hint in the compacted summary (VC-KIMI-049)', () => {

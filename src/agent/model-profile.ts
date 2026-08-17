@@ -9,6 +9,7 @@ export interface ModelProfile {
   privacy?: string;
   supportsFunctionCalling?: boolean;
   supportsReasoning?: boolean;
+  supportsReasoningEffort?: boolean;
   supportsVision?: boolean;
   supportsE2EE?: boolean;
   supportsTeeAttestation?: boolean;
@@ -35,6 +36,7 @@ export function profileModel(model: Model): ModelProfile {
     privacy: model.model_spec?.privacy,
     supportsFunctionCalling,
     supportsReasoning: capabilities?.supportsReasoning,
+    supportsReasoningEffort: capabilities?.supportsReasoningEffort,
     supportsVision: capabilities?.supportsVision,
     supportsE2EE: capabilities?.supportsE2EE,
     supportsTeeAttestation: capabilities?.supportsTeeAttestation,

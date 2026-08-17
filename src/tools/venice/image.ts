@@ -47,7 +47,8 @@ export const generateImageTool: AgentTool<
       const { relative } = writeWorkspaceBytes(
         context.workspaceRoot,
         input.output,
-        bytes
+        bytes,
+        context.workspace?.additionalRoots
       );
 
       return success([{ ...artifact, path: relative }], { affectedFiles: [relative] });
@@ -79,7 +80,7 @@ export const editImageTool: AgentTool<
   risk: 'network',
   async execute(input, context) {
     try {
-      const source = resolveWorkspaceFile(context.workspaceRoot, input.image);
+      const source = resolveWorkspaceFile(context.workspaceRoot, input.image, context.workspace?.additionalRoots);
       const bytes = await editImage(source.absolute, input.prompt, {
         model: input.model,
         aspectRatio: input.aspectRatio,
@@ -87,7 +88,7 @@ export const editImageTool: AgentTool<
         safeMode: input.safeMode,
       });
       inspectImageArtifact(input.output, bytes);
-      const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, bytes);
+      const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, bytes, context.workspace?.additionalRoots);
       return success(relative, { affectedFiles: [relative] });
     } catch (error) {
       return failure('IMAGE_EDIT_ERROR', error instanceof Error ? error.message : String(error));
@@ -118,10 +119,10 @@ export const upscaleImageTool: AgentTool<
       if (scale !== 2 && scale !== 4) {
         return failure('INVALID_SCALE', 'Scale must be either 2 or 4');
       }
-      const source = resolveWorkspaceFile(context.workspaceRoot, input.image);
+      const source = resolveWorkspaceFile(context.workspaceRoot, input.image, context.workspace?.additionalRoots);
       const result = await upscaleImage(source.absolute, { model: input.model, scale });
       inspectImageArtifact(input.output, result.bytes);
-      const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, result.bytes);
+      const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, result.bytes, context.workspace?.additionalRoots);
       return success(relative, { affectedFiles: [relative] });
     } catch (error) {
       return failure('IMAGE_UPSCALE_ERROR', error instanceof Error ? error.message : String(error));
@@ -146,10 +147,10 @@ export const removeBackgroundTool: AgentTool<
   risk: 'network',
   async execute(input, context) {
     try {
-      const source = resolveWorkspaceFile(context.workspaceRoot, input.image);
+      const source = resolveWorkspaceFile(context.workspaceRoot, input.image, context.workspace?.additionalRoots);
       const bytes = await removeImageBackground(source.absolute);
       inspectImageArtifact(input.output, bytes);
-      const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, bytes);
+      const { relative } = writeWorkspaceBytes(context.workspaceRoot, input.output, bytes, context.workspace?.additionalRoots);
       return success(relative, { affectedFiles: [relative] });
     } catch (error) {
       return failure('IMAGE_BG_REMOVE_ERROR', error instanceof Error ? error.message : String(error));
