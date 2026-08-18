@@ -5,6 +5,7 @@
 import { spawnSync } from 'node:child_process';
 import type { AgentTool } from '../types.js';
 import { success, failure } from '../result.js';
+import { WorkspaceManager } from '../../agent/workspace.js';
 
 export const gitDiffTool: AgentTool<{ cwd?: string; path?: string }, string> = {
   name: 'git_diff',
@@ -18,16 +19,34 @@ export const gitDiffTool: AgentTool<{ cwd?: string; path?: string }, string> = {
   },
   risk: 'read',
   async execute(input, context) {
-    const cwd = input.cwd ?? context.workspaceRoot;
-    const args = ['diff'];
-    if (input.path) args.push(input.path);
+    try {
+      const workspace = new WorkspaceManager(
+        context.workspaceRoot,
+        context.workspace?.additionalRoots ?? []
+      );
+      const cwd = input.cwd ? workspace.resolve(input.cwd).absolute : workspace.workspaceRoot;
+      const args = ['--literal-pathspecs', 'diff'];
+      if (input.path) {
+        // `--` prevents option injection, while --literal-pathspecs prevents
+        // user/LLM-supplied pathspec magic from changing Git semantics.
+        args.push('--', input.path);
+      }
 
-    const result = spawnSync('git', args, { cwd, encoding: 'utf-8' });
+      const result = spawnSync('git', args, { cwd, encoding: 'utf-8' });
 
-    if (result.error) {
-      return failure('GIT_DIFF_ERROR', result.error.message);
+      if (result.error) {
+        return failure('GIT_DIFF_ERROR', result.error.message);
+      }
+      if (result.status !== 0) {
+        return failure(
+          'GIT_DIFF_ERROR',
+          result.stderr.trim() || `git diff exited with status ${result.status ?? 'unknown'}`
+        );
+      }
+
+      return success(result.stdout, { truncated: result.stdout.length > 50000 });
+    } catch (error) {
+      return failure('GIT_DIFF_ERROR', error instanceof Error ? error.message : String(error));
     }
-
-    return success(result.stdout, { truncated: result.stdout.length > 50000 });
   },
 };
