@@ -37,13 +37,22 @@ let currentSpinner: Ora | null = null;
 
 export function startSpinner(text: string): Ora | null {
   if (!process.stdout.isTTY) return null;
-  
+
+  // ora owns an interval while a spinner is active. The CLI intentionally has
+  // one terminal spinner at a time, so a new spinner must stop the previous
+  // instance before replacing the global reference; otherwise the superseded
+  // interval becomes unreachable and keeps rendering/ticking indefinitely.
+  if (currentSpinner) {
+    currentSpinner.stop();
+    currentSpinner = null;
+  }
+
   currentSpinner = ora({
     text,
     color: 'cyan',
     spinner: 'dots',
   }).start();
-  
+
   return currentSpinner;
 }
 
@@ -76,15 +85,15 @@ export function formatOutput(
   switch (format) {
     case 'json':
       return JSON.stringify(content, null, 2);
-    
+
     case 'raw':
       if (typeof content === 'string') return content;
       return JSON.stringify(content);
-    
+
     case 'markdown':
       // Just return as-is, assuming content is markdown
       return String(content);
-    
+
     case 'pretty':
     default:
       if (typeof content === 'string') {
@@ -168,7 +177,7 @@ export function formatUsage(usage: {
 
   const c = getChalk();
   const parts: string[] = [];
-  
+
   if (usage.prompt_tokens) {
     parts.push(`${c.dim('prompt:')} ${usage.prompt_tokens}`);
   }
@@ -226,11 +235,11 @@ export function formatTable(
   });
 
   // Header
-  const header = columns.map((col, i) => 
+  const header = columns.map((col, i) =>
     c.bold(col.label.padEnd(widths[i]))
   ).join('  ');
   lines.push(header);
-  
+
   // Separator
   lines.push(widths.map(w => c.dim('─'.repeat(w))).join('  '));
 
@@ -238,7 +247,7 @@ export function formatTable(
   for (const row of rows) {
     const line = columns.map((col, i) => {
       const value = String(row[col.key] || '');
-      const truncated = value.length > widths[i] 
+      const truncated = value.length > widths[i]
         ? value.slice(0, widths[i] - 1) + '…'
         : value.padEnd(widths[i]);
       return truncated;
