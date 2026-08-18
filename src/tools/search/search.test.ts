@@ -13,6 +13,7 @@ describe('search tools', () => {
     tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-search-test-')));
     fs.writeFileSync(path.join(tmp, 'a.ts'), 'const foo = 1;\n');
     fs.writeFileSync(path.join(tmp, 'b.ts'), 'const bar = 2;\n');
+    fs.writeFileSync(path.join(tmp, '[literal].ts'), 'const literal = true;\n');
     fs.mkdirSync(path.join(tmp, 'sub'), { recursive: true });
     fs.writeFileSync(path.join(tmp, 'sub', 'c.ts'), 'const foo = 3;\n');
   });
@@ -69,5 +70,11 @@ describe('search tools', () => {
     const files = result.data as string[];
     assert.ok(files.includes('a.ts'));
     assert.ok(files.includes('sub/c.ts'));
+  });
+
+  it('find treats regex metacharacters as literal glob characters', async () => {
+    const result = await findTool.execute({ pattern: '[literal].ts' }, context());
+    assert.strictEqual(result.ok, true);
+    assert.deepStrictEqual(result.data, ['[literal].ts']);
   });
 });
