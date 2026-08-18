@@ -111,6 +111,23 @@ describe('detectGitRoot', () => {
   it('finds git root', () => {
     const root = detectGitRoot(process.cwd());
     assert.ok(root);
-    assert.ok(fs.existsSync(path.join(root!, '.git')));
+    assert.ok(fs.existsSync(path.join(root, '.git')));
+  });
+
+  it('returns a canonical cwd when the directory is not in a Git repository', () => {
+    const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-no-git-')));
+    const nested = path.join(parent, 'nested');
+    fs.mkdirSync(nested);
+    assert.strictEqual(detectGitRoot(nested), fs.realpathSync(nested));
+  });
+
+  it('canonicalizes a symlinked cwd before choosing the workspace identity', () => {
+    if (process.platform === 'win32') return;
+    const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'venice-cwd-link-')));
+    const target = path.join(parent, 'target');
+    const link = path.join(parent, 'link');
+    fs.mkdirSync(target);
+    fs.symlinkSync(target, link, 'dir');
+    assert.strictEqual(detectGitRoot(link), fs.realpathSync(target));
   });
 });
