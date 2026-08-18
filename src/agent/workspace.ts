@@ -156,14 +156,24 @@ export class WorkspaceManager {
   }
 }
 
-export function detectGitRoot(cwd: string): string | undefined {
-  let current = cwd;
+/**
+ * Resolve the workspace anchor used by the runtime: return the canonical Git
+ * root when `cwd` is inside a repository, otherwise return the canonical cwd.
+ *
+ * The historical function name is retained because the runtime imports it as
+ * its workspace detector. Returning a realpath in the non-Git case prevents a
+ * relative or symlinked `--cwd` from producing session/config identities that
+ * disagree with WorkspaceManager's canonical root.
+ */
+export function detectGitRoot(cwd: string): string {
+  const canonicalCwd = fs.realpathSync(path.resolve(cwd));
+  let current = canonicalCwd;
   while (true) {
     if (fs.existsSync(path.join(current, '.git'))) {
-      return current;
+      return fs.realpathSync(current);
     }
     const parent = path.dirname(current);
-    if (parent === current) return undefined;
+    if (parent === current) return canonicalCwd;
     current = parent;
   }
 }
