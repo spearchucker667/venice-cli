@@ -68,6 +68,46 @@ describe('ContextManager', () => {
     assert.equal(messages.at(-1)?.tool_call_id, 'call-1');
   });
 
+  it('compacts on user-turn boundaries without splitting multi-tool exchanges', () => {
+    const ctx = new ContextManager();
+    ctx.addConversationMessage({ role: 'user', content: 'old turn' });
+    ctx.addConversationMessage({ role: 'assistant', content: 'old answer' });
+    ctx.addConversationMessage({ role: 'user', content: 'current turn' });
+    ctx.addConversationMessage({
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        { id: 'call-1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.ts"}' } },
+        { id: 'call-2', type: 'function', function: { name: 'read_file', arguments: '{"path":"b.ts"}' } },
+      ],
+    });
+    ctx.addToolResult('call-1', 'A');
+    ctx.addToolResult('call-2', 'B');
+    ctx.addConversationMessage({ role: 'assistant', content: 'done' });
+
+    ctx.compact({
+      objective: 'test',
+      completedWork: [],
+      remainingWork: [],
+      decisions: [],
+      discoveries: [],
+      filesRead: [],
+      filesChanged: [],
+      commandsRun: [],
+      failures: [],
+      importantConstraints: [],
+    }, 1);
+
+    const messages = ctx.buildMessages(minimalState());
+    assert.deepEqual(
+      messages.slice(1).map((message) => message.role),
+      ['user', 'assistant', 'tool', 'tool', 'assistant']
+    );
+    assert.equal(messages[1].content, 'current turn');
+    assert.equal(messages[3].tool_call_id, 'call-1');
+    assert.equal(messages[4].tool_call_id, 'call-2');
+  });
+
   it('estimates tokens', () => {
     const ctx = new ContextManager();
     ctx.addConversationMessage({ role: 'user', content: 'Hello world' });
