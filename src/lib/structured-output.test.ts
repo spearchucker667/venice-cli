@@ -162,6 +162,37 @@ test('parseStructuredContent extracts JSON from fenced responses', () => {
   assert.deepEqual(parsed, { final_answer: '4' });
 });
 
+test('parseStructuredContent does not terminate a fence on backticks inside JSON strings', () => {
+  const parsed = parseStructuredContent(
+    '```json\n{"final_answer":"Use ```markdown``` safely","nested":{"ok":true}}\n```'
+  );
+  assert.deepEqual(parsed, {
+    final_answer: 'Use ```markdown``` safely',
+    nested: { ok: true },
+  });
+});
+
+test('parseStructuredContent recovers a complete JSON object from an unclosed Markdown fence', () => {
+  const parsed = parseStructuredContent(
+    'Result follows:\n```json\n{"final_answer":"4","nested":{"ok":true}}'
+  );
+  assert.deepEqual(parsed, { final_answer: '4', nested: { ok: true } });
+});
+
+test('parseStructuredContent uses balanced JSON boundaries through prose and quoted braces', () => {
+  const parsed = parseStructuredContent(
+    'Result: {not json}. Actual: {"final_answer":"brace } and bracket ] stay in the string","items":[{"ok":true}]} trailing prose'
+  );
+  assert.deepEqual(parsed, {
+    final_answer: 'brace } and bracket ] stay in the string',
+    items: [{ ok: true }],
+  });
+});
+
+test('parseStructuredContent preserves direct scalar JSON', () => {
+  assert.equal(parseStructuredContent('"ready"'), 'ready');
+});
+
 test('validateAgainstSchema reports missing and extra fields', () => {
   const valid = {
     steps: [{ explanation: 'add', output: '2+2' }],
