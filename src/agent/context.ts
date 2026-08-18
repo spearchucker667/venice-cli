@@ -171,10 +171,26 @@ export class ContextManager {
   compact(summary: StructuredSummary, preserveTurns: number = 5): void {
     this.summary = summary;
 
-    // Preserve recent conversation turns to avoid complete context wipe
-    let startIndex = Math.max(0, this.conversation.length - (preserveTurns * 2));
+    // A "turn" is anchored by a user message and may contain any number of
+    // assistant/tool exchanges. Message-count slicing (for example N * 2)
+    // can cut into a multi-tool turn and discard the user instruction or an
+    // assistant tool_call while retaining later results. Preserve whole recent
+    // user turns instead so model history remains structurally coherent.
+    const turnsToPreserve = Math.max(1, Math.floor(preserveTurns));
+    const userTurnStarts: number[] = [];
+    for (let index = 0; index < this.conversation.length; index++) {
+      if (this.conversation[index].role === 'user') {
+        userTurnStarts.push(index);
+      }
+    }
 
-    // Ensure we don't start on a tool result without its preceding assistant call
+    let startIndex = 0;
+    if (userTurnStarts.length > turnsToPreserve) {
+      startIndex = userTurnStarts[userTurnStarts.length - turnsToPreserve];
+    }
+
+    // Imported/legacy histories can still begin with tool results. Never emit
+    // an orphan tool result as the first conversation message.
     while (startIndex < this.conversation.length && this.conversation[startIndex].role === 'tool') {
       startIndex++;
     }
