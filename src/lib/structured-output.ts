@@ -207,21 +207,120 @@ export function parseStructuredContent(content: string): unknown {
     throw new Error('Model returned an empty response; expected JSON.');
   }
 
-  const extracted = extractJson(trimmed);
+  // The normal structured-output path should already be exact JSON. Parse it
+  // first so JSON strings/arrays/scalars remain supported without heuristics.
   try {
-    return JSON.parse(extracted);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Model response was not valid JSON: ${reason}`);
+    return JSON.parse(trimmed);
+  } catch {
+    // Fall through to recovery for models that wrap JSON in prose/fences.
   }
+
+  // Preserve support for fenced scalar JSON while using the *last* fence as
+  // the closing marker. A non-greedy regex incorrectly treats ``` embedded in
+  // a JSON string as the end of the block.
+  const fenced = extractFencedCandidate(trimmed);
+  if (fenced !== undefined) {
+    try {
+      return JSON.parse(fenced);
+    } catch {
+      // A malformed/unclosed fence may still contain a complete object/array;
+      // the balanced scanner below can recover it safely.
+    }
+  }
+
+  const balanced = extractBalancedJsonValue(trimmed);
+  if (balanced !== undefined) {
+    return balanced;
+  }
+
+  throw new Error('Model response was not valid JSON: no complete JSON value could be extracted.');
 }
 
-function extractJson(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) {
-    return fenced[1].trim();
+/**
+ * Extract the body of the first Markdown code fence, preferring the final
+ * triple-backtick sequence as its close. This avoids terminating on backticks
+ * embedded inside a JSON string and still permits an unclosed fence when the
+ * remaining body itself is valid JSON.
+ */
+function extractFencedCandidate(text: string): string | undefined {
+  const opening = /```(?:json)?\s*/i.exec(text);
+  if (!opening || opening.index === undefined) return undefined;
+
+  const bodyStart = opening.index + opening[0].length;
+  const remainder = text.slice(bodyStart);
+  const closing = remainder.lastIndexOf('```');
+  const body = closing >= 0 ? remainder.slice(0, closing) : remainder;
+  const candidate = body.trim();
+  return candidate || undefined;
+}
+
+/**
+ * Find the first complete JSON object/array in arbitrary surrounding text.
+ * Delimiters inside quoted JSON strings are ignored, including escaped quotes
+ * and backslashes. Each balanced candidate is parsed before it is accepted so
+ * prose such as "use {braces}" cannot be mistaken for structured output.
+ */
+function extractBalancedJsonValue(text: string): unknown | undefined {
+  for (let start = 0; start < text.length; start++) {
+    const first = text[start];
+    if (first !== '{' && first !== '[') continue;
+
+    const candidate = balancedJsonCandidate(text, start);
+    if (candidate === undefined) continue;
+
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // This balanced region was not JSON; continue scanning for a later one.
+    }
   }
-  return text;
+  return undefined;
+}
+
+function balancedJsonCandidate(text: string, start: number): string | undefined {
+  const stack: Array<'}' | ']'> = [];
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index++) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      stack.push('}');
+      continue;
+    }
+    if (char === '[') {
+      stack.push(']');
+      continue;
+    }
+    if (char === '}' || char === ']') {
+      if (stack.length === 0 || stack[stack.length - 1] !== char) {
+        return undefined;
+      }
+      stack.pop();
+      if (stack.length === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+
+  return undefined;
 }
 
 export function validateAgainstSchema(
